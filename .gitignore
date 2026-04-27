@@ -1,0 +1,8 @@
+/target/
+
+# Loom run directories
+.loom/
+
+# Local scratch: roadmap notes and workflow drivers
+/ROADMAP.md
+/workflows/
