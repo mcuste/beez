@@ -1,10 +1,14 @@
+//! Validated workflow identifiers and dependency DAGs.
+
 use std::collections::HashMap;
 use std::fmt;
 
+/// A workflow task identifier containing only ASCII letters, digits, and underscores.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TaskId(String);
 
 impl TaskId {
+    /// Validates and creates a task identifier.
     pub fn new(value: impl Into<String>) -> Result<Self, TaskIdError> {
         let value = value.into();
 
@@ -22,6 +26,8 @@ impl TaskId {
         Ok(Self(value))
     }
 
+    /// Returns the validated identifier text.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -33,9 +39,12 @@ impl fmt::Display for TaskId {
     }
 }
 
+/// Reports a task identifier validation failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskIdError {
+    /// The identifier has no characters.
     Empty,
+    /// The identifier includes a character outside the allowed alphabet.
     InvalidCharacter(char),
 }
 
@@ -55,60 +64,98 @@ impl fmt::Display for TaskIdError {
 
 impl std::error::Error for TaskIdError {}
 
+/// A task and the tasks that must complete before it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Task {
-    pub id: TaskId,
-    pub depends_on: Vec<TaskId>,
+    id: TaskId,
+    depends_on: Vec<TaskId>,
 }
 
+impl Task {
+    /// Creates a task from a valid identifier and its declared dependencies.
+    #[must_use]
+    pub fn new(id: TaskId, depends_on: Vec<TaskId>) -> Self {
+        Self { id, depends_on }
+    }
+
+    /// Returns the task identifier.
+    #[must_use]
+    pub fn id(&self) -> &TaskId {
+        &self.id
+    }
+
+    /// Returns the declared dependency identifiers.
+    #[must_use]
+    pub fn dependencies(&self) -> &[TaskId] {
+        &self.depends_on
+    }
+}
+
+/// A validated, acyclic collection of workflow tasks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Workflow {
     tasks: Vec<Task>,
 }
 
 impl Workflow {
+    /// Validates task identifiers, dependencies, and dependency cycles.
     pub fn new(tasks: Vec<Task>) -> Result<Self, WorkflowError> {
-        let mut indexes = HashMap::with_capacity(tasks.len());
+        let mut dependencies = HashMap::with_capacity(tasks.len());
 
-        for (index, task) in tasks.iter().enumerate() {
-            if indexes.insert(task.id.clone(), index).is_some() {
+        for task in &tasks {
+            if dependencies
+                .insert(task.id.clone(), task.depends_on.clone())
+                .is_some()
+            {
                 return Err(WorkflowError::DuplicateTask(task.id.clone()));
             }
         }
 
-        for task in &tasks {
-            for dependency in &task.depends_on {
-                if dependency == &task.id {
-                    return Err(WorkflowError::SelfDependency(task.id.clone()));
+        for (task, task_dependencies) in &dependencies {
+            for dependency in task_dependencies {
+                if dependency == task {
+                    return Err(WorkflowError::SelfDependency(task.clone()));
                 }
-                if !indexes.contains_key(dependency) {
+                if !dependencies.contains_key(dependency) {
                     return Err(WorkflowError::UnknownDependency {
-                        task: task.id.clone(),
+                        task: task.clone(),
                         dependency: dependency.clone(),
                     });
                 }
             }
         }
 
-        let mut states = vec![Visit::Unseen; tasks.len()];
+        let mut states = HashMap::with_capacity(tasks.len());
         let mut trail = Vec::new();
-        for index in 0..tasks.len() {
-            visit(index, &tasks, &indexes, &mut states, &mut trail)?;
+        for task in &tasks {
+            visit(&task.id, &dependencies, &mut states, &mut trail)?;
         }
 
         Ok(Self { tasks })
     }
 
+    /// Returns tasks in declaration order.
+    #[must_use]
     pub fn tasks(&self) -> &[Task] {
         &self.tasks
     }
 }
 
+/// Reports workflow DAG validation failures.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkflowError {
+    /// More than one task uses this identifier.
     DuplicateTask(TaskId),
-    UnknownDependency { task: TaskId, dependency: TaskId },
+    /// A task names a dependency that is not part of the workflow.
+    UnknownDependency {
+        /// The task with the invalid dependency.
+        task: TaskId,
+        /// The missing dependency identifier.
+        dependency: TaskId,
+    },
+    /// A task directly depends on itself.
     SelfDependency(TaskId),
+    /// A sequence of task identifiers closes a dependency cycle.
     Cycle(Vec<TaskId>),
 }
 
@@ -145,36 +192,37 @@ enum Visit {
 }
 
 fn visit(
-    index: usize,
-    tasks: &[Task],
-    indexes: &HashMap<TaskId, usize>,
-    states: &mut [Visit],
+    id: &TaskId,
+    dependencies: &HashMap<TaskId, Vec<TaskId>>,
+    states: &mut HashMap<TaskId, Visit>,
     trail: &mut Vec<TaskId>,
 ) -> Result<(), WorkflowError> {
-    match states[index] {
+    match states.get(id).copied().unwrap_or(Visit::Unseen) {
         Visit::Complete => return Ok(()),
         Visit::Visiting => {
-            let start = trail
+            let start = trail.iter().position(|task| task == id).unwrap_or_default();
+            let cycle = trail
                 .iter()
-                .position(|task| task == &tasks[index].id)
-                .expect("visiting task is in the traversal trail");
-            let mut cycle = trail[start..].to_vec();
-            cycle.push(tasks[index].id.clone());
+                .skip(start)
+                .cloned()
+                .chain(std::iter::once(id.clone()))
+                .collect();
             return Err(WorkflowError::Cycle(cycle));
         }
         Visit::Unseen => {}
     }
 
-    states[index] = Visit::Visiting;
-    trail.push(tasks[index].id.clone());
+    states.insert(id.clone(), Visit::Visiting);
+    trail.push(id.clone());
 
-    for dependency in &tasks[index].depends_on {
-        let dependency_index = indexes[dependency];
-        visit(dependency_index, tasks, indexes, states, trail)?;
+    if let Some(task_dependencies) = dependencies.get(id) {
+        for dependency in task_dependencies {
+            visit(dependency, dependencies, states, trail)?;
+        }
     }
 
-    trail.pop();
-    states[index] = Visit::Complete;
+    let _ = trail.pop();
+    states.insert(id.clone(), Visit::Complete);
     Ok(())
 }
 
@@ -183,13 +231,13 @@ mod tests {
     use super::{Task, TaskId, TaskIdError, Workflow, WorkflowError};
 
     fn task(id: &str, depends_on: &[&str]) -> Task {
-        Task {
-            id: TaskId::new(id).unwrap(),
-            depends_on: depends_on
+        Task::new(
+            TaskId::new(id).unwrap(),
+            depends_on
                 .iter()
                 .map(|dependency| TaskId::new(*dependency).unwrap())
                 .collect(),
-        }
+        )
     }
 
     #[test]

@@ -1,3 +1,5 @@
+//! Loom command-line application.
+
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Write};
@@ -10,9 +12,7 @@ fn main() {
 }
 
 fn run(args: impl IntoIterator<Item = OsString>, output: &mut impl Write) -> Result<(), CliError> {
-    let mut args = args.into_iter();
-    let _program = args.next();
-    let arguments: Vec<_> = args.collect();
+    let arguments: Vec<_> = args.into_iter().skip(1).collect();
 
     match arguments.as_slice() {
         [] => {
