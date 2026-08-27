@@ -13,7 +13,7 @@ unused-ignored-advisory = "deny"
 confidence-threshold = 0.93
 private = { ignore = true }
 unused-allowed-license = "deny"
-allow = ["MIT"]
+allow = ["MIT", "Unicode-3.0"]
 
 [bans]
 multiple-versions = "allow"

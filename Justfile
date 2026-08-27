@@ -25,7 +25,7 @@ test:
     cargo test --workspace
 
 test-integration:
-    cargo test --workspace --test version
+    cargo test --workspace --test headless --test version
 
 verify:
     just fmt-check
@@ -34,5 +34,6 @@ verify:
     just machete
     just test
 
+[positional-arguments]
 run *args:
-    cargo run --package loom-cli -- {{ args }}
+    cargo run --package loom-cli -- "$@"

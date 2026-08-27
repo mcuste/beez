@@ -1,91 +1,100 @@
-//! Loom command-line application.
+//! Runs supported coding harnesses and direct process calls.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::io::{self, Write};
 
+use clap::{Args, Parser, Subcommand};
+use loom_process::{ExecutionRequest, HarnessCall, HeadlessHarness, ProcessCall, ProcessRunner};
+
+#[derive(Debug, Parser)]
+#[command(name = "loom", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run a supported coding harness or direct process.
+    Run(Run),
+}
+
+#[derive(Debug, Args)]
+struct Run {
+    #[command(subcommand)]
+    command: RunCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RunCommand {
+    /// Run Pi in headless mode.
+    Pi(Prompt),
+    /// Run Oh My Pi in headless mode.
+    Omp(Prompt),
+    /// Run a program without invoking a shell.
+    Command(Process),
+}
+
+#[derive(Debug, Args)]
+struct Prompt {
+    prompt: OsString,
+}
+
+#[derive(Debug, Args)]
+struct Process {
+    program: OsString,
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 1..
+    )]
+    arguments: Vec<OsString>,
+}
+
 fn main() {
-    if let Err(error) = run(std::env::args_os(), &mut io::stdout()) {
-        eprintln!("{error}");
-        std::process::exit(2);
-    }
-}
-
-fn run(args: impl IntoIterator<Item = OsString>, output: &mut impl Write) -> Result<(), CliError> {
-    let arguments: Vec<_> = args.into_iter().skip(1).collect();
-
-    match arguments.as_slice() {
-        [] => {
-            writeln!(output, "Usage: loom --version")?;
-            Ok(())
+    let status = match run(Cli::parse()) {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("{error}");
+            2
         }
-        [argument] if argument == "--help" || argument == "-h" => {
-            writeln!(output, "Usage: loom --version")?;
-            Ok(())
-        }
-        [argument] if argument == "--version" || argument == "-V" => {
-            writeln!(output, "loom {}", env!("CARGO_PKG_VERSION"))?;
-            Ok(())
-        }
-        [argument] => Err(CliError::UnknownArgument(argument.clone())),
-        _ => Err(CliError::UnexpectedArguments),
-    }
+    };
+
+    std::process::exit(status);
 }
 
-#[derive(Debug)]
-enum CliError {
-    Io(io::Error),
-    UnknownArgument(OsString),
-    UnexpectedArguments,
+fn run(cli: Cli) -> io::Result<i32> {
+    let request = match cli.command {
+        Command::Run(run) => run.command.into_request(),
+    };
+    let result = ProcessRunner.run(request)?;
+
+    io::stdout().write_all(result.stdout())?;
+    io::stderr().write_all(result.stderr())?;
+
+    Ok(result.status_code().unwrap_or(1))
 }
 
-impl From<io::Error> for CliError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl fmt::Display for CliError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl RunCommand {
+    fn into_request(self) -> ExecutionRequest {
         match self {
-            Self::Io(error) => error.fmt(formatter),
-            Self::UnknownArgument(argument) => {
-                write!(
-                    formatter,
-                    "unknown argument {:?}",
-                    argument.to_string_lossy()
-                )
-            }
-            Self::UnexpectedArguments => formatter.write_str("expected at most one argument"),
+            Self::Pi(Prompt { prompt }) => harness_request(HeadlessHarness::Pi, "pi", prompt),
+            Self::Omp(Prompt { prompt }) => harness_request(HeadlessHarness::Omp, "omp", prompt),
+            Self::Command(Process { program, arguments }) => ExecutionRequest::Command(
+                arguments
+                    .into_iter()
+                    .fold(ProcessCall::new(program), |call, argument| {
+                        call.argument(argument)
+                    }),
+            ),
         }
     }
 }
 
-impl std::error::Error for CliError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::UnknownArgument(_) | Self::UnexpectedArguments => None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::OsString;
-
-    use super::run;
-
-    #[test]
-    fn prints_the_release_version() {
-        let mut output = Vec::new();
-
-        run(
-            [OsString::from("loom"), OsString::from("--version")],
-            &mut output,
-        )
-        .unwrap();
-
-        assert_eq!(output, b"loom 0.1.0\n");
-    }
+fn harness_request(
+    harness: HeadlessHarness,
+    program: &'static str,
+    prompt: OsString,
+) -> ExecutionRequest {
+    ExecutionRequest::Harness(HarnessCall::new(harness, program, prompt))
 }

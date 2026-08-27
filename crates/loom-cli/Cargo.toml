@@ -10,5 +10,9 @@ repository.workspace = true
 name = "loom"
 path = "src/main.rs"
 
+
+[dependencies]
+clap.workspace = true
+loom-process.workspace = true
 [lints]
 workspace = true
