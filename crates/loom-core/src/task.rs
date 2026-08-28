@@ -55,6 +55,39 @@ impl fmt::Display for TaskId {
     }
 }
 
+/// Model and effort settings for a harness prompt.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HarnessOptions {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl HarnessOptions {
+    /// Builds harness options; `None` leaves the harness default.
+    #[must_use]
+    pub fn new(model: Option<String>, effort: Option<String>) -> Self {
+        Self { model, effort }
+    }
+
+    /// The requested model.
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// The requested reasoning effort.
+    #[must_use]
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+
+    /// True when neither model nor effort is set.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
+}
+
 /// A task action Loom can execute.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskRequest {
@@ -62,11 +95,15 @@ pub enum TaskRequest {
     Pi {
         /// Prompt for Pi.
         prompt: String,
+        /// Model and effort for Pi.
+        options: HarnessOptions,
     },
     /// Sends a prompt to Oh My Pi.
     Omp {
         /// Prompt for Oh My Pi.
         prompt: String,
+        /// Model and effort for Oh My Pi.
+        options: HarnessOptions,
     },
     /// Runs a program without invoking a shell.
     Command {
@@ -80,14 +117,14 @@ pub enum TaskRequest {
 impl TaskRequest {
     /// Builds a Pi request.
     #[must_use]
-    pub fn pi(prompt: String) -> Self {
-        Self::Pi { prompt }
+    pub fn pi(prompt: String, options: HarnessOptions) -> Self {
+        Self::Pi { prompt, options }
     }
 
     /// Builds an Oh My Pi request.
     #[must_use]
-    pub fn omp(prompt: String) -> Self {
-        Self::Omp { prompt }
+    pub fn omp(prompt: String, options: HarnessOptions) -> Self {
+        Self::Omp { prompt, options }
     }
 
     /// Builds a direct process request.

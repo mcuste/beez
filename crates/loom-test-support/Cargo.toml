@@ -1,13 +1,11 @@
 [package]
-name = "loom-process"
+name = "loom-test-support"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[dev-dependencies]
-loom-test-support = { workspace = true }
+publish = false
 
 [lints]
 workspace = true

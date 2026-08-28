@@ -25,7 +25,7 @@ test:
     cargo test --workspace
 
 test-integration:
-    cargo test --package loom-process --test process_runner
+    cargo test --package loom-process --test process_runner --test harness_contract
     cargo test --package loom-runner --test runner
     cargo test --package loom-cli --test headless --test version
 

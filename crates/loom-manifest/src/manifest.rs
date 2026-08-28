@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use loom_core::{TaskDefinition, TaskId, TaskRequest, Workflow};
+use loom_core::{HarnessOptions, TaskDefinition, TaskId, TaskRequest, Workflow};
 use serde::Deserialize;
 
 /// Reports an unreadable or invalid workflow manifest.
@@ -30,6 +30,8 @@ struct ManifestTask {
     depends_on: Vec<String>,
     harness: Option<Harness>,
     prompt: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
     command: Option<Vec<String>>,
 }
 
@@ -80,10 +82,14 @@ impl TryFrom<ManifestTask> for TaskDefinition {
                     .map_err(|error| error.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let options = HarnessOptions::new(task.model, task.effort);
         let request = match (task.harness, task.prompt, task.command) {
-            (Some(Harness::Pi), Some(prompt), None) => TaskRequest::pi(prompt),
-            (Some(Harness::Omp), Some(prompt), None) => TaskRequest::omp(prompt),
+            (Some(Harness::Pi), Some(prompt), None) => TaskRequest::pi(prompt, options),
+            (Some(Harness::Omp), Some(prompt), None) => TaskRequest::omp(prompt, options),
             (None, None, Some(mut command)) => {
+                if !options.is_empty() {
+                    return Err("model and effort require a harness task".into());
+                }
                 let Some(program) = command.first().cloned() else {
                     return Err("command must contain a program".into());
                 };

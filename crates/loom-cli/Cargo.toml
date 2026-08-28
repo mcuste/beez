@@ -16,5 +16,9 @@ clap.workspace = true
 loom-manifest = { path = "../loom-manifest" }
 loom-runner = { path = "../loom-runner" }
 loom-process.workspace = true
+
+[dev-dependencies]
+loom-test-support = { workspace = true }
+
 [lints]
 workspace = true

@@ -31,8 +31,8 @@ struct Run {
 #[derive(Debug, Subcommand)]
 enum RunCommand {
     Workflow(WorkflowFile),
-    Pi(Prompt),
-    Omp(Prompt),
+    Pi(HarnessRun),
+    Omp(HarnessRun),
     Command(Process),
 }
 
@@ -42,8 +42,14 @@ struct WorkflowFile {
 }
 
 #[derive(Debug, Args)]
-struct Prompt {
+struct HarnessRun {
     prompt: OsString,
+    /// Model the harness must use.
+    #[arg(long)]
+    model: Option<OsString>,
+    /// Reasoning effort the harness must use.
+    #[arg(long)]
+    effort: Option<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -75,15 +81,12 @@ fn run(cli: Cli) -> io::Result<i32> {
             Runner.run_workflow(&workflow, &mut render)
         }
         Command::Run(Run {
-            command: RunCommand::Pi(Prompt { prompt }),
-        }) => Runner.run_request(
-            harness_request(HeadlessHarness::Pi, "pi", prompt),
-            &mut render,
-        ),
+            command: RunCommand::Pi(run),
+        }) => Runner.run_request(harness_request(HeadlessHarness::Pi, "pi", run), &mut render),
         Command::Run(Run {
-            command: RunCommand::Omp(Prompt { prompt }),
+            command: RunCommand::Omp(run),
         }) => Runner.run_request(
-            harness_request(HeadlessHarness::Omp, "omp", prompt),
+            harness_request(HeadlessHarness::Omp, "omp", run),
             &mut render,
         ),
         Command::Run(Run {
@@ -112,7 +115,15 @@ fn render(event: &RunEvent) -> io::Result<()> {
 fn harness_request(
     harness: HeadlessHarness,
     program: &'static str,
-    prompt: OsString,
+    run: HarnessRun,
 ) -> ExecutionRequest {
-    ExecutionRequest::Harness(HarnessCall::new(harness, program, prompt))
+    let mut call = HarnessCall::new(harness, program, run.prompt);
+    if let Some(model) = run.model {
+        call = call.model(model);
+    }
+    if let Some(effort) = run.effort {
+        call = call.effort(effort);
+    }
+
+    ExecutionRequest::Harness(call)
 }

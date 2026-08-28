@@ -12,5 +12,8 @@ noyalib = "0.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 
+[dev-dependencies]
+loom-test-support = { workspace = true }
+
 [lints]
 workspace = true

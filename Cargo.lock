@@ -154,6 +154,7 @@ dependencies = [
  "loom-manifest",
  "loom-process",
  "loom-runner",
+ "loom-test-support",
 ]
 
 [[package]]
@@ -165,6 +166,7 @@ name = "loom-manifest"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+ "loom-test-support",
  "noyalib",
  "serde",
  "serde_json",
@@ -173,6 +175,9 @@ dependencies = [
 [[package]]
 name = "loom-process"
 version = "0.1.0"
+dependencies = [
+ "loom-test-support",
+]
 
 [[package]]
 name = "loom-runner"
@@ -180,7 +185,12 @@ version = "0.1.0"
 dependencies = [
  "loom-core",
  "loom-process",
+ "loom-test-support",
 ]
+
+[[package]]
+name = "loom-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "memchr"

@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io;
 
-use loom_core::{TaskIndex, TaskRequest, Workflow, WorkflowExecution};
+use loom_core::{HarnessOptions, TaskIndex, TaskRequest, Workflow, WorkflowExecution};
 use loom_process::{
     ExecutionRequest, HarnessCall, HeadlessHarness, ProcessCall, ProcessOutput, ProcessRunner,
 };
@@ -167,16 +167,12 @@ fn finish_tasks(
 
 fn execution_request(request: TaskRequest) -> ExecutionRequest {
     match request {
-        TaskRequest::Pi { prompt } => ExecutionRequest::Harness(HarnessCall::new(
-            HeadlessHarness::Pi,
-            "pi",
-            OsString::from(prompt),
-        )),
-        TaskRequest::Omp { prompt } => ExecutionRequest::Harness(HarnessCall::new(
-            HeadlessHarness::Omp,
-            "omp",
-            OsString::from(prompt),
-        )),
+        TaskRequest::Pi { prompt, options } => {
+            harness_request(HeadlessHarness::Pi, "pi", prompt, &options)
+        }
+        TaskRequest::Omp { prompt, options } => {
+            harness_request(HeadlessHarness::Omp, "omp", prompt, &options)
+        }
         TaskRequest::Command { program, arguments } => ExecutionRequest::Command(
             arguments
                 .into_iter()
@@ -185,4 +181,21 @@ fn execution_request(request: TaskRequest) -> ExecutionRequest {
                 }),
         ),
     }
+}
+
+fn harness_request(
+    harness: HeadlessHarness,
+    program: &'static str,
+    prompt: String,
+    options: &HarnessOptions,
+) -> ExecutionRequest {
+    let mut call = HarnessCall::new(harness, program, OsString::from(prompt));
+    if let Some(model) = options.model() {
+        call = call.model(model);
+    }
+    if let Some(effort) = options.effort() {
+        call = call.effort(effort);
+    }
+
+    ExecutionRequest::Harness(call)
 }

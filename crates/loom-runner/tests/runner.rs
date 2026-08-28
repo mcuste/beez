@@ -1,17 +1,18 @@
 //! Runner integration tests.
 #![cfg(unix)]
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use loom_core::{TaskDefinition, TaskIndex, TaskRequest, Workflow};
 use loom_process::{ExecutionRequest, ProcessCall};
 use loom_runner::{RunEvent, Runner};
+use loom_test_support::TemporaryDirectory;
 
 macro_rules! assert_ok {
     ($result:expr) => {{
@@ -105,7 +106,7 @@ fn runs_ready_tasks_and_releases_dependents() {
 
 #[test]
 fn blocks_dependents_after_a_failed_task() {
-    let directory = assert_ok!(temporary_directory("failed-dependency"));
+    let directory = assert_ok!(TemporaryDirectory::new("runner-failed-dependency"));
     let marker = directory.path().join("blocked-task-ran");
     let workflow = assert_ok!(Workflow::try_from(vec![
         assert_ok!(command_task(
@@ -143,7 +144,7 @@ fn blocks_dependents_after_a_failed_task() {
 
 #[test]
 fn reports_siblings_that_completed_when_a_task_cannot_start() {
-    let directory = assert_ok!(temporary_directory("missing-program"));
+    let directory = assert_ok!(TemporaryDirectory::new("runner-missing-program"));
     let missing_program = directory.path().join("missing-program");
     let workflow = assert_ok!(Workflow::try_from(vec![
         assert_ok!(command_task(
@@ -187,7 +188,7 @@ fn reports_siblings_that_completed_when_a_task_cannot_start() {
 
 #[test]
 fn reports_direct_start_failures_as_terminal_events() {
-    let directory = assert_ok!(temporary_directory("direct-missing-program"));
+    let directory = assert_ok!(TemporaryDirectory::new("runner-direct-missing-program"));
     let mut events = Vec::new();
 
     let error = assert_err!(Runner.run_request(
@@ -213,7 +214,7 @@ fn reports_direct_start_failures_as_terminal_events() {
 
 #[test]
 fn stops_before_starting_a_request_when_the_callback_fails() {
-    let directory = assert_ok!(temporary_directory("callback-failure"));
+    let directory = assert_ok!(TemporaryDirectory::new("runner-callback-failure"));
     let marker = directory.path().join("request-ran");
     let request = ExecutionRequest::Command(
         ProcessCall::new("bash")
@@ -232,7 +233,7 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
 
 #[test]
 fn starts_independent_processes_before_either_can_finish() {
-    let directory = assert_ok!(temporary_directory("concurrent-tasks"));
+    let directory = assert_ok!(TemporaryDirectory::new("runner-concurrent-tasks"));
     let first_ready = directory.path().join("first-ready");
     let first_release = directory.path().join("first-release");
     let second_ready = directory.path().join("second-ready");
@@ -345,32 +346,6 @@ fn event_position(
         .iter()
         .position(predicate)
         .ok_or_else(|| io::Error::other("required lifecycle event was not reported"))
-}
-
-struct TemporaryDirectory(PathBuf);
-
-impl TemporaryDirectory {
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn temporary_directory(name: &str) -> io::Result<TemporaryDirectory> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    let directory =
-        std::env::temp_dir().join(format!("loom-runner-{name}-{}-{timestamp}", process::id()));
-
-    fs::create_dir(&directory)?;
-    Ok(TemporaryDirectory(directory))
 }
 
 fn waiting_task(

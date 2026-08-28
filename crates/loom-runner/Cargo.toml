@@ -10,5 +10,8 @@ repository.workspace = true
 loom-core = { path = "../loom-core" }
 loom-process = { path = "../loom-process" }
 
+[dev-dependencies]
+loom-test-support = { workspace = true }
+
 [lints]
 workspace = true
