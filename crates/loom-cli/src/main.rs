@@ -1,10 +1,13 @@
-//! Runs supported coding harnesses and direct process calls.
+//! Loom's user-facing command-line interface.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use loom_process::{ExecutionRequest, HarnessCall, HeadlessHarness, ProcessCall, ProcessRunner};
+use loom_manifest::load;
+use loom_process::{ExecutionRequest, HarnessCall, HeadlessHarness, ProcessCall};
+use loom_runner::{RunEvent, Runner};
 
 #[derive(Debug, Parser)]
 #[command(name = "loom", version)]
@@ -15,7 +18,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run a supported coding harness or direct process.
+    /// Run a supported coding harness, workflow, or direct process.
     Run(Run),
 }
 
@@ -27,12 +30,15 @@ struct Run {
 
 #[derive(Debug, Subcommand)]
 enum RunCommand {
-    /// Run Pi in headless mode.
+    Workflow(WorkflowFile),
     Pi(Prompt),
-    /// Run Oh My Pi in headless mode.
     Omp(Prompt),
-    /// Run a program without invoking a shell.
     Command(Process),
+}
+
+#[derive(Debug, Args)]
+struct WorkflowFile {
+    path: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -43,11 +49,7 @@ struct Prompt {
 #[derive(Debug, Args)]
 struct Process {
     program: OsString,
-    #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        num_args = 1..
-    )]
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
     arguments: Vec<OsString>,
 }
 
@@ -59,36 +61,52 @@ fn main() {
             2
         }
     };
-
     std::process::exit(status);
 }
 
 fn run(cli: Cli) -> io::Result<i32> {
-    let request = match cli.command {
-        Command::Run(run) => run.command.into_request(),
-    };
-    let result = ProcessRunner.run(request)?;
-
-    io::stdout().write_all(result.stdout())?;
-    io::stderr().write_all(result.stderr())?;
-
-    Ok(result.status_code().unwrap_or(1))
-}
-
-impl RunCommand {
-    fn into_request(self) -> ExecutionRequest {
-        match self {
-            Self::Pi(Prompt { prompt }) => harness_request(HeadlessHarness::Pi, "pi", prompt),
-            Self::Omp(Prompt { prompt }) => harness_request(HeadlessHarness::Omp, "omp", prompt),
-            Self::Command(Process { program, arguments }) => ExecutionRequest::Command(
+    let mut render = render;
+    match cli.command {
+        Command::Run(Run {
+            command: RunCommand::Workflow(WorkflowFile { path }),
+        }) => {
+            let workflow = load(&path)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            Runner.run_workflow(&workflow, &mut render)
+        }
+        Command::Run(Run {
+            command: RunCommand::Pi(Prompt { prompt }),
+        }) => Runner.run_request(
+            harness_request(HeadlessHarness::Pi, "pi", prompt),
+            &mut render,
+        ),
+        Command::Run(Run {
+            command: RunCommand::Omp(Prompt { prompt }),
+        }) => Runner.run_request(
+            harness_request(HeadlessHarness::Omp, "omp", prompt),
+            &mut render,
+        ),
+        Command::Run(Run {
+            command: RunCommand::Command(Process { program, arguments }),
+        }) => Runner.run_request(
+            ExecutionRequest::Command(
                 arguments
                     .into_iter()
                     .fold(ProcessCall::new(program), |call, argument| {
                         call.argument(argument)
                     }),
             ),
-        }
+            &mut render,
+        ),
     }
+}
+
+fn render(event: &RunEvent) -> io::Result<()> {
+    if let RunEvent::Finished { output, .. } = event {
+        io::stdout().write_all(output.stdout())?;
+        io::stderr().write_all(output.stderr())?;
+    }
+    Ok(())
 }
 
 fn harness_request(

@@ -10,8 +10,9 @@ fn reports_release_version() {
         .expect("Loom binary starts");
 
     assert!(output.status.success());
+    let version = env!("CARGO_PKG_VERSION");
     assert_eq!(
         std::str::from_utf8(&output.stdout).expect("version output is UTF-8"),
-        "loom 0.1.0\n"
+        format!("loom {version}\n")
     );
 }

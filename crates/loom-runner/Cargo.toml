@@ -1,0 +1,14 @@
+[package]
+name = "loom-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+loom-core = { path = "../loom-core" }
+loom-process = { path = "../loom-process" }
+
+[lints]
+workspace = true

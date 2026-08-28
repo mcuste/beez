@@ -88,6 +88,101 @@ fn runs_a_command_with_literal_arguments() {
     );
 }
 
+#[test]
+fn runs_a_yaml_workflow_in_dependency_order() {
+    let directory = temporary_directory("yaml-workflow").unwrap();
+    let state = directory.0.join("state");
+    let workflow = directory.0.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        format!(
+            "tasks:\n  - id: prepare\n    command: [bash, -c, 'printf ready > {state}']\n  - id: test\n    depends_on: [prepare]\n    command: [bash, -c, 'test \"$(cat {state})\" = ready && printf done']\n",
+            state = state.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"done");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn returns_a_failed_workflow_status_and_blocks_dependents() {
+    let directory = temporary_directory("failed-workflow").unwrap();
+    let marker = directory.0.join("blocked");
+    let workflow = directory.0.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        format!(
+            "tasks:\n  - id: fail\n    command: [bash, -c, 'printf failed-out; printf failed-err >&2; exit 23']\n  - id: blocked\n    depends_on: [fail]\n    command: [bash, -c, 'touch {marker}']\n",
+            marker = marker.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(output.stdout, b"failed-out");
+    assert_eq!(output.stderr, b"failed-err");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn runs_a_json_workflow() {
+    let directory = temporary_directory("json-workflow").unwrap();
+    let workflow = directory.0.join("workflow.json");
+    fs::write(
+        &workflow,
+        r#"{"tasks":[{"id":"test","command":["bash","-c","printf json"]}]}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"json");
+    assert!(output.stderr.is_empty());
+}
+#[test]
+fn reports_invalid_workflow_manifests() {
+    let directory = temporary_directory("invalid-workflow").unwrap();
+    let workflow = directory.0.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: test\n    depends_on: [prepare]\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"task test depends on unknown task prepare\n"
+    );
+}
+
 fn run_harness(name: &str) -> Result<Output, Box<dyn Error>> {
     let directory = temporary_directory(name)?;
     let program = directory.0.join(name);

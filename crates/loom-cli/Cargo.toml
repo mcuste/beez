@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+loom-manifest = { path = "../loom-manifest" }
+loom-runner = { path = "../loom-runner" }
 loom-process.workspace = true
 [lints]
 workspace = true

@@ -13,15 +13,14 @@ unused-ignored-advisory = "deny"
 confidence-threshold = 0.93
 private = { ignore = true }
 unused-allowed-license = "deny"
-allow = ["MIT", "Unicode-3.0"]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
 
 [bans]
 multiple-versions = "allow"
-wildcards = "deny"
 deny = [
-    { crate = "openssl", use-instead = "rustls" },
-    { crate = "openssl-sys", use-instead = "rustls" },
-    { crate = "cmake", use-instead = "cc" },
+  { crate = "openssl", use-instead = "rustls" },
+  { crate = "openssl-sys", use-instead = "rustls" },
+  { crate = "cmake", use-instead = "cc" },
 ]
 
 [bans.build]

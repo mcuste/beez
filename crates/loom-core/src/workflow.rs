@@ -46,6 +46,14 @@ impl fmt::Display for WorkflowError {
 
 impl std::error::Error for WorkflowError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+}
+
 /// A validated, acyclic collection of workflow tasks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Workflow {
@@ -57,6 +65,21 @@ impl Workflow {
     #[must_use]
     pub fn tasks(&self) -> &[Task] {
         &self.tasks
+    }
+
+    /// Starts tracking one execution of this workflow.
+    #[must_use]
+    pub fn execution(&self) -> WorkflowExecution<'_> {
+        WorkflowExecution {
+            workflow: self,
+            statuses: vec![TaskStatus::Pending; self.tasks.len()],
+        }
+    }
+
+    /// Returns the task at `index`.
+    #[must_use]
+    pub fn task(&self, index: TaskIndex) -> Option<&Task> {
+        self.tasks.get(index.position())
     }
 }
 
@@ -79,10 +102,71 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
             .map(|(definition, dependencies)| Task {
                 id: definition.id,
                 dependencies,
+                request: definition.request,
             })
             .collect();
 
         Ok(Self { tasks })
+    }
+}
+
+/// Tracks task readiness and completion for one workflow execution.
+#[derive(Debug)]
+pub struct WorkflowExecution<'workflow> {
+    workflow: &'workflow Workflow,
+    statuses: Vec<TaskStatus>,
+}
+
+impl WorkflowExecution<'_> {
+    /// Returns all pending tasks whose dependencies succeeded.
+    #[must_use]
+    pub fn ready(&self) -> Vec<TaskIndex> {
+        self.workflow
+            .tasks
+            .iter()
+            .zip(&self.statuses)
+            .enumerate()
+            .filter(|(_, (task, status))| {
+                **status == TaskStatus::Pending
+                    && task.dependencies().iter().all(|dependency| {
+                        self.statuses.get(dependency.position()) == Some(&TaskStatus::Succeeded)
+                    })
+            })
+            .map(|(index, _)| TaskIndex(index))
+            .collect()
+    }
+
+    /// Marks a ready task as running and returns it.
+    pub fn start(&mut self, index: TaskIndex) -> Option<&Task> {
+        if !self.ready().contains(&index) {
+            return None;
+        }
+
+        *self.statuses.get_mut(index.position())? = TaskStatus::Running;
+        self.workflow.task(index)
+    }
+
+    /// Records a running task's outcome.
+    pub fn complete(&mut self, index: TaskIndex, succeeded: bool) -> bool {
+        let Some(status) = self.statuses.get_mut(index.position()) else {
+            return false;
+        };
+        if *status != TaskStatus::Running {
+            return false;
+        }
+
+        *status = if succeeded {
+            TaskStatus::Succeeded
+        } else {
+            TaskStatus::Failed
+        };
+        true
+    }
+
+    /// True while tasks remain pending.
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        self.statuses.contains(&TaskStatus::Pending)
     }
 }
 
@@ -208,14 +292,9 @@ fn visit<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use crate::task::{TaskDefinition, TaskIndex, TaskRequest};
 
-    use crate::task::{TaskDefinition, TaskIndex};
-
-    use super::{
-        Workflow, WorkflowError, resolve_all_dependencies, resolve_dependencies, task_indexes,
-        validate_acyclic, visit,
-    };
+    use super::{Workflow, WorkflowError};
 
     fn task(id: &str, depends_on: &[&str]) -> TaskDefinition {
         TaskDefinition::new(
@@ -224,110 +303,137 @@ mod tests {
                 .iter()
                 .map(|dependency| dependency.parse().unwrap())
                 .collect(),
+            TaskRequest::command("true".into(), Vec::new()),
         )
     }
-
     #[test]
-    fn indexes_tasks_in_declaration_order() {
-        let definitions = vec![task("build", &[]), task("prepare", &[])];
+    fn does_not_start_a_task_before_its_dependencies_succeed() {
+        let workflow =
+            Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
+        let mut sut = workflow.execution();
 
-        let sut = task_indexes(&definitions).unwrap();
-
-        assert_eq!(
-            sut.get(&definitions.first().unwrap().id),
-            Some(&TaskIndex(0))
-        );
-        assert_eq!(
-            sut.get(&definitions.last().unwrap().id),
-            Some(&TaskIndex(1))
-        );
+        assert!(sut.start(TaskIndex(1)).is_none());
+        assert_eq!(sut.ready(), [TaskIndex(0)]);
     }
 
     #[test]
-    fn resolves_a_task_dependency_to_its_index() {
-        let definitions = vec![task("build", &["prepare"]), task("prepare", &[])];
-        let indexes = task_indexes(&definitions).unwrap();
+    fn does_not_start_a_task_twice() {
+        let workflow = Workflow::try_from(vec![task("prepare", &[])]).unwrap();
+        let mut sut = workflow.execution();
+        assert!(sut.start(TaskIndex(0)).is_some());
 
-        let (dependencies, dependency_ids) =
-            resolve_dependencies(definitions.first().unwrap(), TaskIndex(0), &indexes).unwrap();
-
-        assert_eq!(dependencies, [TaskIndex(1)]);
-        assert_eq!(dependency_ids, [&definitions.last().unwrap().id]);
+        assert!(sut.start(TaskIndex(0)).is_none());
+        assert!(sut.ready().is_empty());
     }
 
     #[test]
-    fn resolves_all_task_dependencies() {
-        let definitions = vec![task("build", &["prepare"]), task("prepare", &[])];
-        let indexes = task_indexes(&definitions).unwrap();
+    fn does_not_complete_a_task_that_has_not_started() {
+        let workflow = Workflow::try_from(vec![task("prepare", &[])]).unwrap();
+        let mut sut = workflow.execution();
 
-        let (dependencies, dependency_ids) =
-            resolve_all_dependencies(&definitions, &indexes).unwrap();
-
-        assert_eq!(dependencies, [vec![TaskIndex(1)], vec![]]);
-        assert_eq!(
-            dependency_ids
-                .get(&definitions.first().unwrap().id)
-                .unwrap()
-                .as_slice(),
-            [&definitions.last().unwrap().id]
-        );
+        assert!(!sut.complete(TaskIndex(0), true));
+        assert_eq!(sut.ready(), [TaskIndex(0)]);
     }
 
     #[test]
-    fn detects_a_cycle_in_resolved_dependencies() {
-        let definitions = vec![task("prepare", &["build"]), task("build", &["prepare"])];
-        let indexes = task_indexes(&definitions).unwrap();
-        let (_, dependencies) = resolve_all_dependencies(&definitions, &indexes).unwrap();
+    fn does_not_change_a_completed_task_outcome() {
+        let workflow =
+            Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
+        let mut sut = workflow.execution();
+        assert!(sut.start(TaskIndex(0)).is_some());
+        assert!(sut.complete(TaskIndex(0), true));
 
-        let error = validate_acyclic(&definitions, &dependencies).unwrap_err();
-
-        assert_eq!(
-            error,
-            WorkflowError::Cycle(vec![
-                "prepare".parse().unwrap(),
-                "build".parse().unwrap(),
-                "prepare".parse().unwrap(),
-            ])
-        );
+        assert!(!sut.complete(TaskIndex(0), false));
+        assert_eq!(sut.ready(), [TaskIndex(1)]);
     }
 
     #[test]
-    fn visit_reports_the_cycle_path() {
-        let definitions = vec![task("prepare", &["build"]), task("build", &["prepare"])];
-        let indexes = task_indexes(&definitions).unwrap();
-        let (_, dependencies) = resolve_all_dependencies(&definitions, &indexes).unwrap();
-        let mut states = HashMap::new();
-        let mut trail = Vec::new();
+    fn releases_tasks_only_after_all_dependencies_succeed() {
+        let workflow = Workflow::try_from(vec![
+            task("prepare", &[]),
+            task("build", &[]),
+            task("test", &["prepare", "build"]),
+        ])
+        .unwrap();
+        let mut sut = workflow.execution();
 
-        let error = visit(
-            &definitions.first().unwrap().id,
-            &dependencies,
-            &mut states,
-            &mut trail,
-        )
-        .unwrap_err();
+        assert_eq!(sut.ready(), [TaskIndex(0), TaskIndex(1)]);
+        assert!(sut.start(TaskIndex(0)).is_some());
+        assert!(sut.complete(TaskIndex(0), true));
+        assert_eq!(sut.ready(), [TaskIndex(1)]);
+        assert!(sut.start(TaskIndex(1)).is_some());
+        assert!(sut.complete(TaskIndex(1), true));
+        assert_eq!(sut.ready(), [TaskIndex(2)]);
+    }
 
-        assert_eq!(
-            error,
-            WorkflowError::Cycle(vec![
-                "prepare".parse().unwrap(),
-                "build".parse().unwrap(),
-                "prepare".parse().unwrap(),
-            ])
-        );
+    #[test]
+    fn blocks_tasks_when_any_dependency_fails() {
+        let workflow = Workflow::try_from(vec![
+            task("prepare", &[]),
+            task("build", &[]),
+            task("test", &["prepare", "build"]),
+        ])
+        .unwrap();
+        let mut sut = workflow.execution();
+        assert!(sut.start(TaskIndex(0)).is_some());
+        assert!(sut.complete(TaskIndex(0), true));
+        assert!(sut.start(TaskIndex(1)).is_some());
+
+        assert!(sut.complete(TaskIndex(1), false));
+        assert!(sut.ready().is_empty());
+        assert!(sut.has_pending());
+    }
+
+    #[test]
+    fn releases_dependents_after_predecessors_succeed() {
+        let workflow =
+            Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
+        let mut sut = workflow.execution();
+
+        assert_eq!(sut.ready(), [TaskIndex(0)]);
+        assert_eq!(sut.start(TaskIndex(0)).unwrap().id().as_str(), "prepare");
+        assert!(sut.complete(TaskIndex(0), true));
+        assert_eq!(sut.ready(), [TaskIndex(1)]);
+    }
+
+    #[test]
+    fn does_not_release_dependents_after_predecessors_fail() {
+        let workflow =
+            Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
+        let mut sut = workflow.execution();
+
+        assert!(sut.start(TaskIndex(0)).is_some());
+        assert!(sut.complete(TaskIndex(0), false));
+
+        assert!(sut.ready().is_empty());
+        assert!(sut.has_pending());
     }
 
     #[test]
     fn resolves_dependencies_to_task_indexes() {
-        let workflow =
-            Workflow::try_from(vec![task("build", &["prepare"]), task("prepare", &[])]).unwrap();
+        let workflow = Workflow::try_from(vec![
+            task("build", &["prepare", "lint"]),
+            task("prepare", &[]),
+            task("lint", &[]),
+        ])
+        .unwrap();
 
         let build = workflow.tasks().first().unwrap();
-        let prepare = workflow.tasks().last().unwrap();
+        let prepare = workflow.tasks().get(1).unwrap();
+        let lint = workflow.tasks().last().unwrap();
         assert_eq!(build.id().as_str(), "build");
-        assert_eq!(build.dependencies().first().unwrap().position(), 1);
+        assert_eq!(
+            build
+                .dependencies()
+                .iter()
+                .map(|dependency| dependency.position())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
         assert_eq!(prepare.id().as_str(), "prepare");
         assert!(prepare.dependencies().is_empty());
+        assert_eq!(lint.id().as_str(), "lint");
+        assert!(lint.dependencies().is_empty());
     }
 
     #[test]
@@ -376,6 +482,26 @@ mod tests {
             WorkflowError::Cycle(vec![
                 "prepare".parse().unwrap(),
                 "build".parse().unwrap(),
+                "prepare".parse().unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_three_task_dependency_cycles_with_closed_path() {
+        let error = Workflow::try_from(vec![
+            task("prepare", &["build"]),
+            task("build", &["test"]),
+            task("test", &["prepare"]),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            WorkflowError::Cycle(vec![
+                "prepare".parse().unwrap(),
+                "build".parse().unwrap(),
+                "test".parse().unwrap(),
                 "prepare".parse().unwrap(),
             ])
         );

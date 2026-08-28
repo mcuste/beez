@@ -3,5 +3,5 @@
 mod task;
 mod workflow;
 
-pub use task::{Task, TaskDefinition, TaskId, TaskIdError, TaskIndex};
-pub use workflow::{Workflow, WorkflowError};
+pub use task::{Task, TaskDefinition, TaskId, TaskIdError, TaskIndex, TaskRequest};
+pub use workflow::{Workflow, WorkflowError, WorkflowExecution};

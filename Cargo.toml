@@ -2,6 +2,8 @@
 members = [
   "crates/loom-core",
   "crates/loom-process",
+  "crates/loom-manifest",
+  "crates/loom-runner",
   "crates/loom-cli",
 ]
 default-members = ["crates/loom-cli"]
@@ -16,7 +18,7 @@ repository = "https://github.com/mcuste/loom"
 
 [workspace.dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
-loom-process = { path = "crates/loom-process", version = "0.1.0" }
+loom-process = { path = "crates/loom-process" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
