@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use loom_core::{HarnessOptions, TaskRequest};
+use loom_core::{HarnessOptions, HeadlessHarness, TaskRequest};
 use loom_manifest::{ManifestError, load};
 use loom_test_support::TemporaryDirectory;
 
@@ -28,7 +28,11 @@ fn loads_yaml_tasks_and_resolves_dependencies() {
     assert_eq!(inspect.dependencies(), []);
     assert_eq!(
         inspect.request(),
-        &TaskRequest::pi("inspect the repository".into(), HarnessOptions::default())
+        &TaskRequest::harness(
+            HeadlessHarness::Pi,
+            "inspect the repository".into(),
+            HarnessOptions::default()
+        )
     );
     assert_eq!(summarize.id().as_str(), "summarize");
     assert_eq!(
@@ -41,7 +45,11 @@ fn loads_yaml_tasks_and_resolves_dependencies() {
     );
     assert_eq!(
         summarize.request(),
-        &TaskRequest::omp("summarize the findings".into(), HarnessOptions::default())
+        &TaskRequest::harness(
+            HeadlessHarness::Omp,
+            "summarize the findings".into(),
+            HarnessOptions::default()
+        )
     );
     assert_eq!(test.id().as_str(), "test");
     assert_eq!(
@@ -93,53 +101,10 @@ fn loads_harness_model_and_effort() {
 
     assert_eq!(
         task.request(),
-        &TaskRequest::pi(
+        &TaskRequest::harness(
+            HeadlessHarness::Pi,
             "inspect the repository".into(),
             HarnessOptions::new(Some("opus".into()), Some("high".into())),
-        )
-    );
-}
-
-#[test]
-fn loads_a_harness_model_without_an_effort() {
-    let directory = TemporaryDirectory::new("manifest-harness-model-only").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: omp\n    prompt: inspect the repository\n    model: opus\n",
-    )
-    .unwrap();
-
-    let workflow = load(&manifest).unwrap();
-    let task = workflow.tasks().first().unwrap();
-
-    assert_eq!(
-        task.request(),
-        &TaskRequest::omp(
-            "inspect the repository".into(),
-            HarnessOptions::new(Some("opus".into()), None),
-        )
-    );
-}
-
-#[test]
-fn loads_a_harness_effort_without_a_model() {
-    let directory = TemporaryDirectory::new("manifest-harness-effort-only").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: omp\n    prompt: inspect the repository\n    effort: high\n",
-    )
-    .unwrap();
-
-    let workflow = load(&manifest).unwrap();
-    let task = workflow.tasks().first().unwrap();
-
-    assert_eq!(
-        task.request(),
-        &TaskRequest::omp(
-            "inspect the repository".into(),
-            HarnessOptions::new(None, Some("high".into())),
         )
     );
 }
@@ -177,6 +142,88 @@ fn rejects_an_effort_on_command_tasks() {
 }
 
 #[test]
+fn loads_claude_and_codex_harness_tasks() {
+    let directory = TemporaryDirectory::new("manifest-claude-codex").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: inspect\n    harness: claude\n    prompt: inspect the repository\n  - id: review\n    depends_on: [inspect]\n    harness: codex\n    prompt: review the findings\n    effort: high\n",
+    )
+    .unwrap();
+
+    let workflow = load(&manifest).unwrap();
+    let inspect = workflow.tasks().first().unwrap();
+    let review = workflow.tasks().get(1).unwrap();
+
+    assert_eq!(
+        inspect.request(),
+        &TaskRequest::harness(
+            HeadlessHarness::Claude,
+            "inspect the repository".into(),
+            HarnessOptions::default(),
+        )
+    );
+    assert_eq!(
+        review.request(),
+        &TaskRequest::harness(
+            HeadlessHarness::Codex,
+            "review the findings".into(),
+            HarnessOptions::new(None, Some("high".into())),
+        )
+    );
+}
+
+#[test]
+fn reports_the_rejected_harness_name() {
+    let directory = TemporaryDirectory::new("manifest-unsupported-harness").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: inspect\n    harness: cursor\n    prompt: inspect the repository\n",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error)) if error.contains("cursor")
+    ));
+}
+
+#[test]
+fn rejects_a_harness_without_a_prompt() {
+    let directory = TemporaryDirectory::new("manifest-harness-without-prompt").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: inspect\n    harness: claude\n",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error))
+            if error == "task must define either harness and prompt, or command"
+    ));
+}
+
+#[test]
+fn rejects_a_prompt_without_a_harness() {
+    let directory = TemporaryDirectory::new("manifest-prompt-without-harness").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: inspect\n    prompt: inspect the repository\n",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error))
+            if error == "task must define either harness and prompt, or command"
+    ));
+}
+
+#[test]
 fn loads_json_harness_model_and_effort() {
     let directory = TemporaryDirectory::new("manifest-json-harness-options").unwrap();
     let manifest = write_manifest(
@@ -191,7 +238,8 @@ fn loads_json_harness_model_and_effort() {
 
     assert_eq!(
         task.request(),
-        &TaskRequest::pi(
+        &TaskRequest::harness(
+            HeadlessHarness::Pi,
             "inspect".into(),
             HarnessOptions::new(Some("opus".into()), Some("high".into())),
         )
@@ -272,6 +320,17 @@ fn rejects_invalid_task_ids() {
     .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
+}
+
+#[test]
+fn rejects_a_workflow_without_tasks() {
+    let directory = TemporaryDirectory::new("manifest-without-tasks").unwrap();
+    let manifest = write_manifest(&directory, "yaml", "tasks: []\n").unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error)) if error == "workflow must define at least one task"
+    ));
 }
 
 #[test]

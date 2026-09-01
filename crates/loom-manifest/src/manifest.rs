@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use loom_core::{HarnessOptions, TaskDefinition, TaskId, TaskRequest, Workflow};
+use loom_core::{HarnessOptions, HeadlessHarness, TaskDefinition, TaskId, TaskRequest, Workflow};
 use serde::Deserialize;
 
 /// Reports an unreadable or invalid workflow manifest.
@@ -28,18 +28,11 @@ struct ManifestTask {
     id: String,
     #[serde(default)]
     depends_on: Vec<String>,
-    harness: Option<Harness>,
+    harness: Option<String>,
     prompt: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     command: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Harness {
-    Pi,
-    Omp,
 }
 
 impl fmt::Display for ManifestError {
@@ -84,8 +77,12 @@ impl TryFrom<ManifestTask> for TaskDefinition {
             .collect::<Result<Vec<_>, _>>()?;
         let options = HarnessOptions::new(task.model, task.effort);
         let request = match (task.harness, task.prompt, task.command) {
-            (Some(Harness::Pi), Some(prompt), None) => TaskRequest::pi(prompt, options),
-            (Some(Harness::Omp), Some(prompt), None) => TaskRequest::omp(prompt, options),
+            (Some(harness), Some(prompt), None) => {
+                let harness = harness
+                    .parse::<HeadlessHarness>()
+                    .map_err(|error| error.to_string())?;
+                TaskRequest::harness(harness, prompt, options)
+            }
             (None, None, Some(mut command)) => {
                 if !options.is_empty() {
                     return Err("model and effort require a harness task".into());

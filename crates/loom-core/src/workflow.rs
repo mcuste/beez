@@ -6,6 +6,8 @@ use crate::task::{Task, TaskDefinition, TaskId, TaskIndex};
 /// Reports invalid workflow dependencies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkflowError {
+    /// The workflow declares no tasks.
+    Empty,
     /// An ID occurs more than once.
     DuplicateTask(TaskId),
     /// A required predecessor is absent.
@@ -24,6 +26,7 @@ pub enum WorkflowError {
 impl fmt::Display for WorkflowError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Empty => formatter.write_str("workflow must define at least one task"),
             Self::DuplicateTask(task) => write!(formatter, "duplicate task ID {task}"),
             Self::UnknownDependency { task, dependency } => {
                 write!(
@@ -87,6 +90,10 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
     type Error = WorkflowError;
 
     fn try_from(definitions: Vec<TaskDefinition>) -> Result<Self, Self::Error> {
+        if definitions.is_empty() {
+            return Err(WorkflowError::Empty);
+        }
+
         let indexes = task_indexes(&definitions)?;
 
         let (dependencies, dependency_ids) = resolve_all_dependencies(&definitions, &indexes)?;
@@ -294,7 +301,7 @@ fn visit<'a>(
 mod tests {
     use crate::task::{TaskDefinition, TaskIndex, TaskRequest};
 
-    use super::{Workflow, WorkflowError};
+    use super::{Workflow, WorkflowError, WorkflowExecution};
 
     fn task(id: &str, depends_on: &[&str]) -> TaskDefinition {
         TaskDefinition::new(
@@ -305,6 +312,26 @@ mod tests {
                 .collect(),
             TaskRequest::command("true".into(), Vec::new()),
         )
+    }
+
+    fn succeeded<'workflow>(
+        mut execution: WorkflowExecution<'workflow>,
+        tasks: &[TaskIndex],
+    ) -> WorkflowExecution<'workflow> {
+        for index in tasks {
+            assert!(execution.start(*index).is_some());
+            assert!(execution.complete(*index, true));
+        }
+
+        execution
+    }
+
+    #[test]
+    fn rejects_a_workflow_without_tasks() {
+        let error = Workflow::try_from(Vec::new()).unwrap_err();
+
+        assert_eq!(error, WorkflowError::Empty);
+        assert_eq!(error.to_string(), "workflow must define at least one task");
     }
     #[test]
     fn does_not_start_a_task_before_its_dependencies_succeed() {
@@ -348,22 +375,47 @@ mod tests {
     }
 
     #[test]
-    fn releases_tasks_only_after_all_dependencies_succeed() {
+    fn reports_independent_tasks_as_ready_together() {
         let workflow = Workflow::try_from(vec![
             task("prepare", &[]),
             task("build", &[]),
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
-        let mut sut = workflow.execution();
+
+        let sut = workflow.execution();
 
         assert_eq!(sut.ready(), [TaskIndex(0), TaskIndex(1)]);
-        assert!(sut.start(TaskIndex(0)).is_some());
-        assert!(sut.complete(TaskIndex(0), true));
-        assert_eq!(sut.ready(), [TaskIndex(1)]);
-        assert!(sut.start(TaskIndex(1)).is_some());
-        assert!(sut.complete(TaskIndex(1), true));
-        assert_eq!(sut.ready(), [TaskIndex(2)]);
+    }
+
+    #[test]
+    fn releases_a_task_after_every_dependency_succeeds() {
+        let workflow = Workflow::try_from(vec![
+            task("prepare", &[]),
+            task("build", &[]),
+            task("test", &["prepare", "build"]),
+        ])
+        .unwrap();
+        let sut = succeeded(workflow.execution(), &[TaskIndex(0), TaskIndex(1)]);
+
+        let ready = sut.ready();
+
+        assert_eq!(ready, [TaskIndex(2)]);
+    }
+
+    #[test]
+    fn does_not_release_a_task_while_one_dependency_is_pending() {
+        let workflow = Workflow::try_from(vec![
+            task("prepare", &[]),
+            task("build", &[]),
+            task("test", &["prepare", "build"]),
+        ])
+        .unwrap();
+        let sut = succeeded(workflow.execution(), &[TaskIndex(0)]);
+
+        let ready = sut.ready();
+
+        assert_eq!(ready, [TaskIndex(1)]);
     }
 
     #[test]
@@ -374,35 +426,22 @@ mod tests {
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
-        let mut sut = workflow.execution();
-        assert!(sut.start(TaskIndex(0)).is_some());
-        assert!(sut.complete(TaskIndex(0), true));
+        let mut sut = succeeded(workflow.execution(), &[TaskIndex(0)]);
         assert!(sut.start(TaskIndex(1)).is_some());
 
         assert!(sut.complete(TaskIndex(1), false));
+
         assert!(sut.ready().is_empty());
         assert!(sut.has_pending());
     }
 
     #[test]
-    fn releases_dependents_after_predecessors_succeed() {
+    fn does_not_release_dependents_after_a_predecessor_fails() {
         let workflow =
             Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
         let mut sut = workflow.execution();
-
-        assert_eq!(sut.ready(), [TaskIndex(0)]);
-        assert_eq!(sut.start(TaskIndex(0)).unwrap().id().as_str(), "prepare");
-        assert!(sut.complete(TaskIndex(0), true));
-        assert_eq!(sut.ready(), [TaskIndex(1)]);
-    }
-
-    #[test]
-    fn does_not_release_dependents_after_predecessors_fail() {
-        let workflow =
-            Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
-        let mut sut = workflow.execution();
-
         assert!(sut.start(TaskIndex(0)).is_some());
+
         assert!(sut.complete(TaskIndex(0), false));
 
         assert!(sut.ready().is_empty());

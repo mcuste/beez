@@ -6,8 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[dev-dependencies]
-loom-test-support = { workspace = true }
+[features]
+harness-contract = []
+
+[dependencies]
+loom-core = { path = "../loom-core" }
+
+[[test]]
+name = "harness_contract"
+path = "tests/harness_contract.rs"
+required-features = ["harness-contract"]
 
 [lints]
 workspace = true

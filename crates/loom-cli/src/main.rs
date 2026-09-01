@@ -5,8 +5,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use loom_core::HeadlessHarness;
 use loom_manifest::load;
-use loom_process::{ExecutionRequest, HarnessCall, HeadlessHarness, ProcessCall};
+use loom_process::{ExecutionRequest, HarnessCall, ProcessCall};
 use loom_runner::{RunEvent, Runner};
 
 #[derive(Debug, Parser)]
@@ -30,9 +31,17 @@ struct Run {
 
 #[derive(Debug, Subcommand)]
 enum RunCommand {
+    /// Run the tasks of a workflow manifest.
     Workflow(WorkflowFile),
+    /// Prompt the Pi harness.
     Pi(HarnessRun),
+    /// Prompt the Oh My Pi harness.
     Omp(HarnessRun),
+    /// Prompt the Claude Code harness.
+    Claude(HarnessRun),
+    /// Prompt the Codex harness.
+    Codex(HarnessRun),
+    /// Run a program without a shell.
     Command(Process),
 }
 
@@ -72,26 +81,26 @@ fn main() {
 
 fn run(cli: Cli) -> io::Result<i32> {
     let mut render = render;
-    match cli.command {
-        Command::Run(Run {
-            command: RunCommand::Workflow(WorkflowFile { path }),
-        }) => {
+    let Command::Run(Run { command }) = cli.command;
+    match command {
+        RunCommand::Workflow(WorkflowFile { path }) => {
             let workflow = load(&path)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             Runner.run_workflow(&workflow, &mut render)
         }
-        Command::Run(Run {
-            command: RunCommand::Pi(run),
-        }) => Runner.run_request(harness_request(HeadlessHarness::Pi, "pi", run), &mut render),
-        Command::Run(Run {
-            command: RunCommand::Omp(run),
-        }) => Runner.run_request(
-            harness_request(HeadlessHarness::Omp, "omp", run),
-            &mut render,
-        ),
-        Command::Run(Run {
-            command: RunCommand::Command(Process { program, arguments }),
-        }) => Runner.run_request(
+        RunCommand::Pi(run) => {
+            Runner.run_request(harness_request(HeadlessHarness::Pi, run), &mut render)
+        }
+        RunCommand::Omp(run) => {
+            Runner.run_request(harness_request(HeadlessHarness::Omp, run), &mut render)
+        }
+        RunCommand::Claude(run) => {
+            Runner.run_request(harness_request(HeadlessHarness::Claude, run), &mut render)
+        }
+        RunCommand::Codex(run) => {
+            Runner.run_request(harness_request(HeadlessHarness::Codex, run), &mut render)
+        }
+        RunCommand::Command(Process { program, arguments }) => Runner.run_request(
             ExecutionRequest::Command(
                 arguments
                     .into_iter()
@@ -112,12 +121,8 @@ fn render(event: &RunEvent) -> io::Result<()> {
     Ok(())
 }
 
-fn harness_request(
-    harness: HeadlessHarness,
-    program: &'static str,
-    run: HarnessRun,
-) -> ExecutionRequest {
-    let mut call = HarnessCall::new(harness, program, run.prompt);
+fn harness_request(harness: HeadlessHarness, run: HarnessRun) -> ExecutionRequest {
+    let mut call = HarnessCall::new(harness, run.prompt);
     if let Some(model) = run.model {
         call = call.model(model);
     }

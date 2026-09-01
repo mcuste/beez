@@ -151,6 +151,7 @@ name = "loom-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "loom-core",
  "loom-manifest",
  "loom-process",
  "loom-runner",
@@ -176,7 +177,7 @@ dependencies = [
 name = "loom-process"
 version = "0.1.0"
 dependencies = [
- "loom-test-support",
+ "loom-core",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ use loom_test_support::TemporaryDirectory;
 macro_rules! assert_ok {
     ($result:expr) => {{
         let result = $result;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
         let Ok(value) = result else {
             return;
         };
@@ -28,7 +28,7 @@ macro_rules! assert_ok {
 macro_rules! assert_err {
     ($result:expr) => {{
         let result = $result;
-        assert!(result.is_err());
+        assert!(result.is_err(), "expected Err, got {result:?}");
         let Err(error) = result else {
             return;
         };
@@ -115,17 +115,7 @@ fn blocks_dependents_after_a_failed_task() {
             "bash",
             arguments(&["-c", "exit 23"]),
         )),
-        assert_ok!(command_task(
-            "verify",
-            &["prepare"],
-            "bash",
-            vec![
-                "-c".to_owned(),
-                "printf ran > \"$1\"".to_owned(),
-                "loom".to_owned(),
-                marker.to_string_lossy().into_owned(),
-            ],
-        )),
+        assert_ok!(marker_task("verify", &["prepare"], &marker)),
     ]));
     let mut events = Vec::new();
 
@@ -140,6 +130,40 @@ fn blocks_dependents_after_a_failed_task() {
     assert_eq!(count_finished(&events, 0), 1);
     assert_eq!(count_started(&events, 1), 0);
     assert_eq!(count_finished(&events, 1), 0);
+}
+
+#[test]
+fn treats_a_signalled_task_as_a_failure_and_blocks_dependents() {
+    let directory = assert_ok!(TemporaryDirectory::new("runner-signalled-task"));
+    let marker = directory.path().join("blocked-task-ran");
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "signalled",
+            &[],
+            "bash",
+            arguments(&["-c", "kill -TERM $$"]),
+        )),
+        assert_ok!(marker_task("verify", &["signalled"], &marker)),
+    ]));
+    let mut events = Vec::new();
+
+    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
+        record_event(&mut events, event);
+        Ok(())
+    }));
+
+    // A signalled task has no exit code, so the workflow reports 1.
+    assert_eq!(status, 1);
+    assert!(!marker.exists());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RecordedEvent::Finished {
+            task: Some(0),
+            status: None,
+            ..
+        }
+    )));
+    assert_eq!(count_started(&events, 1), 0);
 }
 
 #[test]
@@ -232,6 +256,69 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
 }
 
 #[test]
+fn reports_the_status_of_the_first_failing_task_in_declaration_order() {
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "first",
+            &[],
+            "bash",
+            arguments(&["-c", "exit 23"]),
+        )),
+        assert_ok!(command_task(
+            "second",
+            &[],
+            "bash",
+            arguments(&["-c", "exit 7"]),
+        )),
+    ]));
+
+    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |_| Ok(())));
+
+    assert_eq!(status, 23);
+}
+
+#[test]
+fn stops_before_starting_a_workflow_task_when_the_callback_fails() {
+    let directory = assert_ok!(TemporaryDirectory::new("runner-workflow-callback-failure"));
+    let marker = directory.path().join("task-ran");
+    let workflow = assert_ok!(Workflow::try_from(vec![assert_ok!(marker_task(
+        "prepare",
+        &[],
+        &marker
+    ))]));
+
+    let error = assert_err!(
+        Runner.run_workflow(&workflow, &mut |_| Err(io::Error::other("cannot report")))
+    );
+
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn stops_a_workflow_when_reporting_a_finished_task_fails() {
+    let directory = assert_ok!(TemporaryDirectory::new("runner-finished-callback-failure"));
+    let marker = directory.path().join("dependent-ran");
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "prepare",
+            &[],
+            "bash",
+            arguments(&["-c", "printf prepare"]),
+        )),
+        assert_ok!(marker_task("verify", &["prepare"], &marker)),
+    ]));
+
+    let error = assert_err!(Runner.run_workflow(&workflow, &mut |event| match event {
+        RunEvent::Finished { .. } => Err(io::Error::other("cannot report")),
+        _ => Ok(()),
+    }));
+
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert!(!marker.exists());
+}
+
+#[test]
 fn starts_independent_processes_before_either_can_finish() {
     let directory = assert_ok!(TemporaryDirectory::new("runner-concurrent-tasks"));
     let first_ready = directory.path().join("first-ready");
@@ -295,6 +382,25 @@ fn command_task(
 
 fn arguments(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+/// Writes `marker`, so a test can prove whether the task ran.
+fn marker_task(
+    id: &str,
+    depends_on: &[&str],
+    marker: &Path,
+) -> Result<TaskDefinition, loom_core::TaskIdError> {
+    command_task(
+        id,
+        depends_on,
+        "bash",
+        vec![
+            "-c".to_owned(),
+            "printf ran > \"$1\"".to_owned(),
+            "loom".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+    )
 }
 
 fn record_event(events: &mut Vec<RecordedEvent>, event: &RunEvent) {

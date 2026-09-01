@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::harness::{HarnessOptions, HeadlessHarness};
+
 /// Reports an invalid task ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskIdError {
@@ -55,54 +57,16 @@ impl fmt::Display for TaskId {
     }
 }
 
-/// Model and effort settings for a harness prompt.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HarnessOptions {
-    model: Option<String>,
-    effort: Option<String>,
-}
-
-impl HarnessOptions {
-    /// Builds harness options; `None` leaves the harness default.
-    #[must_use]
-    pub fn new(model: Option<String>, effort: Option<String>) -> Self {
-        Self { model, effort }
-    }
-
-    /// The requested model.
-    #[must_use]
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-
-    /// The requested reasoning effort.
-    #[must_use]
-    pub fn effort(&self) -> Option<&str> {
-        self.effort.as_deref()
-    }
-
-    /// True when neither model nor effort is set.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.model.is_none() && self.effort.is_none()
-    }
-}
-
 /// A task action Loom can execute.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskRequest {
-    /// Sends a prompt to Pi.
-    Pi {
-        /// Prompt for Pi.
+    /// Sends a prompt to a headless harness.
+    Harness {
+        /// Harness that receives the prompt.
+        harness: HeadlessHarness,
+        /// Prompt for the harness.
         prompt: String,
-        /// Model and effort for Pi.
-        options: HarnessOptions,
-    },
-    /// Sends a prompt to Oh My Pi.
-    Omp {
-        /// Prompt for Oh My Pi.
-        prompt: String,
-        /// Model and effort for Oh My Pi.
+        /// Model and effort for the harness.
         options: HarnessOptions,
     },
     /// Runs a program without invoking a shell.
@@ -115,16 +79,14 @@ pub enum TaskRequest {
 }
 
 impl TaskRequest {
-    /// Builds a Pi request.
+    /// Builds a harness prompt request.
     #[must_use]
-    pub fn pi(prompt: String, options: HarnessOptions) -> Self {
-        Self::Pi { prompt, options }
-    }
-
-    /// Builds an Oh My Pi request.
-    #[must_use]
-    pub fn omp(prompt: String, options: HarnessOptions) -> Self {
-        Self::Omp { prompt, options }
+    pub fn harness(harness: HeadlessHarness, prompt: String, options: HarnessOptions) -> Self {
+        Self::Harness {
+            harness,
+            prompt,
+            options,
+        }
     }
 
     /// Builds a direct process request.

@@ -53,26 +53,3 @@ impl ProcessRunner {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::execution::ExecutionRequest;
-    use crate::process_call::ProcessCall;
-
-    use super::ProcessRunner;
-
-    #[test]
-    fn runs_a_process_call() {
-        let request = ExecutionRequest::Command(
-            ProcessCall::new("bash")
-                .argument("-c")
-                .argument("printf loom"),
-        );
-
-        let output = ProcessRunner.run(request).unwrap();
-
-        assert!(output.succeeded());
-        assert_eq!(output.stdout(), b"loom");
-        assert!(output.stderr().is_empty());
-    }
-}

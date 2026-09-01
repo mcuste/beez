@@ -1,42 +1,37 @@
 use std::ffi::OsString;
-use std::fmt;
 use std::path::PathBuf;
+
+use loom_core::HeadlessHarness;
 
 /// Sends one prompt through a harness's non-interactive interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessCall {
     harness: HeadlessHarness,
-    program: PathBuf,
     prompt: OsString,
     model: Option<OsString>,
     effort: Option<OsString>,
 }
 
 impl HarnessCall {
-    /// Builds a harness request. The harness uses its default model and effort.
+    /// Uses the harness's default program with its default model and effort.
     #[must_use]
-    pub fn new(
-        harness: HeadlessHarness,
-        program: impl Into<PathBuf>,
-        prompt: impl Into<OsString>,
-    ) -> Self {
+    pub fn new(harness: HeadlessHarness, prompt: impl Into<OsString>) -> Self {
         Self {
             harness,
-            program: program.into(),
             prompt: prompt.into(),
             model: None,
             effort: None,
         }
     }
 
-    /// Selects the model the harness must use.
+    /// Sets the model the harness must use.
     #[must_use]
     pub fn model(mut self, model: impl Into<OsString>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    /// Selects the reasoning effort the harness must use.
+    /// Sets the reasoning effort the harness must use.
     #[must_use]
     pub fn effort(mut self, effort: impl Into<OsString>) -> Self {
         self.effort = Some(effort.into());
@@ -44,84 +39,77 @@ impl HarnessCall {
     }
 
     pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
-        let mut arguments = vec![OsString::from("--print")];
+        let mut arguments = Vec::with_capacity(7);
+        arguments.push(headless_argument(self.harness).into());
         if let Some(model) = self.model {
             arguments.push("--model".into());
             arguments.push(model);
         }
         if let Some(effort) = self.effort {
-            arguments.push(self.harness.effort_flag().into());
-            arguments.push(effort);
+            append_effort_arguments(&mut arguments, self.harness, effort);
+        }
+        if self.prompt.as_encoded_bytes().starts_with(b"-") {
+            arguments.push("--".into());
         }
         // The prompt stays last because harnesses read it as a positional argument.
         arguments.push(self.prompt);
 
-        (self.program, arguments)
+        (default_program(self.harness).into(), arguments)
     }
 }
 
-/// Harness selector accepted by Loom.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HeadlessHarness {
-    /// Pi coding agent.
-    Pi,
-    /// Oh My Pi coding agent.
-    Omp,
+fn default_program(harness: HeadlessHarness) -> &'static str {
+    match harness {
+        HeadlessHarness::Pi => "pi",
+        HeadlessHarness::Omp => "omp",
+        HeadlessHarness::Claude => "claude",
+        HeadlessHarness::Codex => "codex",
+    }
 }
 
-impl HeadlessHarness {
-    /// Each harness names the reasoning effort differently.
-    fn effort_flag(self) -> &'static str {
-        match self {
-            Self::Pi => "--effort",
-            Self::Omp => "--thinking",
+/// Codex takes a subcommand here where the other harnesses take a flag.
+fn headless_argument(harness: HeadlessHarness) -> &'static str {
+    match harness {
+        HeadlessHarness::Pi | HeadlessHarness::Omp | HeadlessHarness::Claude => "--print",
+        HeadlessHarness::Codex => "exec",
+    }
+}
+
+/// Each harness names the reasoning effort differently.
+fn append_effort_arguments(
+    arguments: &mut Vec<OsString>,
+    harness: HeadlessHarness,
+    effort: OsString,
+) {
+    match harness {
+        HeadlessHarness::Pi | HeadlessHarness::Claude => {
+            arguments.push("--effort".into());
+            arguments.push(effort);
+        }
+        HeadlessHarness::Omp => {
+            arguments.push("--thinking".into());
+            arguments.push(effort);
+        }
+        HeadlessHarness::Codex => {
+            let mut override_value = OsString::from("model_reasoning_effort=");
+            override_value.push(effort);
+            arguments.push("-c".into());
+            arguments.push(override_value);
         }
     }
 }
-
-impl std::str::FromStr for HeadlessHarness {
-    type Err = HeadlessHarnessError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "pi" => Ok(Self::Pi),
-            "omp" => Ok(Self::Omp),
-            _ => Err(HeadlessHarnessError::Unknown(value.into())),
-        }
-    }
-}
-
-/// Reports an unsupported harness selector.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HeadlessHarnessError {
-    /// The selector does not name a supported harness.
-    Unknown(String),
-}
-
-impl fmt::Display for HeadlessHarnessError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unknown(value) => {
-                write!(
-                    formatter,
-                    "unsupported headless harness {value:?}; expected pi or omp"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for HeadlessHarnessError {}
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{HarnessCall, HeadlessHarness, HeadlessHarnessError};
+    use loom_core::HeadlessHarness;
+
+    use super::HarnessCall;
 
     #[test]
     fn omits_the_model_and_effort_when_unset() {
-        let sut = HarnessCall::new(HeadlessHarness::Pi, "pi", "inspect the repository");
+        let sut = HarnessCall::new(HeadlessHarness::Pi, "inspect the repository");
 
         let (program, arguments) = sut.into_parts();
 
@@ -131,8 +119,7 @@ mod tests {
 
     #[test]
     fn places_the_model_before_the_prompt() {
-        let sut =
-            HarnessCall::new(HeadlessHarness::Pi, "pi", "inspect the repository").model("opus");
+        let sut = HarnessCall::new(HeadlessHarness::Pi, "inspect the repository").model("opus");
 
         let (_, arguments) = sut.into_parts();
 
@@ -144,8 +131,7 @@ mod tests {
 
     #[test]
     fn places_the_effort_before_the_prompt() {
-        let sut =
-            HarnessCall::new(HeadlessHarness::Pi, "pi", "inspect the repository").effort("high");
+        let sut = HarnessCall::new(HeadlessHarness::Pi, "inspect the repository").effort("high");
 
         let (_, arguments) = sut.into_parts();
 
@@ -157,11 +143,11 @@ mod tests {
 
     #[test]
     fn sends_the_effort_to_omp_as_a_thinking_level() {
-        let sut =
-            HarnessCall::new(HeadlessHarness::Omp, "omp", "inspect the repository").effort("high");
+        let sut = HarnessCall::new(HeadlessHarness::Omp, "inspect the repository").effort("high");
 
-        let (_, arguments) = sut.into_parts();
+        let (program, arguments) = sut.into_parts();
 
+        assert_eq!(program, PathBuf::from("omp"));
         assert_eq!(
             arguments,
             ["--print", "--thinking", "high", "inspect the repository"]
@@ -169,8 +155,52 @@ mod tests {
     }
 
     #[test]
+    fn prints_from_claude_code_with_a_model_and_effort() {
+        let sut = HarnessCall::new(HeadlessHarness::Claude, "inspect the repository")
+            .model("opus")
+            .effort("high");
+
+        let (program, arguments) = sut.into_parts();
+
+        assert_eq!(program, PathBuf::from("claude"));
+        assert_eq!(
+            arguments,
+            [
+                "--print",
+                "--model",
+                "opus",
+                "--effort",
+                "high",
+                "inspect the repository"
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_codex_through_exec_and_sends_the_effort_as_a_config_override() {
+        let sut = HarnessCall::new(HeadlessHarness::Codex, "inspect the repository")
+            .model("gpt-5")
+            .effort("high");
+
+        let (program, arguments) = sut.into_parts();
+
+        assert_eq!(program, PathBuf::from("codex"));
+        assert_eq!(
+            arguments,
+            [
+                "exec",
+                "--model",
+                "gpt-5",
+                "-c",
+                "model_reasoning_effort=high",
+                "inspect the repository"
+            ]
+        );
+    }
+
+    #[test]
     fn places_the_model_and_effort_before_the_prompt() {
-        let sut = HarnessCall::new(HeadlessHarness::Omp, "omp", "inspect the repository")
+        let sut = HarnessCall::new(HeadlessHarness::Omp, "inspect the repository")
             .model("opus")
             .effort("high");
 
@@ -190,9 +220,43 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_unsupported_harness() {
-        let error = "codex".parse::<HeadlessHarness>().unwrap_err();
+    fn separates_a_hyphenated_prompt_after_the_model_and_effort() {
+        let sut = HarnessCall::new(HeadlessHarness::Pi, "--inspect the repository")
+            .model("opus")
+            .effort("high");
 
-        assert_eq!(error, HeadlessHarnessError::Unknown("codex".into()));
+        let (_, arguments) = sut.into_parts();
+
+        assert_eq!(
+            arguments,
+            [
+                "--print",
+                "--model",
+                "opus",
+                "--effort",
+                "high",
+                "--",
+                "--inspect the repository"
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_a_hyphenated_prompt_for_every_harness() {
+        for (harness, expected_program, expected_headless_argument) in [
+            (HeadlessHarness::Pi, "pi", "--print"),
+            (HeadlessHarness::Omp, "omp", "--print"),
+            (HeadlessHarness::Claude, "claude", "--print"),
+            (HeadlessHarness::Codex, "codex", "exec"),
+        ] {
+            let (program, arguments) =
+                HarnessCall::new(harness, "--inspect the repository").into_parts();
+
+            assert_eq!(program, PathBuf::from(expected_program));
+            assert_eq!(
+                arguments,
+                [expected_headless_argument, "--", "--inspect the repository"]
+            );
+        }
     }
 }

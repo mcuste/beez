@@ -1,10 +1,8 @@
 use std::ffi::OsString;
 use std::io;
 
-use loom_core::{HarnessOptions, TaskIndex, TaskRequest, Workflow, WorkflowExecution};
-use loom_process::{
-    ExecutionRequest, HarnessCall, HeadlessHarness, ProcessCall, ProcessOutput, ProcessRunner,
-};
+use loom_core::{TaskIndex, TaskRequest, Workflow, WorkflowExecution};
+use loom_process::{ExecutionRequest, HarnessCall, ProcessCall, ProcessOutput, ProcessRunner};
 
 /// Reports a process execution lifecycle event.
 #[derive(Debug)]
@@ -69,8 +67,9 @@ impl Runner {
         while execution.has_pending() {
             let requests = start_ready_tasks(&mut execution, on_event)?;
 
+            // Tasks stay pending only when a dependency failed, which already set the status.
             if requests.is_empty() {
-                return Ok(if exit_status == 0 { 1 } else { exit_status });
+                return Ok(exit_status);
             }
 
             let results = run_requests_concurrently(requests)?;
@@ -167,11 +166,19 @@ fn finish_tasks(
 
 fn execution_request(request: TaskRequest) -> ExecutionRequest {
     match request {
-        TaskRequest::Pi { prompt, options } => {
-            harness_request(HeadlessHarness::Pi, "pi", prompt, &options)
-        }
-        TaskRequest::Omp { prompt, options } => {
-            harness_request(HeadlessHarness::Omp, "omp", prompt, &options)
+        TaskRequest::Harness {
+            harness,
+            prompt,
+            options,
+        } => {
+            let mut call = HarnessCall::new(harness, OsString::from(prompt));
+            if let Some(model) = options.model() {
+                call = call.model(model);
+            }
+            if let Some(effort) = options.effort() {
+                call = call.effort(effort);
+            }
+            ExecutionRequest::Harness(call)
         }
         TaskRequest::Command { program, arguments } => ExecutionRequest::Command(
             arguments
@@ -181,21 +188,4 @@ fn execution_request(request: TaskRequest) -> ExecutionRequest {
                 }),
         ),
     }
-}
-
-fn harness_request(
-    harness: HeadlessHarness,
-    program: &'static str,
-    prompt: String,
-    options: &HarnessOptions,
-) -> ExecutionRequest {
-    let mut call = HarnessCall::new(harness, program, OsString::from(prompt));
-    if let Some(model) = options.model() {
-        call = call.model(model);
-    }
-    if let Some(effort) = options.effort() {
-        call = call.effort(effort);
-    }
-
-    ExecutionRequest::Harness(call)
 }
