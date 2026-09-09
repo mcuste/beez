@@ -14,20 +14,36 @@ pub enum HeadlessHarness {
     Codex,
 }
 
-/// Must list every selector `FromStr` accepts; the parse error reports it.
-const HEADLESS_HARNESS_NAMES: [&str; 4] = ["pi", "omp", "claude", "codex"];
+impl HeadlessHarness {
+    /// Every supported harness, in `FromStr` name order.
+    pub const ALL: [Self; 4] = [Self::Pi, Self::Omp, Self::Claude, Self::Codex];
+
+    /// The name a manifest uses for the harness.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Omp => "omp",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
 
 impl FromStr for HeadlessHarness {
     type Err = HeadlessHarnessError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "pi" => Ok(Self::Pi),
-            "omp" => Ok(Self::Omp),
-            "claude" => Ok(Self::Claude),
-            "codex" => Ok(Self::Codex),
-            _ => Err(HeadlessHarnessError::Unknown(value.into())),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|harness| harness.name() == value)
+            .ok_or_else(|| HeadlessHarnessError::Unknown(value.to_owned()))
+    }
+}
+
+impl fmt::Display for HeadlessHarness {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
     }
 }
 
@@ -45,7 +61,11 @@ impl fmt::Display for HeadlessHarnessError {
                 write!(
                     formatter,
                     "unsupported headless harness {value:?}; expected one of {}",
-                    HEADLESS_HARNESS_NAMES.join(", ")
+                    HeadlessHarness::ALL
+                        .iter()
+                        .map(|harness| harness.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
         }
@@ -89,44 +109,25 @@ impl HarnessOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEADLESS_HARNESS_NAMES, HeadlessHarness, HeadlessHarnessError};
+    use super::{HeadlessHarness, HeadlessHarnessError};
 
-    const SUPPORTED: [HeadlessHarness; 4] = [
-        HeadlessHarness::Pi,
-        HeadlessHarness::Omp,
-        HeadlessHarness::Claude,
-        HeadlessHarness::Codex,
-    ];
-
-    /// A new harness variant must be added here, so the tests below see it.
-    fn selector(harness: HeadlessHarness) -> &'static str {
-        match harness {
-            HeadlessHarness::Pi => "pi",
-            HeadlessHarness::Omp => "omp",
-            HeadlessHarness::Claude => "claude",
-            HeadlessHarness::Codex => "codex",
+    #[test]
+    fn parses_the_name_of_every_supported_harness() {
+        for harness in HeadlessHarness::ALL {
+            assert_eq!(harness.name().parse(), Ok(harness));
         }
     }
 
     #[test]
-    fn parses_the_selector_of_every_supported_harness() {
-        for harness in SUPPORTED {
-            assert_eq!(selector(harness).parse(), Ok(harness));
-        }
-    }
-
-    #[test]
-    fn offers_every_supported_selector_in_the_error_message() {
+    fn offers_every_supported_name_in_the_error_message() {
         let offered = "cursor".parse::<HeadlessHarness>().unwrap_err().to_string();
 
-        for harness in SUPPORTED {
+        for harness in HeadlessHarness::ALL {
             assert!(
-                offered.contains(selector(harness)),
-                "{offered} does not offer {}",
-                selector(harness)
+                offered.contains(harness.name()),
+                "{offered} omits {harness}"
             );
         }
-        assert_eq!(HEADLESS_HARNESS_NAMES.len(), SUPPORTED.len());
     }
 
     #[test]

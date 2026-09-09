@@ -410,3 +410,26 @@ fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>>
         .output()
         .map_err(Into::into)
 }
+
+#[test]
+fn rejects_an_invalid_sandbox_domain_rule() {
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "command", "--allow-domain", "a.*.com", "true"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(std::str::from_utf8(&output.stderr).unwrap().contains("`*`"));
+}
+
+#[test]
+fn hides_the_sandbox_helper_commands() {
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    let help = std::str::from_utf8(&output.stdout).unwrap();
+    assert!(help.contains("run"));
+    assert!(!help.contains("sandbox-init"));
+}

@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io;
 
-use loom_core::{TaskIndex, TaskRequest, Workflow, WorkflowExecution};
+use loom_core::{SandboxPolicy, TaskIndex, TaskRequest, Workflow, WorkflowExecution};
 use loom_process::{ExecutionRequest, HarnessCall, ProcessCall, ProcessOutput, ProcessRunner};
 
 /// Reports a process execution lifecycle event.
@@ -33,14 +33,24 @@ pub enum RunEvent {
 pub struct Runner;
 
 impl Runner {
-    /// Runs one request.
+    /// Runs one request without a sandbox.
     pub fn run_request(
         &self,
         request: ExecutionRequest,
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
+        self.run_request_in(request, None, on_event)
+    }
+
+    /// Runs one request, inside a sandbox when a policy is given.
+    pub fn run_request_in(
+        &self,
+        request: ExecutionRequest,
+        sandbox: Option<&SandboxPolicy>,
+        on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
+    ) -> io::Result<i32> {
         on_event(&RunEvent::Started { task: None })?;
-        match ProcessRunner.run(request) {
+        match run_process(request, sandbox) {
             Ok(output) => {
                 let status = output.status_code().unwrap_or(1);
                 on_event(&RunEvent::Finished { task: None, output })?;
@@ -80,11 +90,18 @@ impl Runner {
     }
 }
 
+/// A started task's request and sandbox.
+struct StartedTask {
+    index: TaskIndex,
+    request: TaskRequest,
+    sandbox: Option<SandboxPolicy>,
+}
+
 /// Marks ready tasks as running and returns their requests.
 fn start_ready_tasks(
     execution: &mut WorkflowExecution<'_>,
     on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
-) -> io::Result<Vec<(TaskIndex, TaskRequest)>> {
+) -> io::Result<Vec<StartedTask>> {
     execution
         .ready()
         .into_iter()
@@ -93,20 +110,37 @@ fn start_ready_tasks(
                 .start(index)
                 .ok_or_else(|| io::Error::other("workflow task is not ready"))?;
             on_event(&RunEvent::Started { task: Some(index) })?;
-            Ok((index, task.request().clone()))
+            Ok(StartedTask {
+                index,
+                request: task.request().clone(),
+                sandbox: task.sandbox().cloned(),
+            })
         })
         .collect()
 }
 
+fn run_process(
+    request: ExecutionRequest,
+    sandbox: Option<&SandboxPolicy>,
+) -> io::Result<ProcessOutput> {
+    match sandbox {
+        Some(policy) => ProcessRunner.run_sandboxed(request, policy),
+        None => ProcessRunner.run(request),
+    }
+}
+
 /// Runs task requests concurrently.
 fn run_requests_concurrently(
-    requests: Vec<(TaskIndex, TaskRequest)>,
+    tasks: Vec<StartedTask>,
 ) -> io::Result<Vec<(TaskIndex, io::Result<ProcessOutput>)>> {
     std::thread::scope(|scope| {
-        requests
+        tasks
             .into_iter()
-            .map(|(index, request)| {
-                scope.spawn(move || (index, ProcessRunner.run(execution_request(request))))
+            .map(|task| {
+                scope.spawn(move || {
+                    let request = execution_request(task.request);
+                    (task.index, run_process(request, task.sandbox.as_ref()))
+                })
             })
             .collect::<Vec<_>>()
             .into_iter()

@@ -29,6 +29,8 @@ interpreted = "deny"
 enable-builtin-globs = true
 include-dependencies = true
 include-workspace = false
+# libc ships a maintainer script that its build never runs.
+bypass = [{ crate = "libc", allow-globs = ["etc/*.py"] }]
 
 [sources]
 unknown-registry = "deny"

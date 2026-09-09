@@ -38,6 +38,12 @@ impl HarnessCall {
         self
     }
 
+    /// The harness that receives the prompt.
+    #[must_use]
+    pub fn harness(&self) -> HeadlessHarness {
+        self.harness
+    }
+
     pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
         let mut arguments = Vec::with_capacity(7);
         arguments.push(headless_argument(self.harness).into());

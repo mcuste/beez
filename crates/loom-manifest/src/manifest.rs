@@ -2,8 +2,12 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use loom_core::{HarnessOptions, HeadlessHarness, TaskDefinition, TaskId, TaskRequest, Workflow};
+use loom_core::{
+    HarnessOptions, HeadlessHarness, SandboxPolicy, TaskDefinition, TaskId, TaskRequest, Workflow,
+};
 use serde::Deserialize;
+
+use crate::sandbox::{ManifestSandbox, SandboxSetting, resolve};
 
 /// Reports an unreadable or invalid workflow manifest.
 #[derive(Debug)]
@@ -19,6 +23,8 @@ pub enum ManifestError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
+    #[serde(default)]
+    sandbox: Option<ManifestSandbox>,
     tasks: Vec<ManifestTask>,
 }
 
@@ -33,6 +39,8 @@ struct ManifestTask {
     model: Option<String>,
     effort: Option<String>,
     command: Option<Vec<String>>,
+    #[serde(default)]
+    sandbox: Option<SandboxSetting>,
 }
 
 impl fmt::Display for ManifestError {
@@ -55,6 +63,20 @@ impl std::error::Error for ManifestError {
             Self::Io(error) => Some(error),
             Self::UnsupportedFormat(_) | Self::Invalid(_) => None,
         }
+    }
+}
+
+impl ManifestTask {
+    fn into_definition(
+        mut self,
+        sandbox: Option<&SandboxPolicy>,
+    ) -> Result<TaskDefinition, String> {
+        let task_sandbox = resolve(sandbox, self.sandbox.take())?;
+        let definition = TaskDefinition::try_from(self)?;
+        Ok(match task_sandbox {
+            Some(policy) => definition.sandboxed(policy),
+            None => definition,
+        })
     }
 }
 
@@ -111,10 +133,15 @@ pub fn load(path: &Path) -> Result<Workflow, ManifestError> {
             .map_err(|error| ManifestError::Invalid(error.to_string()))?,
         _ => return Err(ManifestError::UnsupportedFormat(path.into())),
     };
+    let sandbox = manifest
+        .sandbox
+        .map(SandboxPolicy::try_from)
+        .transpose()
+        .map_err(ManifestError::Invalid)?;
     let definitions = manifest
         .tasks
         .into_iter()
-        .map(TaskDefinition::try_from)
+        .map(|task| task.into_definition(sandbox.as_ref()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ManifestError::Invalid)?;
 

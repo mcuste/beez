@@ -110,6 +110,7 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
                 id: definition.id,
                 dependencies,
                 request: definition.request,
+                sandbox: definition.sandbox,
             })
             .collect();
 
@@ -333,6 +334,7 @@ mod tests {
         assert_eq!(error, WorkflowError::Empty);
         assert_eq!(error.to_string(), "workflow must define at least one task");
     }
+
     #[test]
     fn does_not_start_a_task_before_its_dependencies_succeed() {
         let workflow =
@@ -372,6 +374,35 @@ mod tests {
 
         assert!(!sut.complete(TaskIndex(0), false));
         assert_eq!(sut.ready(), [TaskIndex(1)]);
+    }
+
+    /// A caller tells a finished workflow from a blocked one by both signals.
+    #[test]
+    fn reports_no_pending_task_after_every_task_succeeds() {
+        let workflow = Workflow::try_from(vec![
+            task("prepare", &[]),
+            task("build", &[]),
+            task("test", &["prepare", "build"]),
+        ])
+        .unwrap();
+        let sut = succeeded(
+            workflow.execution(),
+            &[TaskIndex(0), TaskIndex(1), TaskIndex(2)],
+        );
+
+        assert!(!sut.has_pending());
+        assert!(sut.ready().is_empty());
+    }
+
+    #[test]
+    fn reports_no_pending_task_after_the_only_task_fails() {
+        let workflow = Workflow::try_from(vec![task("prepare", &[])]).unwrap();
+        let mut sut = workflow.execution();
+        assert!(sut.start(TaskIndex(0)).is_some());
+
+        assert!(sut.complete(TaskIndex(0), false));
+
+        assert!(!sut.has_pending());
     }
 
     #[test]

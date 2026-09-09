@@ -2,6 +2,7 @@
 members = [
   "crates/loom-core",
   "crates/loom-process",
+  "crates/loom-sandbox",
   "crates/loom-manifest",
   "crates/loom-runner",
   "crates/loom-cli",

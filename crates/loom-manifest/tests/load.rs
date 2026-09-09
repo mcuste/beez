@@ -4,7 +4,10 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use loom_core::{HarnessOptions, HeadlessHarness, TaskRequest};
+use loom_core::{
+    DomainGroup, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, HarnessOptions,
+    HeadlessHarness, NetworkPolicy, SandboxPolicy, TaskRequest,
+};
 use loom_manifest::{ManifestError, load};
 use loom_test_support::TemporaryDirectory;
 
@@ -418,4 +421,146 @@ fn write_manifest(
     fs::write(&path, source)?;
 
     Ok(path)
+}
+
+#[test]
+fn applies_a_workflow_sandbox_to_every_task_unless_a_task_opts_out() {
+    let directory = TemporaryDirectory::new("manifest-workflow-sandbox").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "sandbox:\n  network:\n    groups: [github]\n    allow: [\"registry.internal:443\"]\ntasks:\n  - id: inspect\n    harness: claude\n    prompt: inspect the repository\n  - id: test\n    command: [cargo, test]\n    sandbox: false\n",
+    )
+    .unwrap();
+
+    let workflow = load(&manifest).unwrap();
+    let inspect = workflow.tasks().first().unwrap();
+    let test = workflow.tasks().get(1).unwrap();
+
+    let expected = SandboxPolicy::new(
+        NetworkPolicy::new(
+            true,
+            vec![DomainGroup::Github],
+            Vec::new(),
+            vec!["registry.internal:443".parse().unwrap()],
+            false,
+        ),
+        FilesystemPolicy::default(),
+        None,
+    );
+    assert_eq!(inspect.sandbox(), Some(&expected));
+    assert_eq!(test.sandbox(), None);
+}
+
+#[test]
+fn enables_the_default_sandbox_with_a_boolean() {
+    let directory = TemporaryDirectory::new("manifest-sandbox-true").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox: true\n",
+    )
+    .unwrap();
+
+    let workflow = load(&manifest).unwrap();
+    let task = workflow.tasks().first().unwrap();
+
+    assert_eq!(task.sandbox(), Some(&SandboxPolicy::default()));
+}
+
+#[test]
+fn replaces_workflow_sandbox_sections_with_task_sections() {
+    let directory = TemporaryDirectory::new("manifest-task-sandbox-override").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        concat!(
+            "sandbox:\n",
+            "  network:\n    groups: [github]\n",
+            "  filesystem:\n    write_allow: [/data]\n",
+            "tasks:\n",
+            "  - id: build\n    command: [cargo, build]\n",
+            "    sandbox:\n",
+            "      network:\n        defaults: false\n        localhost: true\n",
+            "      executables:\n        groups: [rust]\n        disable: [net]\n        allow: [~/.local/share/mise]\n",
+        ),
+    )
+    .unwrap();
+
+    let workflow = load(&manifest).unwrap();
+    let task = workflow.tasks().first().unwrap();
+
+    let expected = SandboxPolicy::new(
+        NetworkPolicy::new(false, Vec::new(), Vec::new(), Vec::new(), true),
+        FilesystemPolicy::new(true, Vec::new(), vec!["/data".parse().unwrap()], Vec::new()),
+        Some(ExecutablePolicy::new(
+            true,
+            vec![ExecutableGroup::Rust],
+            vec![ExecutableGroup::Net],
+            vec!["~/.local/share/mise".parse().unwrap()],
+        )),
+    );
+    assert_eq!(task.sandbox(), Some(&expected));
+}
+
+#[test]
+fn loads_a_json_sandbox() {
+    let directory = TemporaryDirectory::new("manifest-json-sandbox").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "json",
+        r#"{"tasks":[{"id":"lint","command":["cargo","clippy"],"sandbox":{"filesystem":{"defaults":false,"read_deny":["~/.secrets"],"write_allow":["."]}}}]}"#,
+    )
+    .unwrap();
+
+    let workflow = load(&manifest).unwrap();
+    let task = workflow.tasks().first().unwrap();
+
+    let expected = SandboxPolicy::new(
+        NetworkPolicy::default(),
+        FilesystemPolicy::new(
+            false,
+            vec!["~/.secrets".parse().unwrap()],
+            vec![".".parse().unwrap()],
+            Vec::new(),
+        ),
+        None,
+    );
+    assert_eq!(task.sandbox(), Some(&expected));
+}
+
+#[test]
+fn rejects_unknown_sandbox_groups_and_fields() {
+    let directory = TemporaryDirectory::new("manifest-sandbox-invalid").unwrap();
+    let unknown_group = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      network:\n        groups: [gitlab]\n",
+    )
+    .unwrap();
+    let unknown_field = write_manifest(
+        &directory,
+        "json",
+        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"domains":[]}}}]}"#,
+    )
+    .unwrap();
+    let bad_rule = write_manifest(
+        &directory,
+        "json",
+        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"allow":["a.*.com"]}}}]}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&unknown_group),
+        Err(ManifestError::Invalid(error)) if error.contains("gitlab")
+    ));
+    assert!(matches!(
+        load(&unknown_field),
+        Err(ManifestError::Invalid(_))
+    ));
+    assert!(matches!(
+        load(&bad_rule),
+        Err(ManifestError::Invalid(error)) if error.contains("`*`")
+    ));
 }

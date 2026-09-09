@@ -530,3 +530,52 @@ fn received_workflow_status(
         .recv_timeout(timeout)
         .map_err(|error| io::Error::other(format!("workflow did not finish: {error}")))?
 }
+
+// The Linux sandbox re-executes the `loom` binary inside its namespace, so
+// only `loom-cli` tests can run it. They cover both platforms.
+#[cfg(target_os = "macos")]
+#[test]
+fn runs_sandboxed_tasks_inside_the_sandbox() {
+    use loom_core::{FilesystemPolicy, NetworkPolicy, SandboxPolicy};
+
+    let directory = assert_ok!(TemporaryDirectory::new("runner-sandbox"));
+    let outside = directory.join("outside.txt");
+    let filesystem = assert_ok!(
+        ".".parse()
+            .map(|work| { FilesystemPolicy::new(false, Vec::new(), vec![work], Vec::new()) })
+    );
+    let policy = SandboxPolicy::new(NetworkPolicy::default(), filesystem, None);
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "open",
+            &[],
+            "bash",
+            arguments(&["-c", "printf open"]),
+        ))
+        .sandboxed(policy.clone()),
+        assert_ok!(command_task(
+            "leak",
+            &[],
+            "bash",
+            arguments(&["-c", &format!("printf leak > {}", outside.display())]),
+        ))
+        .sandboxed(policy),
+    ]));
+    let mut events = Vec::new();
+
+    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
+        record_event(&mut events, event);
+        Ok(())
+    }));
+
+    assert_ne!(status, 0);
+    assert!(!outside.exists());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RecordedEvent::Finished { task: Some(0), stdout, status: Some(0), .. } if stdout == b"open"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RecordedEvent::Finished { task: Some(1), status: Some(status), .. } if *status != 0
+    )));
+}

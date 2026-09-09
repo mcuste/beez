@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use loom_core::HeadlessHarness;
+
 use crate::harness::HarnessCall;
 use crate::process_call::ProcessCall;
 
@@ -14,6 +16,15 @@ pub enum ExecutionRequest {
 }
 
 impl ExecutionRequest {
+    /// The harness this request prompts, if any.
+    #[must_use]
+    pub fn harness(&self) -> Option<HeadlessHarness> {
+        match self {
+            Self::Harness(call) => Some(call.harness()),
+            Self::Command(_) => None,
+        }
+    }
+
     pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
         match self {
             Self::Harness(call) => call.into_parts(),

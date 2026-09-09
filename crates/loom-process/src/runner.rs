@@ -1,4 +1,7 @@
-use std::process::Command;
+use std::process::{Command, Output};
+
+use loom_core::SandboxPolicy;
+use loom_sandbox::SandboxedCommand;
 
 use crate::execution::ExecutionRequest;
 
@@ -46,10 +49,33 @@ impl ProcessRunner {
         let (program, arguments) = request.into_parts();
         let output = Command::new(program).args(arguments).output()?;
 
-        Ok(ProcessOutput {
+        Ok(ProcessOutput::from(output))
+    }
+
+    /// Starts a request inside an operating-system sandbox and captures its output.
+    ///
+    /// The sandbox uses the current directory as the task's working directory.
+    pub fn run_sandboxed(
+        &self,
+        request: ExecutionRequest,
+        policy: &SandboxPolicy,
+    ) -> Result<ProcessOutput, std::io::Error> {
+        let harness = request.harness();
+        let (program, arguments) = request.into_parts();
+        let working_directory = std::env::current_dir()?;
+        let command =
+            SandboxedCommand::new(policy, harness, &program, &arguments, &working_directory)?;
+
+        Ok(ProcessOutput::from(command.output()?))
+    }
+}
+
+impl From<Output> for ProcessOutput {
+    fn from(output: Output) -> Self {
+        Self {
             stdout: output.stdout,
             stderr: output.stderr,
             status_code: output.status.code(),
-        })
+        }
     }
 }
