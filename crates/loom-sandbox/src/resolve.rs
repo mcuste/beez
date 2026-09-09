@@ -129,6 +129,31 @@ impl ResolvedSandbox {
     pub fn program(&self) -> &Path {
         &self.program
     }
+
+    /// True when a writable directory contains `path`.
+    pub(crate) fn inside_write_allow(&self, path: &Path) -> bool {
+        self.write_allow
+            .iter()
+            .any(|allowed| path.starts_with(allowed) && path != allowed.as_path())
+    }
+
+    /// Parents of write-denied paths that sit inside a writable directory.
+    ///
+    /// A task must not move a denied path out of the way and put a writable
+    /// one in its place, so both backends stop these directories from being
+    /// renamed or removed. Parents come before their own children.
+    pub(crate) fn protected_ancestors(&self) -> Vec<PathBuf> {
+        let mut ancestors = self
+            .write_deny
+            .iter()
+            .flat_map(|denied| denied.ancestors().skip(1))
+            .filter(|ancestor| self.inside_write_allow(ancestor))
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        ancestors.sort();
+        ancestors.dedup();
+        ancestors
+    }
 }
 
 fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -435,6 +460,25 @@ mod tests {
         assert_eq!(sut.read_deny, [canonical(&secret)]);
         assert_eq!(sut.write_allow, [canonical(&work)]);
         assert_eq!(sut.write_deny, [canonical(&work).join("no-deny")]);
+    }
+
+    #[test]
+    fn protects_every_parent_of_a_denied_path_up_to_the_writable_directory() {
+        let (_directory, work, home) = host("resolve-ancestors");
+        let policy = policy(
+            &[],
+            &[&text(&work)],
+            &[&text(&work.join("a/b/hooks"))],
+            None,
+        );
+
+        let sut = resolve(&policy, &work, &home);
+
+        let work = canonical(&work);
+        assert_eq!(
+            sut.protected_ancestors(),
+            [work.join("a"), work.join("a/b")]
+        );
     }
 
     #[test]

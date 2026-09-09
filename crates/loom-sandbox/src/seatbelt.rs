@@ -69,7 +69,7 @@ pub(crate) fn profile(resolved: &ResolvedSandbox, http_port: u16, socks_port: u1
         "subpath",
     );
     // A denied directory must not be moved away and recreated writable.
-    let ancestors = protected_ancestors(resolved);
+    let ancestors = resolved.protected_ancestors();
     write_rule(
         &mut profile,
         "deny file-write-unlink",
@@ -110,25 +110,6 @@ fn write_rule(profile: &mut String, action: &str, paths: &[impl AsRef<Path>], fi
         let _ = write!(profile, " ({filter} {})", quote(path.as_ref()));
     }
     profile.push_str(")\n");
-}
-
-/// Parents of write-denied paths that sit inside a writable directory.
-fn protected_ancestors(resolved: &ResolvedSandbox) -> Vec<std::path::PathBuf> {
-    let mut ancestors = resolved
-        .write_deny
-        .iter()
-        .flat_map(|denied| denied.ancestors().skip(1))
-        .filter(|ancestor| {
-            resolved
-                .write_allow
-                .iter()
-                .any(|allowed| ancestor.starts_with(allowed) && *ancestor != allowed.as_path())
-        })
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
-    ancestors.sort();
-    ancestors.dedup();
-    ancestors
 }
 
 /// Quotes a path as an SBPL string.

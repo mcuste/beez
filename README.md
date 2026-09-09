@@ -107,11 +107,11 @@ Every section has `defaults: true`. Set it to `false` to keep only the groups
 and rules the task lists. Groups a harness needs to run at all, such as
 `anthropic` for `claude`, always apply.
 
-| Section       | Fields                                                    |
-| ------------- | --------------------------------------------------------- |
-| `network`     | `defaults`, `groups`, `disable`, `allow`, `localhost`     |
-| `filesystem`  | `defaults`, `read_deny`, `write_allow`, `write_deny`      |
-| `executables` | `defaults`, `groups`, `disable`, `allow`                  |
+| Section       | Fields                                                |
+| ------------- | ----------------------------------------------------- |
+| `network`     | `defaults`, `groups`, `disable`, `allow`, `localhost` |
+| `filesystem`  | `defaults`, `read_deny`, `write_allow`, `write_deny`  |
+| `executables` | `defaults`, `groups`, `disable`, `allow`              |
 
 `allow` in `network` takes hosts such as `github.com`, `*.npmjs.org`, or
 `pypi.org:443`. Paths accept `~` for the home directory and relative paths for
@@ -120,17 +120,17 @@ directories. Without an `executables` section, any program may run.
 
 Domain groups:
 
-| Group              | Hosts                                                  | Default for      |
-| ------------------ | ------------------------------------------------------ | ---------------- |
-| `anthropic`        | `api.anthropic.com`, `platform.claude.com`, `claude.ai` | claude, pi, omp |
-| `openai`           | `api.openai.com`, `chatgpt.com`, `auth.openai.com`     | codex, pi, omp   |
-| `google`           | `generativelanguage.googleapis.com`, `oauth2.googleapis.com` | pi, omp    |
-| `openrouter`       | `openrouter.ai`                                        | pi, omp          |
-| `bedrock`, `vertex` | provider endpoints                                    | off              |
-| `claude-optional`  | Claude Code updates, plugins, and documentation        | off              |
-| `claude-telemetry` | Claude Code operational telemetry                      | off              |
-| `github`           | `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com` | off |
-| `npm`, `pypi`, `crates`, `go`, `homebrew`, `docker-hub` | package registries | off          |
+| Group                                                   | Hosts                                                                            | Default for     |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------- | --------------- |
+| `anthropic`                                             | `api.anthropic.com`, `platform.claude.com`, `claude.ai`                          | claude, pi, omp |
+| `openai`                                                | `api.openai.com`, `chatgpt.com`, `auth.openai.com`                               | codex, pi, omp  |
+| `google`                                                | `generativelanguage.googleapis.com`, `oauth2.googleapis.com`                     | pi, omp         |
+| `openrouter`                                            | `openrouter.ai`                                                                  | pi, omp         |
+| `bedrock`, `vertex`                                     | provider endpoints                                                               | off             |
+| `claude-optional`                                       | Claude Code updates, plugins, and documentation                                  | off             |
+| `claude-telemetry`                                      | Claude Code operational telemetry                                                | off             |
+| `github`                                                | `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com` | off             |
+| `npm`, `pypi`, `crates`, `go`, `homebrew`, `docker-hub` | package registries                                                               | off             |
 
 Executable groups: `coreutils`, `text`, `git`, and `net` are on by default.
 `node`, `python`, `rust`, and `go` add the toolchain and its cache
@@ -148,11 +148,12 @@ loom run command --sandbox cargo test
 
 `--allow-domain` and `--allow-write` imply `--sandbox`.
 
-Limits to keep in mind: allowing a host allows every path on it, a process
-that reads a secret and reaches one allowed host can leak it, and the
-executable list limits tooling rather than capability once an interpreter such
-as `node` is allowed. On Linux the executable list also names the dynamic
-loader, which every linked program needs, and the loader can start any file it
-may read. On Linux a write deny does not survive a rename of the directory
-that holds it, because the mount that enforces the deny moves with the
-directory.
+Limits to keep in mind:
+
+- Allowing a host allows every path on it.
+- A process that reads a secret and reaches one allowed host can leak it.
+- The executable list limits tooling rather than capability once an interpreter such as `node` is allowed.
+- On Linux the executable list also names the dynamic loader, which every linked program needs, and the
+  loader can start any file it may read.
+- On Linux a write deny needs its parent directory to exist when the run starts, because the parent is
+  what stops a task from renaming it and putting a writable directory in its place.

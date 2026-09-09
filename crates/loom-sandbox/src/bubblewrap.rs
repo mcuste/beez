@@ -146,10 +146,19 @@ fn bwrap_arguments(
     for path in &resolved.write_allow {
         bind(&mut arguments, "--bind", path, path);
     }
+    // A parent bound onto itself becomes a mount point, and the kernel refuses
+    // to rename a mount point. Without it a task moves the parent aside and the
+    // deny mount goes with it. This bind must come before the denies inside it,
+    // and a parent that does not exist yet cannot be bound.
+    for path in resolved.protected_ancestors() {
+        if path.exists() {
+            bind(&mut arguments, "--bind", &path, &path);
+        }
+    }
     for path in &resolved.write_deny {
         if path.exists() {
             bind(&mut arguments, "--ro-bind", path, path);
-        } else if inside_write_allow(resolved, path) {
+        } else if resolved.inside_write_allow(path) {
             // A mount cannot mask a path that does not exist, so an empty
             // read-only directory takes its place. A deny outside every
             // writable directory needs no mount.
@@ -187,14 +196,6 @@ fn bwrap_arguments(
     arguments.push(resolved.program().into());
     arguments.extend(program_arguments.iter().cloned());
     arguments
-}
-
-/// True when a writable directory contains `path`, so a mount must mask it.
-fn inside_write_allow(resolved: &ResolvedSandbox, path: &Path) -> bool {
-    resolved
-        .write_allow
-        .iter()
-        .any(|allowed| path.starts_with(allowed) && path != allowed.as_path())
 }
 
 fn flags(names: &[&str]) -> Vec<OsString> {
@@ -253,11 +254,20 @@ mod tests {
         .collect()
     }
 
-    /// True when `expected` appears as consecutive arguments.
-    fn has_run(arguments: &[String], expected: &[&str]) -> bool {
+    /// Where `expected` appears as consecutive arguments.
+    fn run_at(arguments: &[String], expected: &[&str]) -> Option<usize> {
         arguments
             .windows(expected.len())
-            .any(|window| window.iter().zip(expected).all(|(one, two)| one == two))
+            .position(|window| window.iter().zip(expected).all(|(one, two)| one == two))
+    }
+
+    /// True when `expected` appears as consecutive arguments.
+    fn has_run(arguments: &[String], expected: &[&str]) -> bool {
+        run_at(arguments, expected).is_some()
+    }
+
+    fn text(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
     }
 
     #[test]
@@ -273,6 +283,38 @@ mod tests {
         assert!(has_run(&sut, &["--bind", &work, &work]), "{sut:?}");
         let hooks = format!("{work}/.git/hooks");
         assert!(has_run(&sut, &["--ro-bind", &hooks, &hooks]), "{sut:?}");
+    }
+
+    #[test]
+    fn binds_the_parent_of_a_denied_path_before_the_deny_so_it_cannot_be_renamed() {
+        let directory = TemporaryDirectory::new("bwrap-deny-parent").unwrap();
+        let work = directory.join("work");
+        fs::create_dir_all(work.join(".git/hooks")).unwrap();
+        let bridge = bridge();
+
+        let sut = arguments(&resolved(&work), &bridge);
+
+        let git = text(&work.join(".git"));
+        let hooks = text(&work.join(".git/hooks"));
+        let parent = run_at(&sut, &["--bind", &git, &git]);
+        let deny = run_at(&sut, &["--ro-bind", &hooks, &hooks]);
+        assert!(
+            matches!((parent, deny), (Some(parent), Some(deny)) if parent < deny),
+            "{sut:?}"
+        );
+    }
+
+    #[test]
+    fn binds_no_parent_of_a_denied_path_that_does_not_exist_yet() {
+        let directory = TemporaryDirectory::new("bwrap-missing-parent").unwrap();
+        let work = directory.join("work");
+        fs::create_dir(&work).unwrap();
+        let bridge = bridge();
+
+        let sut = arguments(&resolved(&work), &bridge);
+
+        let git = text(&work.join(".git"));
+        assert!(!has_run(&sut, &["--bind", &git, &git]), "{sut:?}");
     }
 
     #[test]

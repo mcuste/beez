@@ -146,9 +146,6 @@ fn refuses_writes_to_a_denied_directory() {
     assert!(!work.join(".git/hooks/pre-commit").exists());
 }
 
-// Only Seatbelt denies this. A Linux bind mount moves with the directory that
-// holds it, so renaming the parent of a denied path leaves the deny behind.
-#[cfg(target_os = "macos")]
 #[test]
 fn refuses_to_move_a_denied_directory_out_of_the_way() {
     let (directory, work) = working_directory("cli-sandbox-move-denied").unwrap();
