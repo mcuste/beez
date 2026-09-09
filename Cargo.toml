@@ -21,7 +21,7 @@ repository = "https://github.com/mcuste/loom"
 [workspace.dependencies]
 anstream = "1.0.0"
 anstyle = "1.0.14"
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 indicatif = { version = "0.18.6", default-features = false, features = ["unicode-width"] }
 loom-process = { path = "crates/loom-process" }
 loom-test-support = { path = "crates/loom-test-support" }

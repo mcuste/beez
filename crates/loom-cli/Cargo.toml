@@ -21,6 +21,8 @@ loom-manifest = { path = "../loom-manifest" }
 loom-runner = { path = "../loom-runner" }
 loom-sandbox = { path = "../loom-sandbox" }
 loom-process.workspace = true
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
 
 [dev-dependencies]
 loom-test-support = { workspace = true }

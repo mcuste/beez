@@ -227,6 +227,8 @@ dependencies = [
  "loom-runner",
  "loom-sandbox",
  "loom-test-support",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

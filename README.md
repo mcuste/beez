@@ -143,6 +143,71 @@ task wrote the line.
 `--color auto|always|never` controls Loom's own colours. Loom also follows
 `NO_COLOR`, `CLICOLOR_FORCE`, and `TERM=dumb`.
 
+## Log artifacts
+
+Every run also writes its output to disk, so a finished run stays open to
+inspection. Loom keeps the artifacts in `.loom` in the repository root, or in
+the working directory outside a repository. A `.loom` that already exists wins
+over both, so runs from a subdirectory join the runs already there. The
+directory ignores itself in Git, so no repository needs a change for it.
+
+Each run gets its own directory, named after the time it started and the
+process that ran it. The names sort by time, and `latest` points at the newest
+run.
+
+```
+.loom/
+  latest -> runs/20260909T164512815Z-70632
+  runs/
+    20260909T164512815Z-70632/
+      run.json
+      run.log
+      tasks/
+        api.stdout
+        api.stderr
+        web.stdout
+        web.stderr
+```
+
+`run.log` holds the whole run in one file: every line of every task, behind its
+task ID and its stream mark, and every line Loom wrote itself. Each line
+carries the UTC time it arrived. Loom removes the colours a task chose, so the
+file stays readable.
+
+```
+2026-09-09T16:45:12.818Z Running   api
+2026-09-09T16:45:12.868Z api         │ GET /users?page=1 200
+2026-09-09T16:45:16.925Z api         ┊ warning: slow query took 412ms
+2026-09-09T16:45:23.079Z Finished  api in 10.3s (ok)
+2026-09-09T16:45:23.080Z Summary   3 passed in 10.3s
+```
+
+`tasks/<id>.stdout` and `tasks/<id>.stderr` keep the bytes of one stream of one
+task, as the task wrote them. Use them when a later step needs the exact output
+of a task.
+
+`run.json` records the run itself: the arguments, the working directory, the
+manifest, the start and end times, Loom's exit status, and one entry per task
+with its dependencies, its request, its state, its exit status and its
+duration.
+
+Loom names the directory of a run before its tasks start.
+
+```
+Logging   .loom/runs/20260909T164512815Z-70632
+Running   api
+```
+
+A run of one task relays the bytes of that task, so Loom writes no line of its
+own there. The artifacts still hold the whole run.
+
+`--log-dir <PATH>` writes the artifacts somewhere else, and `LOOM_LOG_DIR` does
+the same through the environment. `--no-log` writes none. A problem with the
+artifacts never stops a run. Loom reports it once as a warning and carries on.
+
+Loom keeps every run. Remove old runs yourself when the directory grows too
+large.
+
 ## Sandbox
 
 A task can run inside an operating-system sandbox that limits the network,
@@ -161,7 +226,8 @@ cloud metadata service, unless `localhost: true`. Reads are allowed
 except for credential stores such as `~/.ssh` and `~/.aws`. Writes are denied
 except inside the working directory, the temporary directory, and the
 harness's own state directory. Files a run could use to escape later, such as
-`.git/hooks`, `.claude`, and `.mcp.json`, stay read-only.
+`.git/hooks`, `.claude`, and `.mcp.json`, stay read-only, and so does `.loom`,
+so a task cannot rewrite the log of its own run.
 
 Enable the sandbox for a whole workflow or for one task. A task can also opt
 out with `sandbox: false`. Each section a task defines replaces the workflow's

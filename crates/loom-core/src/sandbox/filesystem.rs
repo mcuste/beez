@@ -38,8 +38,9 @@ const DEFAULT_READ_DENY: [&str; 8] = [
 /// The task's working directory and the temporary directory.
 const DEFAULT_WRITE_ALLOW: [&str; 2] = [".", "/tmp"];
 
-/// Files a run could use to execute code outside the sandbox later.
-const DEFAULT_WRITE_DENY: [&str; 8] = [
+/// Files a run could use to execute code outside the sandbox later, and the
+/// artifacts of the run itself.
+const DEFAULT_WRITE_DENY: [&str; 9] = [
     ".git/hooks",
     ".git/config",
     ".claude",
@@ -48,6 +49,7 @@ const DEFAULT_WRITE_DENY: [&str; 8] = [
     ".agents",
     ".pi",
     ".omp",
+    ".loom",
 ];
 
 impl FilesystemPolicy {
@@ -162,6 +164,7 @@ mod tests {
             ".agents",
             ".pi",
             ".omp",
+            ".loom",
         ] {
             assert!(write_deny.contains(&path(text)), "{text} is writable");
         }

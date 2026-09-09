@@ -33,6 +33,7 @@ fn run_workflow(directory: &TemporaryDirectory, work: &Path, manifest: &str) -> 
         .args(["run", "workflow"])
         .arg(&path)
         .current_dir(work)
+        .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.starts_with("bwrap:") || stderr.contains("sandbox-exec:") {
@@ -355,6 +356,7 @@ fn applies_the_harness_environment_inside_the_sandbox() {
         .arg(&manifest)
         .current_dir(&work)
         .env("PATH", extended_path(directory.path()))
+        .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
