@@ -78,13 +78,13 @@ fn read_target(client: &mut TcpStream) -> io::Result<Option<(String, u16)>> {
         // The allowlist names hosts, so a literal address can never match it.
         SOCKS_ADDRESS_IPV4 => {
             let _ = read_exact::<6>(client)?;
-            eprintln!("loom sandbox: denied SOCKS connection to a literal IPv4 address");
+            crate::diagnostic::report("denied SOCKS connection to a literal IPv4 address");
             socks_reply(client, SOCKS_NOT_ALLOWED)?;
             return Ok(None);
         }
         SOCKS_ADDRESS_IPV6 => {
             let _ = read_exact::<18>(client)?;
-            eprintln!("loom sandbox: denied SOCKS connection to a literal IPv6 address");
+            crate::diagnostic::report("denied SOCKS connection to a literal IPv6 address");
             socks_reply(client, SOCKS_NOT_ALLOWED)?;
             return Ok(None);
         }

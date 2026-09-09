@@ -12,7 +12,10 @@ path = "src/main.rs"
 
 
 [dependencies]
+anstream.workspace = true
+anstyle.workspace = true
 clap.workspace = true
+indicatif.workspace = true
 loom-core = { path = "../loom-core" }
 loom-manifest = { path = "../loom-manifest" }
 loom-runner = { path = "../loom-runner" }

@@ -176,6 +176,17 @@ impl WorkflowExecution<'_> {
     pub fn has_pending(&self) -> bool {
         self.statuses.contains(&TaskStatus::Pending)
     }
+
+    /// Returns every task that has not started yet.
+    #[must_use]
+    pub fn pending(&self) -> Vec<TaskIndex> {
+        self.statuses
+            .iter()
+            .enumerate()
+            .filter(|(_, status)| **status == TaskStatus::Pending)
+            .map(|(index, _)| TaskIndex(index))
+            .collect()
+    }
 }
 
 fn task_indexes(
@@ -464,6 +475,20 @@ mod tests {
 
         assert!(sut.ready().is_empty());
         assert!(sut.has_pending());
+    }
+
+    #[test]
+    fn reports_only_the_tasks_that_have_not_started() {
+        let workflow = Workflow::try_from(vec![
+            task("prepare", &[]),
+            task("build", &["prepare"]),
+            task("test", &["build"]),
+        ])
+        .unwrap();
+        let mut sut = succeeded(workflow.execution(), &[TaskIndex(0)]);
+        assert!(sut.start(TaskIndex(1)).is_some());
+
+        assert_eq!(sut.pending(), [TaskIndex(2)]);
     }
 
     #[test]

@@ -109,7 +109,7 @@ impl Rules {
             .lock()
             .map_or(true, |mut reported| reported.insert(target.to_owned()));
         if first_time {
-            eprintln!("loom sandbox: denied connection to {target}");
+            crate::diagnostic::report(&format!("denied connection to {target}"));
         }
     }
 }

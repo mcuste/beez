@@ -1,8 +1,13 @@
 use std::ffi::OsString;
 use std::io;
+use std::sync::Mutex;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use loom_core::{SandboxPolicy, TaskIndex, TaskRequest, Workflow, WorkflowExecution};
-use loom_process::{ExecutionRequest, HarnessCall, ProcessCall, ProcessOutput, ProcessRunner};
+use loom_process::{
+    ExecutionRequest, HarnessCall, OutputStream, ProcessCall, ProcessOutput, ProcessRunner,
+};
 
 /// Reports a process execution lifecycle event.
 #[derive(Debug)]
@@ -12,12 +17,23 @@ pub enum RunEvent {
         /// Workflow task, if this request belongs to a workflow.
         task: Option<TaskIndex>,
     },
+    /// A running request wrote one output line.
+    Output {
+        /// Workflow task, if this request belongs to a workflow.
+        task: Option<TaskIndex>,
+        /// Stream the line came from.
+        stream: OutputStream,
+        /// Line as the child wrote it, with its newline when there is one.
+        line: Vec<u8>,
+    },
     /// A request completed and captured its streams.
     Finished {
         /// Workflow task, if this request belongs to a workflow.
         task: Option<TaskIndex>,
         /// Captured process result.
         output: ProcessOutput,
+        /// Time the request took.
+        elapsed: Duration,
     },
     /// A request could not start or capture its output.
     Failed {
@@ -25,6 +41,13 @@ pub enum RunEvent {
         task: Option<TaskIndex>,
         /// Category of the execution error.
         error_kind: io::ErrorKind,
+        /// Time until the request failed.
+        elapsed: Duration,
+    },
+    /// A workflow task never ran, because a dependency failed.
+    Blocked {
+        /// Workflow task that stays pending.
+        task: TaskIndex,
     },
 }
 
@@ -50,20 +73,12 @@ impl Runner {
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
         on_event(&RunEvent::Started { task: None })?;
-        match run_process(request, sandbox) {
-            Ok(output) => {
-                let status = output.status_code().unwrap_or(1);
-                on_event(&RunEvent::Finished { task: None, output })?;
-                Ok(status)
-            }
-            Err(error) => {
-                on_event(&RunEvent::Failed {
-                    task: None,
-                    error_kind: error.kind(),
-                })?;
-                Err(error)
-            }
-        }
+        let mut outcomes =
+            run_requests_concurrently(vec![(None, request, sandbox.cloned())], on_event)?;
+        let Some((_, outcome)) = outcomes.pop() else {
+            return Err(io::Error::other("request produced no result"));
+        };
+        outcome.map(|status| status.unwrap_or(1))
     }
 
     /// Runs ready workflow tasks concurrently until completion.
@@ -75,16 +90,29 @@ impl Runner {
         let mut execution = workflow.execution();
         let mut exit_status = 0;
         while execution.has_pending() {
-            let requests = start_ready_tasks(&mut execution, on_event)?;
+            let tasks = start_ready_tasks(&mut execution, on_event)?;
 
             // Tasks stay pending only when a dependency failed, which already set the status.
-            if requests.is_empty() {
+            if tasks.is_empty() {
+                for index in execution.pending() {
+                    on_event(&RunEvent::Blocked { task: index })?;
+                }
                 return Ok(exit_status);
             }
 
-            let results = run_requests_concurrently(requests)?;
+            let jobs = tasks
+                .into_iter()
+                .map(|task| {
+                    (
+                        Some(task.index),
+                        execution_request(task.request),
+                        task.sandbox,
+                    )
+                })
+                .collect();
+            let outcomes = run_requests_concurrently(jobs, on_event)?;
 
-            finish_tasks(&mut execution, results, on_event, &mut exit_status)?;
+            record_outcomes(&mut execution, outcomes, &mut exit_status)?;
         }
         Ok(exit_status)
     }
@@ -119,60 +147,111 @@ fn start_ready_tasks(
         .collect()
 }
 
-fn run_process(
-    request: ExecutionRequest,
-    sandbox: Option<&SandboxPolicy>,
-) -> io::Result<ProcessOutput> {
-    match sandbox {
-        Some(policy) => ProcessRunner.run_sandboxed(request, policy),
-        None => ProcessRunner.run(request),
-    }
+/// One request to run, with the task it belongs to.
+type Job = (Option<TaskIndex>, ExecutionRequest, Option<SandboxPolicy>);
+
+/// What a task thread sends back while it runs.
+enum Message {
+    /// One output line of a running request.
+    Line(Option<TaskIndex>, OutputStream, Vec<u8>),
+    /// A request ended.
+    Done(Option<TaskIndex>, io::Result<ProcessOutput>, Duration),
 }
 
-/// Runs task requests concurrently.
+/// A finished request's exit status, or the error that stopped it.
+///
+/// `None` inside `Ok` means the process died from a signal.
+type Outcome = io::Result<Option<i32>>;
+
+/// Runs requests concurrently, reporting each line and each result as it arrives.
+///
+/// Outcomes come back in completion order, not in the order of `jobs`.
 fn run_requests_concurrently(
-    tasks: Vec<StartedTask>,
-) -> io::Result<Vec<(TaskIndex, io::Result<ProcessOutput>)>> {
+    jobs: Vec<Job>,
+    on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
+) -> io::Result<Vec<(Option<TaskIndex>, Outcome)>> {
+    let (sender, receiver) = mpsc::channel::<Message>();
+
     std::thread::scope(|scope| {
-        tasks
+        let handles = jobs
             .into_iter()
-            .map(|task| {
+            .map(|(task, request, sandbox)| {
+                // A Sender is not Sync, so the two reader threads share it under a lock.
+                let sender = Mutex::new(sender.clone());
                 scope.spawn(move || {
-                    let request = execution_request(task.request);
-                    (task.index, run_process(request, task.sandbox.as_ref()))
+                    let started = Instant::now();
+                    let sink = |stream, line: &[u8]| {
+                        if let Ok(sender) = sender.lock() {
+                            let _ = sender.send(Message::Line(task, stream, line.to_vec()));
+                        }
+                    };
+                    let result = ProcessRunner.run_streaming(request, sandbox.as_ref(), &sink);
+                    // The reader threads have ended, so no line follows this.
+                    if let Ok(sender) = sender.lock() {
+                        let _ = sender.send(Message::Done(task, result, started.elapsed()));
+                    }
                 })
             })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| io::Error::other("workflow task execution thread panicked"))
-            })
-            .collect()
+            .collect::<Vec<_>>();
+        drop(sender);
+
+        // Reporting runs here, because the callback belongs to the caller's thread.
+        let mut outcomes = Vec::new();
+        for message in receiver {
+            match message {
+                Message::Line(task, stream, line) => {
+                    on_event(&RunEvent::Output { task, stream, line })?;
+                }
+                Message::Done(task, Ok(output), elapsed) => {
+                    outcomes.push((task, Ok(output.status_code())));
+                    on_event(&RunEvent::Finished {
+                        task,
+                        output,
+                        elapsed,
+                    })?;
+                }
+                Message::Done(task, Err(error), elapsed) => {
+                    on_event(&RunEvent::Failed {
+                        task,
+                        error_kind: error.kind(),
+                        elapsed,
+                    })?;
+                    outcomes.push((task, Err(error)));
+                }
+            }
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| io::Error::other("workflow task execution thread panicked"))?;
+        }
+        Ok(outcomes)
     })
 }
 
-/// Records task results and reports completion events.
-fn finish_tasks(
+/// Records task outcomes and picks the workflow exit status.
+///
+/// Outcomes arrive in completion order, so this sorts them into declaration
+/// order. That keeps the reported status the same from run to run.
+fn record_outcomes(
     execution: &mut WorkflowExecution<'_>,
-    results: Vec<(TaskIndex, io::Result<ProcessOutput>)>,
-    on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
+    mut outcomes: Vec<(Option<TaskIndex>, Outcome)>,
     exit_status: &mut i32,
 ) -> io::Result<()> {
+    outcomes.sort_by_key(|(task, _)| task.map_or(0, TaskIndex::position));
     let mut execution_error = None;
 
-    for (index, result) in results {
-        match result {
-            Ok(output) => {
-                let status = output.status_code().unwrap_or(1);
+    for (task, outcome) in outcomes {
+        let Some(index) = task else {
+            continue;
+        };
+        match outcome {
+            Ok(status) => {
+                let status = status.unwrap_or(1);
                 if !execution.complete(index, status == 0) {
                     return Err(io::Error::other("workflow task is not running"));
                 }
-                on_event(&RunEvent::Finished {
-                    task: Some(index),
-                    output,
-                })?;
                 if status != 0 && *exit_status == 0 {
                     *exit_status = status;
                 }
@@ -181,10 +260,6 @@ fn finish_tasks(
                 if !execution.complete(index, false) {
                     return Err(io::Error::other("workflow task is not running"));
                 }
-                on_event(&RunEvent::Failed {
-                    task: Some(index),
-                    error_kind: error.kind(),
-                })?;
                 if execution_error.is_none() {
                     execution_error = Some(error);
                 }

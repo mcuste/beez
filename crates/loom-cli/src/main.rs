@@ -1,17 +1,22 @@
 //! Loom's user-facing command-line interface.
 
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use loom_core::{
     DomainRule, FilesystemPolicy, HeadlessHarness, NetworkPolicy, SandboxPath, SandboxPolicy,
+    Workflow,
 };
 use loom_manifest::load;
 use loom_process::{ExecutionRequest, HarnessCall, ProcessCall};
-use loom_runner::{RunEvent, Runner};
+use loom_runner::Runner;
+
+mod report;
+
+use report::{ColorMode, OutputMode, Reporter, Timestamps};
 
 #[derive(Debug, Parser)]
 #[command(name = "loom", version)]
@@ -57,6 +62,24 @@ enum RunCommand {
 #[derive(Debug, Args)]
 struct WorkflowFile {
     path: PathBuf,
+    /// How to render the output of the tasks.
+    #[arg(long, value_enum, default_value_t = OutputMode::Stream)]
+    output: OutputMode,
+    /// When to colour Loom's own output.
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
+    /// Prefix every line Loom writes with a timestamp.
+    ///
+    /// A value needs an equals sign, so the bare flag cannot take the path of
+    /// the manifest as its value.
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "date-time"
+    )]
+    timestamps: Option<Timestamps>,
 }
 
 #[derive(Debug, Args)]
@@ -157,28 +180,36 @@ fn main() {
 }
 
 fn run(cli: Cli) -> io::Result<i32> {
-    let mut render = render;
     let command = match cli.command {
         Command::Run(Run { command }) => command,
         Command::SandboxInit(init) => return sandbox_init(&init),
         Command::SandboxRelay(relay) => return sandbox_relay(&relay),
     };
     match command {
-        RunCommand::Workflow(WorkflowFile { path }) => {
+        RunCommand::Workflow(WorkflowFile {
+            path,
+            output,
+            color,
+            timestamps,
+        }) => {
             let workflow = load(&path)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-            Runner.run_workflow(&workflow, &mut render)
+            let mut reporter = reporter(Some(&workflow), output, color, timestamps);
+            let status = Runner.run_workflow(&workflow, &mut |event| reporter.event(event));
+            reporter.finish()?;
+            status
         }
-        RunCommand::Pi(run) => run_harness(HeadlessHarness::Pi, run, &mut render),
-        RunCommand::Omp(run) => run_harness(HeadlessHarness::Omp, run, &mut render),
-        RunCommand::Claude(run) => run_harness(HeadlessHarness::Claude, run, &mut render),
-        RunCommand::Codex(run) => run_harness(HeadlessHarness::Codex, run, &mut render),
+        RunCommand::Pi(run) => run_harness(HeadlessHarness::Pi, run),
+        RunCommand::Omp(run) => run_harness(HeadlessHarness::Omp, run),
+        RunCommand::Claude(run) => run_harness(HeadlessHarness::Claude, run),
+        RunCommand::Codex(run) => run_harness(HeadlessHarness::Codex, run),
         RunCommand::Command(Process {
             sandbox,
             program,
             arguments,
         }) => {
             let policy = sandbox.policy()?;
+            let mut reporter = reporter(None, OutputMode::Stream, ColorMode::Auto, None);
             Runner.run_request_in(
                 ExecutionRequest::Command(
                     arguments
@@ -188,19 +219,32 @@ fn run(cli: Cli) -> io::Result<i32> {
                         }),
                 ),
                 policy.as_ref(),
-                &mut render,
+                &mut |event| reporter.event(event),
             )
         }
     }
 }
 
-fn run_harness(
-    harness: HeadlessHarness,
-    run: HarnessRun,
-    render: &mut impl FnMut(&RunEvent) -> io::Result<()>,
-) -> io::Result<i32> {
+fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
     let policy = run.sandbox.policy()?;
-    Runner.run_request_in(harness_request(harness, run), policy.as_ref(), render)
+    let mut reporter = reporter(None, OutputMode::Stream, ColorMode::Auto, None);
+    Runner.run_request_in(
+        harness_request(harness, run),
+        policy.as_ref(),
+        &mut |event| reporter.event(event),
+    )
+}
+
+/// Builds a reporter and routes sandbox diagnostics through it.
+fn reporter(
+    workflow: Option<&Workflow>,
+    output: OutputMode,
+    color: ColorMode,
+    timestamps: Option<Timestamps>,
+) -> Reporter {
+    let reporter = Reporter::new(workflow, output, color, timestamps);
+    loom_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
+    reporter
 }
 
 #[cfg(target_os = "linux")]
@@ -243,14 +287,6 @@ fn unsupported_sandbox_helper() -> io::Error {
         io::ErrorKind::Unsupported,
         "sandbox helper commands run only inside a Linux sandbox",
     )
-}
-
-fn render(event: &RunEvent) -> io::Result<()> {
-    if let RunEvent::Finished { output, .. } = event {
-        io::stdout().write_all(output.stdout())?;
-        io::stderr().write_all(output.stderr())?;
-    }
-    Ok(())
 }
 
 fn harness_request(harness: HeadlessHarness, run: HarnessRun) -> ExecutionRequest {

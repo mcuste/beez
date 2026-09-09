@@ -125,7 +125,9 @@ impl Server {
                     }
                     // Retrying a permanent error would spin this thread.
                     Err(error) => {
-                        eprintln!("loom sandbox: stopped accepting connections: {error}");
+                        crate::diagnostic::report(&format!(
+                            "stopped accepting connections: {error}"
+                        ));
                         break;
                     }
                 };
@@ -134,9 +136,9 @@ impl Server {
                 }
                 let Some(slot) = ConnectionSlot::claim(&live) else {
                     if !reported_limit.swap(true, Ordering::SeqCst) {
-                        eprintln!(
-                            "loom sandbox: refused a connection, {MAX_CONNECTIONS} are already open"
-                        );
+                        crate::diagnostic::report(&format!(
+                            "refused a connection, {MAX_CONNECTIONS} are already open"
+                        ));
                     }
                     drop(stream);
                     continue;

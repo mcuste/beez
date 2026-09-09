@@ -327,6 +327,14 @@ fn refuses_local_connections_directly_and_through_the_proxy() {
     assert!(!direct.status.success(), "{direct:?}");
     assert!(!proxied.status.success(), "{proxied:?}");
     assert_never_reached(&origin);
+    // Loom's own notes carry a status word, so a log never confuses them with
+    // the output of a task.
+    let stderr = String::from_utf8_lossy(&proxied.stderr);
+    assert!(
+        stderr.contains("Sandbox   denied connection to"),
+        "{stderr}"
+    );
+    assert!(!contains(&proxied.stdout, b"Sandbox"), "{proxied:?}");
 }
 
 #[test]

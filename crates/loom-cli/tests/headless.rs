@@ -257,18 +257,21 @@ fn runs_a_yaml_workflow_in_dependency_order() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
-        .args(["run", "workflow"])
+        .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .output()
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"done");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, "test    \u{2502} done\n".as_bytes());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Summary   2 passed in"),
+        "{output:?}"
+    );
 }
 
 #[test]
-fn relays_the_whole_output_of_every_task_that_runs_together() {
+fn prefixes_every_line_of_every_task_that_runs_together() {
     let directory = TemporaryDirectory::new("cli-concurrent-output").unwrap();
     let workflow = directory.join("workflow.yaml");
     fs::write(
@@ -278,37 +281,25 @@ fn relays_the_whole_output_of_every_task_that_runs_together() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
-        .args(["run", "workflow"])
+        .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .output()
         .unwrap();
 
     // Both tasks run in one batch, so Loom may relay them in either order.
     assert!(output.status.success());
-    assert_eq!(output.stdout.len(), b"first-outsecond-out".len());
-    assert_eq!(output.stderr.len(), b"first-errsecond-err".len());
-    for expected in [&b"first-out"[..], &b"second-out"[..]] {
-        assert!(
-            output
-                .stdout
-                .windows(expected.len())
-                .any(|window| window == expected),
-            "stdout {:?} lost {:?}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(expected)
-        );
-    }
-    for expected in [&b"first-err"[..], &b"second-err"[..]] {
-        assert!(
-            output
-                .stderr
-                .windows(expected.len())
-                .any(|window| window == expected),
-            "stderr {:?} lost {:?}",
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(expected)
-        );
-    }
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        [
+            "first  \u{2502} first-out",
+            "first  \u{250a} first-err",
+            "second \u{2502} second-out",
+            "second \u{250a} second-err",
+        ]
+    );
 }
 
 #[test]
@@ -326,14 +317,23 @@ fn returns_a_failed_workflow_status_and_blocks_dependents() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
-        .args(["run", "workflow"])
+        .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(23));
-    assert_eq!(output.stdout, b"failed-out");
-    assert_eq!(output.stderr, b"failed-err");
+    // A task's own two streams both reach standard output, each marked.
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        ["fail    \u{2502} failed-out", "fail    \u{250a} failed-err"]
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Failed    fail in"), "{stderr}");
+    assert!(stderr.contains("Blocked   blocked"), "{stderr}");
     assert!(!marker.exists());
 }
 
@@ -397,6 +397,268 @@ fn rejects_a_workflow_without_tasks() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(output.stderr, b"workflow must define at least one task\n");
+}
+
+#[test]
+fn groups_each_task_behind_a_status_line() {
+    let directory = TemporaryDirectory::new("cli-grouped-output").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out; echo first-err >&2']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow", "--output", "grouped"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    // One reader thread per stream, so a task's own two lines may swap.
+    let mut lines = stdout.lines();
+    let first: Vec<&str> = lines.by_ref().take(2).collect();
+    assert!(first.contains(&"    first-out"), "stdout: {stdout}");
+    assert!(first.contains(&"    first-err"), "stdout: {stdout}");
+    assert_eq!(lines.next(), Some("    second-out"));
+    assert_eq!(lines.next(), None);
+    assert!(stderr.contains("Running   first"), "stderr: {stderr}");
+    assert!(stderr.contains("Finished  first in"), "stderr: {stderr}");
+    assert!(stderr.contains("Summary   2 passed in"), "stderr: {stderr}");
+}
+
+#[test]
+fn prefixes_every_line_with_its_task_in_stream_mode() {
+    let directory = TemporaryDirectory::new("cli-stream-output").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: first\n    command: [bash, -c, 'echo one; echo two >&2']\n  - id: longer_id\n    depends_on: [first]\n    command: [bash, -c, 'echo three']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow", "--output", "stream", "--color", "never"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    // The spinners are hidden without a terminal, and every line still arrives.
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines = stdout.lines();
+    let first: Vec<&str> = lines.by_ref().take(2).collect();
+    // The separator says which stream a line came from.
+    assert!(
+        first.contains(&"first     \u{2502} one"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        first.contains(&"first     \u{250a} two"),
+        "stdout: {stdout}"
+    );
+    assert_eq!(lines.next(), Some("longer_id \u{2502} three"));
+    assert_eq!(lines.next(), None);
+}
+
+#[test]
+fn reports_a_blocked_task_and_counts_it_in_the_summary() {
+    let directory = TemporaryDirectory::new("cli-blocked-summary").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: fail\n    command: [bash, -c, 'exit 23']\n  - id: later\n    depends_on: [fail]\n    command: [bash, -c, 'true']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(23));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Failed    fail in"), "stderr: {stderr}");
+    assert!(stderr.contains("(exit 23)"), "stderr: {stderr}");
+    assert!(stderr.contains("Blocked   later"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Summary   0 passed, 1 failed, 1 blocked in"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn relays_a_single_task_workflow_without_decoration() {
+    let directory = TemporaryDirectory::new("cli-single-task").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: only\n    command: [bash, -c, 'printf solo']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"solo");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn closes_each_grouped_task_with_its_status_line() {
+    let directory = TemporaryDirectory::new("cli-grouped-order").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
+    )
+    .unwrap();
+    let merged = directory.join("merged.log");
+    let stdout = fs::File::create(&merged).unwrap();
+    let stderr = stdout.try_clone().unwrap();
+
+    // Both streams share one file description, so the file keeps the order
+    // Loom wrote them, the way a terminal shows it.
+    let status = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow", "--output", "grouped"])
+        .arg(workflow)
+        .stdout(stdout)
+        .stderr(stderr)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let log = fs::read_to_string(&merged).unwrap();
+    let mut lines = log.lines();
+    assert_eq!(lines.next(), Some("Running   first"));
+    assert_eq!(lines.next(), Some("    first-out"));
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("Finished  first in")),
+        "log: {log}"
+    );
+    assert_eq!(lines.next(), Some("Running   second"));
+    assert_eq!(lines.next(), Some("    second-out"));
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("Finished  second in")),
+        "log: {log}"
+    );
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("Summary   2 passed in")),
+        "log: {log}"
+    );
+    assert_eq!(lines.next(), None);
+}
+
+#[test]
+fn keeps_a_grouped_block_off_the_status_line() {
+    let directory = TemporaryDirectory::new("cli-grouped-newline").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: first\n    command: [bash, -c, \"echo one; echo; printf no-newline\"]\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'true']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow", "--output", "grouped"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    // A blank line keeps no trailing spaces, and the last line still ends.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "    one\n\n    no-newline\n"
+    );
+}
+
+#[test]
+fn stamps_a_grouped_line_when_it_arrives() {
+    let directory = TemporaryDirectory::new("cli-timestamps").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: first\n    command: [bash, -c, 'echo early; sleep 1; echo late']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'true']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args([
+            "run",
+            "workflow",
+            "--output",
+            "grouped",
+            "--timestamps=elapsed",
+            "--color",
+            "never",
+        ])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    // A block prints when its task ends, so a stamp must be the arrival time
+    // of its own line, not the time the block was written.
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("    0.0s     early"));
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("    1.0s")),
+        "stdout: {stdout}"
+    );
+    assert_eq!(lines.next(), None);
+}
+
+#[test]
+fn stamps_every_line_with_a_utc_date_and_time() {
+    let directory = TemporaryDirectory::new("cli-datetime").unwrap();
+    let workflow = directory.join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "tasks:\n  - id: first\n    command: [bash, -c, 'echo one']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo two']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "workflow", "--timestamps", "--color", "never"])
+        .arg(workflow)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for line in stdout.lines() {
+        let (stamp, rest) = line.split_at(24);
+        assert!(
+            stamp.len() == 24
+                && stamp.ends_with('Z')
+                && stamp.is_char_boundary(24)
+                && stamp.chars().filter(|byte| *byte == '-').count() == 2
+                && stamp.chars().filter(|byte| *byte == ':').count() == 2,
+            "line: {line}"
+        );
+        assert!(
+            rest.starts_with(" first") || rest.starts_with(" second"),
+            "line: {line}"
+        );
+    }
 }
 
 fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>> {

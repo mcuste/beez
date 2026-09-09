@@ -52,6 +52,97 @@ loom run claude --model opus --effort high "inspect the repository"
 loom run codex --model gpt-5 --effort high "inspect the repository"
 ```
 
+## Output
+
+Workflow tasks run at the same time, so Loom labels their output. `--output`
+picks the form.
+
+`stream` is the default. It prints every line as it arrives, behind the task
+ID, and keeps one spinner per running task at the bottom of the terminal. When
+a task ends, its spinner gives way to one status line, so the finished task
+stays in the log. A solid bar marks a line the task wrote on standard output,
+and a dashed bar marks standard error.
+
+```
+api         │ GET /users?page=1 200
+web         │ bundling chunk 1 of 7
+api         ┊ warning: slow query took 412ms
+Finished  worker_pool in 4.1s (ok)
+web         │ bundling chunk 7 of 7
+Finished  web in 7.2s (ok)
+Summary   3 passed in 10.3s
+```
+
+`grouped` collects each task and prints it when the task ends, so the output of
+two tasks never mixes. A status line opens and closes each task, and the output
+between them is indented.
+
+```
+Running   api
+Running   web
+    claimed job 881
+    claimed job 882
+Finished  worker_pool in 4.1s (ok)
+    bundling chunk 1 of 7
+Finished  web in 7.2s (ok)
+Summary   3 passed in 10.3s
+```
+
+Grouped holds a task's output until the task ends, so a long task shows nothing
+while it runs, and a run that is killed loses what it had collected. Stream has
+already printed every line, so prefer it in CI.
+
+A workflow with one task relays its streams unchanged, because there is nothing
+to tell apart. `loom run command` and the harness commands do the same, so use
+one of those when a later step needs the exact bytes of a task.
+
+Loom keeps its own lines apart from the output of the tasks in two ways. Task
+output goes to standard output, and every line Loom writes itself goes to
+standard error. Loom's lines start with a status word in the first column, and
+only task output is indented or prefixed.
+
+```sh
+loom run workflow build.yaml > tasks.log 2> loom.log
+```
+
+Loom never restyles the bytes of a task, so the colours a task chose reach the
+terminal as it wrote them. Sandbox notes take the status word form, so a denied
+connection never reads as something a task printed.
+
+```
+Running   network
+Sandbox   denied connection to example.com:443
+Finished  network in 0.1s (ok)
+```
+
+The spinners draw on standard error. When standard error is not a terminal they
+draw nothing, and every line still arrives.
+
+`--timestamps` prefixes every line Loom writes with a UTC date and time. Local
+time needs the time zone database, so Loom reports UTC and marks it with `Z`.
+
+```
+2026-09-09T15:16:37.775Z api         │ GET /users?page=1 200
+2026-09-09T15:16:40.881Z api         ┊ warning: slow query took 412ms
+2026-09-09T15:16:41.882Z Finished  worker_pool in 4.1s (ok)
+```
+
+`--timestamps=elapsed` prefixes the time since the run started instead.
+
+```
+    0.0s api         │ GET /users?page=1 200
+    3.1s api         ┊ warning: slow query took 412ms
+    4.1s Finished  worker_pool in 4.1s (ok)
+```
+
+A value needs an equals sign, because the bare flag would otherwise take the
+path of the manifest as its value. In grouped mode a line keeps the time it
+arrived, not the time its block was written, so a stamp always says when the
+task wrote the line.
+
+`--color auto|always|never` controls Loom's own colours. Loom also follows
+`NO_COLOR`, `CLICOLOR_FORCE`, and `TERM=dumb`.
+
 ## Sandbox
 
 A task can run inside an operating-system sandbox that limits the network,

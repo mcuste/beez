@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "linux")]
 mod bubblewrap;
+mod diagnostic;
 #[cfg(target_os = "linux")]
 mod init;
 mod proxy;
@@ -12,6 +13,7 @@ mod seatbelt;
 mod server;
 mod stream;
 
+pub use diagnostic::set_diagnostic_sink;
 #[cfg(target_os = "linux")]
 pub use init::{init, parse_relay, relay};
 pub use proxy::Proxy;

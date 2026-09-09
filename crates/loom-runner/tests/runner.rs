@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use loom_core::{TaskDefinition, TaskIndex, TaskRequest, Workflow};
-use loom_process::{ExecutionRequest, ProcessCall};
+use loom_process::{ExecutionRequest, OutputStream, ProcessCall};
 use loom_runner::{RunEvent, Runner};
 use loom_test_support::TemporaryDirectory;
 
@@ -41,6 +41,11 @@ enum RecordedEvent {
     Started {
         task: Option<usize>,
     },
+    Output {
+        task: Option<usize>,
+        stream: OutputStream,
+        line: Vec<u8>,
+    },
     Finished {
         task: Option<usize>,
         stdout: Vec<u8>,
@@ -50,6 +55,9 @@ enum RecordedEvent {
     Failed {
         task: Option<usize>,
         error_kind: io::ErrorKind,
+    },
+    Blocked {
+        task: usize,
     },
 }
 
@@ -362,6 +370,58 @@ fn starts_independent_processes_before_either_can_finish() {
     assert_eq!(status, 0);
 }
 
+#[test]
+fn reports_output_before_the_task_finishes() {
+    let workflow = assert_ok!(Workflow::try_from(vec![assert_ok!(command_task(
+        "stream",
+        &[],
+        "bash",
+        arguments(&["-c", "echo early; sleep 0.2"]),
+    ))]));
+    let mut events = Vec::new();
+
+    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
+        record_event(&mut events, event);
+        Ok(())
+    }));
+
+    assert_eq!(status, 0);
+    let reported = assert_ok!(event_position(&events, |event| matches!(
+        event,
+        RecordedEvent::Output { line, stream, .. }
+            if line == b"early\n" && *stream == OutputStream::Stdout
+    )));
+    let finished = assert_ok!(event_position(&events, |event| is_finished(event, 0)));
+    assert!(reported < finished);
+}
+
+#[test]
+fn reports_a_blocked_task_after_a_dependency_fails() {
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "prepare",
+            &[],
+            "bash",
+            arguments(&["-c", "exit 3"])
+        )),
+        assert_ok!(command_task(
+            "verify",
+            &["prepare"],
+            "bash",
+            arguments(&["-c", "true"]),
+        )),
+    ]));
+    let mut events = Vec::new();
+
+    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
+        record_event(&mut events, event);
+        Ok(())
+    }));
+
+    assert_eq!(status, 3);
+    assert!(events.contains(&RecordedEvent::Blocked { task: 1 }));
+}
+
 fn command_task(
     id: &str,
     depends_on: &[&str],
@@ -408,15 +468,25 @@ fn record_event(events: &mut Vec<RecordedEvent>, event: &RunEvent) {
         RunEvent::Started { task } => RecordedEvent::Started {
             task: (*task).map(TaskIndex::position),
         },
-        RunEvent::Finished { task, output } => RecordedEvent::Finished {
+        RunEvent::Output { task, stream, line } => RecordedEvent::Output {
+            task: (*task).map(TaskIndex::position),
+            stream: *stream,
+            line: line.clone(),
+        },
+        RunEvent::Finished { task, output, .. } => RecordedEvent::Finished {
             task: (*task).map(TaskIndex::position),
             stdout: output.stdout().to_vec(),
             stderr: output.stderr().to_vec(),
             status: output.status_code(),
         },
-        RunEvent::Failed { task, error_kind } => RecordedEvent::Failed {
+        RunEvent::Failed {
+            task, error_kind, ..
+        } => RecordedEvent::Failed {
             task: (*task).map(TaskIndex::position),
             error_kind: *error_kind,
+        },
+        RunEvent::Blocked { task } => RecordedEvent::Blocked {
+            task: task.position(),
         },
     };
     events.push(event);
