@@ -66,6 +66,84 @@ fn outside_path(name: &str) -> PathBuf {
     path
 }
 
+/// Runs `loom run command` with `arguments` in front of the program.
+fn run_command(
+    directory: &TemporaryDirectory,
+    work: &Path,
+    arguments: &[&str],
+) -> io::Result<Output> {
+    Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["run", "command"])
+        .args(arguments)
+        .current_dir(work)
+        .env("LOOM_LOG_DIR", directory.join("logs"))
+        .output()
+}
+
+#[test]
+fn sandboxes_a_command_unless_it_asks_for_no_sandbox() {
+    let (directory, work) = working_directory("cli-sandbox-command").unwrap();
+    let outside = outside_path("loom-sandbox-command.txt");
+    let script = format!("printf leak > {}", outside.display());
+
+    let denied = run_command(&directory, &work, &["bash", "-c", &script]).unwrap();
+    let allowed = run_command(&directory, &work, &["--no-sandbox", "bash", "-c", &script]).unwrap();
+
+    assert!(!denied.status.success(), "{denied:?}");
+    assert!(allowed.status.success(), "{allowed:?}");
+    assert!(outside.exists());
+    let _ = fs::remove_file(&outside);
+}
+
+#[test]
+fn refuses_no_sandbox_together_with_an_allowance() {
+    let (directory, work) = working_directory("cli-sandbox-conflict").unwrap();
+
+    let output = run_command(
+        &directory,
+        &work,
+        &["--no-sandbox", "--allow-domain", "github.com", "true"],
+    )
+    .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be used with"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn sandboxes_a_workflow_that_names_no_sandbox() {
+    let (directory, work) = working_directory("cli-sandbox-default").unwrap();
+    let outside = outside_path("loom-sandbox-default-leak.txt");
+    let source = format!(
+        "tasks:\n  - id: task\n    command: [bash, -c, 'printf leak > {}']\n",
+        outside.display()
+    );
+
+    let denied = run_workflow(&directory, &work, &source).unwrap();
+
+    assert!(!denied.status.success(), "{denied:?}");
+    assert!(!outside.exists());
+}
+
+#[test]
+fn runs_a_task_that_opts_out_without_the_sandbox() {
+    let (directory, work) = working_directory("cli-sandbox-opt-out").unwrap();
+    let outside = outside_path("loom-sandbox-opt-out.txt");
+    let source = format!(
+        "tasks:\n  - id: task\n    sandbox: false\n    command: [bash, -c, 'printf ok > {}']\n",
+        outside.display()
+    );
+
+    let allowed = run_workflow(&directory, &work, &source).unwrap();
+
+    assert!(allowed.status.success(), "{allowed:?}");
+    assert!(outside.exists());
+    let _ = fs::remove_file(&outside);
+}
+
 #[test]
 fn allows_writes_inside_the_working_directory_only() {
     let (directory, work) = working_directory("cli-sandbox-writes").unwrap();

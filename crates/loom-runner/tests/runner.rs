@@ -648,10 +648,10 @@ fn runs_sandboxed_tasks_inside_the_sandbox() {
 
     let directory = assert_ok!(TemporaryDirectory::new("runner-sandbox"));
     let outside = directory.join("outside.txt");
-    let filesystem = assert_ok!(
-        ".".parse()
-            .map(|work| { FilesystemPolicy::new(false, Vec::new(), vec![work], Vec::new()) })
-    );
+    let filesystem =
+        assert_ok!(".".parse().map(|work| {
+            FilesystemPolicy::new(Some(false), Vec::new(), vec![work], Vec::new())
+        }));
     let policy = SandboxPolicy::new(NetworkPolicy::default(), filesystem, None);
     let workflow = assert_ok!(Workflow::try_from(vec![
         assert_ok!(command_task(

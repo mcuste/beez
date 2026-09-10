@@ -228,26 +228,27 @@ impl LogArgs {
 
 #[derive(Debug, Args)]
 struct SandboxArgs {
-    /// Run inside an operating-system sandbox with Loom's default policy.
-    #[arg(long)]
-    sandbox: bool,
-    /// Host the sandbox may also reach, such as github.com or *.npmjs.org:443. Implies --sandbox.
+    /// Run with no operating-system sandbox.
+    #[arg(long, conflicts_with_all = ["allow_domain", "allow_write"])]
+    no_sandbox: bool,
+    /// Host the sandbox may also reach, such as github.com or *.npmjs.org:443.
     #[arg(long, value_name = "HOST")]
     allow_domain: Vec<String>,
-    /// Path the sandbox may also write. Implies --sandbox.
+    /// Path the sandbox may also write.
     #[arg(long, value_name = "PATH")]
     allow_write: Vec<String>,
 }
 
 impl SandboxArgs {
+    /// Loom's default policy, plus the hosts and paths the command allows.
     fn policy(&self) -> io::Result<Option<SandboxPolicy>> {
-        if !self.sandbox && self.allow_domain.is_empty() && self.allow_write.is_empty() {
+        if self.no_sandbox {
             return Ok(None);
         }
         let allow = parse_all::<DomainRule>(&self.allow_domain)?;
         let write_allow = parse_all::<SandboxPath>(&self.allow_write)?;
-        let network = NetworkPolicy::new(true, Vec::new(), Vec::new(), allow, false);
-        let filesystem = FilesystemPolicy::new(true, Vec::new(), write_allow, Vec::new());
+        let network = NetworkPolicy::new(None, Vec::new(), Vec::new(), allow, None);
+        let filesystem = FilesystemPolicy::new(None, Vec::new(), write_allow, Vec::new());
         Ok(Some(SandboxPolicy::new(network, filesystem, None)))
     }
 }

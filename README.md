@@ -210,7 +210,7 @@ large.
 
 ## Sandbox
 
-A task can run inside an operating-system sandbox that limits the network,
+Every task runs inside an operating-system sandbox that limits the network,
 the filesystem, and the programs the task may execute. Loom enforces the
 sandbox itself, so every harness and every command task gets the same rules.
 
@@ -229,9 +229,10 @@ harness's own state directory. Files a run could use to escape later, such as
 `.git/hooks`, `.claude`, and `.mcp.json`, stay read-only, and so does `.loom`,
 so a task cannot rewrite the log of its own run.
 
-Enable the sandbox for a whole workflow or for one task. A task can also opt
-out with `sandbox: false`. Each section a task defines replaces the workflow's
-section.
+A `sandbox` section allows more than the defaults, for a whole workflow or for
+one task. A task adds its rules to the rules of the workflow, so a task widens
+the policy and never narrows it. A task that needs no sandbox at all sets
+`sandbox: false`.
 
 ```yaml
 sandbox:
@@ -260,9 +261,11 @@ tasks:
     sandbox: false
 ```
 
-Every section has `defaults: true`. Set it to `false` to keep only the groups
-and rules the task lists. Groups a harness needs to run at all, such as
-`anthropic` for `claude`, always apply.
+Every section has `defaults: true`, which is what brings in the rules above.
+Set it to `false` to keep only the groups and rules the manifest lists. A task
+that leaves the field out keeps what the workflow chose, and so does
+`localhost`. Groups a harness needs to run at all, such as `anthropic` for
+`claude`, always apply.
 
 | Section       | Fields                                                |
 | ------------- | ----------------------------------------------------- |
@@ -295,15 +298,16 @@ directories. The harness binary, `sh`, `bash`, `zsh`, `env`, `node`, `bun`,
 and `rg` always may run. Tool version managers that use shims, such as mise,
 need their install directory in `allow`.
 
-Run a single sandboxed prompt or command from the command line:
+A single prompt or command from the command line runs sandboxed as well:
 
 ```sh
-loom run claude --sandbox "inspect the repository"
+loom run claude "inspect the repository"
 loom run codex --allow-domain github.com --allow-write /data "fix the build"
-loom run command --sandbox cargo test
+loom run command cargo test
 ```
 
-`--allow-domain` and `--allow-write` imply `--sandbox`.
+`--allow-domain` and `--allow-write` add to the default policy. `--no-sandbox`
+runs without a sandbox, and takes neither of them.
 
 Limits to keep in mind:
 
@@ -314,6 +318,8 @@ Limits to keep in mind:
   loader can start any file it may read.
 - On Linux a write deny needs its parent directory to exist when the run starts, because the parent is
   what stops a task from renaming it and putting a writable directory in its place.
+- Sandboxes do not nest. A task that starts its own sandbox, or that already runs inside one, needs
+  `sandbox: false`.
 
 ## Schedules
 

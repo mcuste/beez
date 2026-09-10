@@ -25,9 +25,11 @@ fn manifest(directory: &TemporaryDirectory, name: &str, source: &str) -> io::Res
 }
 
 /// A workflow of one task that writes a file, with the given schedule.
+///
+/// The task opts out of the sandbox, so these tests need no sandbox on the host.
 fn ticking(schedule: &str, marker: &Path) -> String {
     format!(
-        "schedule:\n{schedule}  allow_unsandboxed: true\ntasks:\n  - id: mark\n    command: [bash, -c, \"echo fired >> {}\"]\n",
+        "schedule:\n{schedule}  allow_unsandboxed: true\ntasks:\n  - id: mark\n    sandbox: false\n    command: [bash, -c, \"echo fired >> {}\"]\n",
         marker.display()
     )
 }
@@ -156,7 +158,7 @@ fn refuses_a_job_whose_tasks_no_sandbox_limits() {
     let path = manifest(
         &directory,
         "open",
-        "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: mark\n    command: [bash, -c, \"true\"]\n",
+        "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: mark\n    sandbox: false\n    command: [bash, -c, \"true\"]\n",
     )
     .unwrap();
     add(&root, &path).unwrap();
@@ -307,7 +309,7 @@ fn keeps_the_history_of_a_job_whose_manifest_stops_loading() {
     let root = directory.join("root");
     let marker = directory.join("marker");
     let source = format!(
-        "schedule:\n  - name: weekday\n    cron: \"0 3 * * *\"\n    allow_unsandboxed: true\ntasks:\n  - id: mark\n    command: [bash, -c, \"echo fired >> {}\"]\n",
+        "schedule:\n  - name: weekday\n    cron: \"0 3 * * *\"\n    allow_unsandboxed: true\ntasks:\n  - id: mark\n    sandbox: false\n    command: [bash, -c, \"echo fired >> {}\"]\n",
         marker.display()
     );
     let path = manifest(&directory, "nightly", &source).unwrap();

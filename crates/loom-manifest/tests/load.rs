@@ -439,17 +439,36 @@ fn applies_a_workflow_sandbox_to_every_task_unless_a_task_opts_out() {
 
     let expected = SandboxPolicy::new(
         NetworkPolicy::new(
-            true,
+            None,
             vec![DomainGroup::Github],
             Vec::new(),
             vec!["registry.internal:443".parse().unwrap()],
-            false,
+            None,
         ),
         FilesystemPolicy::default(),
         None,
     );
     assert_eq!(inspect.sandbox(), Some(&expected));
     assert_eq!(test.sandbox(), None);
+}
+
+#[test]
+fn sandboxes_every_task_a_manifest_does_not_opt_out() {
+    let directory = TemporaryDirectory::new("manifest-sandbox-default").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: build\n    command: [cargo, build]\n  - id: publish\n    command: [./publish.sh]\n    sandbox: false\n",
+    )
+    .unwrap();
+
+    let workflow = load(&manifest).unwrap().into_workflow();
+
+    assert_eq!(
+        workflow.tasks().first().unwrap().sandbox(),
+        Some(&SandboxPolicy::default())
+    );
+    assert_eq!(workflow.tasks().get(1).unwrap().sandbox(), None);
 }
 
 #[test]
@@ -469,8 +488,8 @@ fn enables_the_default_sandbox_with_a_boolean() {
 }
 
 #[test]
-fn replaces_workflow_sandbox_sections_with_task_sections() {
-    let directory = TemporaryDirectory::new("manifest-task-sandbox-override").unwrap();
+fn adds_task_sandbox_sections_to_the_workflow_sections() {
+    let directory = TemporaryDirectory::new("manifest-task-sandbox-adds").unwrap();
     let manifest = write_manifest(
         &directory,
         "yaml",
@@ -491,10 +510,16 @@ fn replaces_workflow_sandbox_sections_with_task_sections() {
     let task = workflow.tasks().first().unwrap();
 
     let expected = SandboxPolicy::new(
-        NetworkPolicy::new(false, Vec::new(), Vec::new(), Vec::new(), true),
-        FilesystemPolicy::new(true, Vec::new(), vec!["/data".parse().unwrap()], Vec::new()),
+        NetworkPolicy::new(
+            Some(false),
+            vec![DomainGroup::Github],
+            Vec::new(),
+            Vec::new(),
+            Some(true),
+        ),
+        FilesystemPolicy::new(None, Vec::new(), vec!["/data".parse().unwrap()], Vec::new()),
         Some(ExecutablePolicy::new(
-            true,
+            None,
             vec![ExecutableGroup::Rust],
             vec![ExecutableGroup::Net],
             vec!["~/.local/share/mise".parse().unwrap()],
@@ -519,7 +544,7 @@ fn loads_a_json_sandbox() {
     let expected = SandboxPolicy::new(
         NetworkPolicy::default(),
         FilesystemPolicy::new(
-            false,
+            Some(false),
             vec!["~/.secrets".parse().unwrap()],
             vec![".".parse().unwrap()],
             Vec::new(),

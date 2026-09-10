@@ -24,8 +24,8 @@ pub(crate) struct ManifestSandbox {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestNetwork {
-    #[serde(default = "default_true")]
-    defaults: bool,
+    #[serde(default)]
+    defaults: Option<bool>,
     #[serde(default)]
     groups: Vec<String>,
     #[serde(default)]
@@ -33,14 +33,14 @@ struct ManifestNetwork {
     #[serde(default)]
     allow: Vec<String>,
     #[serde(default)]
-    localhost: bool,
+    localhost: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestFilesystem {
-    #[serde(default = "default_true")]
-    defaults: bool,
+    #[serde(default)]
+    defaults: Option<bool>,
     #[serde(default)]
     read_deny: Vec<String>,
     #[serde(default)]
@@ -52,8 +52,8 @@ struct ManifestFilesystem {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestExecutables {
-    #[serde(default = "default_true")]
-    defaults: bool,
+    #[serde(default)]
+    defaults: Option<bool>,
     #[serde(default)]
     groups: Vec<String>,
     #[serde(default)]
@@ -62,28 +62,23 @@ struct ManifestExecutables {
     allow: Vec<String>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// Resolves a task's sandbox from the workflow default and the task's own setting.
+///
+/// A task runs sandboxed unless it sets `sandbox: false`.
 pub(crate) fn resolve(
     workflow: Option<&SandboxPolicy>,
     task: Option<SandboxSetting>,
 ) -> Result<Option<SandboxPolicy>, String> {
+    let base = || workflow.cloned().unwrap_or_default();
     match task {
-        None => Ok(workflow.cloned()),
+        None | Some(SandboxSetting::Enabled(true)) => Ok(Some(base())),
         Some(SandboxSetting::Enabled(false)) => Ok(None),
-        Some(SandboxSetting::Enabled(true)) => Ok(Some(workflow.cloned().unwrap_or_default())),
-        Some(SandboxSetting::Policy(sandbox)) => {
-            let base = workflow.cloned().unwrap_or_default();
-            (*sandbox).apply_to(base).map(Some)
-        }
+        Some(SandboxSetting::Policy(sandbox)) => (*sandbox).apply_to(base()).map(Some),
     }
 }
 
 impl ManifestSandbox {
-    /// Replaces each section this table defines on top of `base`.
+    /// Adds each section this table defines to `base`.
     pub(crate) fn apply_to(self, base: SandboxPolicy) -> Result<SandboxPolicy, String> {
         let network = self.network.map(NetworkPolicy::try_from).transpose()?;
         let filesystem = self

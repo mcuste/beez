@@ -410,7 +410,7 @@ mod tests {
         SandboxPolicy::new(
             NetworkPolicy::default(),
             FilesystemPolicy::new(
-                false,
+                Some(false),
                 paths(read_deny),
                 paths(write_allow),
                 paths(write_deny),
@@ -487,7 +487,7 @@ mod tests {
         let temporary = canonical(&std::env::temp_dir());
         let with_defaults = SandboxPolicy::new(
             NetworkPolicy::default(),
-            FilesystemPolicy::new(true, Vec::new(), paths(&["."]), Vec::new()),
+            FilesystemPolicy::new(Some(true), Vec::new(), paths(&["."]), Vec::new()),
             None,
         );
 
@@ -502,8 +502,12 @@ mod tests {
     fn allows_writes_to_the_state_paths_of_enabled_executable_groups() {
         let (_directory, work, home) = host("resolve-state");
         fs::create_dir(home.join(".cargo")).unwrap();
-        let executables =
-            ExecutablePolicy::new(false, vec![ExecutableGroup::Rust], Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::new(
+            Some(false),
+            vec![ExecutableGroup::Rust],
+            Vec::new(),
+            Vec::new(),
+        );
 
         let sut = resolve(
             &policy(&[], &[&text(&work)], &[], Some(executables)),
@@ -565,7 +569,7 @@ mod tests {
     fn always_allows_the_program_itself() {
         let (_directory, work, home) = host("resolve-program");
         let tool = program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
-        let executables = ExecutablePolicy::new(false, Vec::new(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::new(Some(false), Vec::new(), Vec::new(), Vec::new());
         let policy = policy(&[], &[&text(&work)], &[], Some(executables));
 
         let sut =
@@ -579,7 +583,7 @@ mod tests {
     fn allows_the_interpreter_a_shebang_names() {
         let (_directory, work, home) = host("resolve-shebang");
         program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
-        let executables = ExecutablePolicy::new(false, Vec::new(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::new(Some(false), Vec::new(), Vec::new(), Vec::new());
         let policy = policy(&[], &[&text(&work)], &[], Some(executables));
 
         let sut =
@@ -595,8 +599,12 @@ mod tests {
     #[test]
     fn skips_group_programs_that_are_missing_from_path() {
         let (_directory, work, home) = host("resolve-groups");
-        let executables =
-            ExecutablePolicy::new(true, ExecutableGroup::ALL.to_vec(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::new(
+            Some(true),
+            ExecutableGroup::ALL.to_vec(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         let sut = resolve(
             &policy(&[], &[&text(&work)], &[], Some(executables)),
@@ -616,7 +624,7 @@ mod tests {
     #[test]
     fn allows_the_dynamic_loader_so_a_linked_program_can_start() {
         let (_directory, work, home) = host("resolve-loader");
-        let executables = ExecutablePolicy::new(true, Vec::new(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::new(Some(true), Vec::new(), Vec::new(), Vec::new());
 
         let sut = resolve(
             &policy(&[], &[&text(&work)], &[], Some(executables)),
