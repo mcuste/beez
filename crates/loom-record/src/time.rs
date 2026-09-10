@@ -17,7 +17,7 @@ struct Parts {
 ///
 /// Local time needs the time zone database, so Loom reports UTC and marks it
 /// with the `Z`.
-pub(crate) fn utc(time: SystemTime) -> String {
+pub fn utc(time: SystemTime) -> String {
     let parts = split(time);
 
     format!(
@@ -35,7 +35,7 @@ pub(crate) fn utc(time: SystemTime) -> String {
 /// Formats `time` as a UTC stamp without separators, for a directory name.
 ///
 /// The stamp sorts by name in the order the runs happened.
-pub(crate) fn compact_utc(time: SystemTime) -> String {
+pub fn compact_utc(time: SystemTime) -> String {
     let parts = split(time);
 
     format!(

@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
@@ -57,19 +58,41 @@ impl ProcessOutput {
     }
 }
 
-/// Runs Loom process requests.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProcessRunner;
+/// Runs Loom process requests in one working directory.
+///
+/// The directory is explicit, because one process can run tasks of several
+/// workflows at the same time, and a process has only one current directory.
+#[derive(Clone, Debug)]
+pub struct ProcessRunner {
+    working_directory: PathBuf,
+}
 
 impl ProcessRunner {
+    /// Runs requests in `working_directory`.
+    #[must_use]
+    pub fn new(working_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            working_directory: working_directory.into(),
+        }
+    }
+
+    /// Runs requests in this process's own working directory.
+    pub fn here() -> io::Result<Self> {
+        Ok(Self::new(std::env::current_dir()?))
+    }
+
+    /// The directory every request runs in.
+    #[must_use]
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
     /// Starts a request and captures its output.
     pub fn run(&self, request: ExecutionRequest) -> io::Result<ProcessOutput> {
         self.run_streaming(request, None, &|_, _| {})
     }
 
     /// Starts a request inside an operating-system sandbox and captures its output.
-    ///
-    /// The sandbox uses the current directory as the task's working directory.
     pub fn run_sandboxed(
         &self,
         request: ExecutionRequest,
@@ -90,15 +113,19 @@ impl ProcessRunner {
         if let Some(policy) = sandbox {
             let harness = request.harness();
             let (program, arguments) = request.into_parts();
-            let working_directory = std::env::current_dir()?;
             // The sandbox must outlive the child, because it owns the proxy.
-            let mut sandboxed =
-                SandboxedCommand::new(policy, harness, &program, &arguments, &working_directory)?;
+            let mut sandboxed = SandboxedCommand::new(
+                policy,
+                harness,
+                &program,
+                &arguments,
+                &self.working_directory,
+            )?;
             relay(sandboxed.command_mut(), sink)
         } else {
             let (program, arguments) = request.into_parts();
             let mut command = Command::new(program);
-            command.args(arguments);
+            command.args(arguments).current_dir(&self.working_directory);
             relay(&mut command, sink)
         }
     }

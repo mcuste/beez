@@ -1,6 +1,14 @@
 [graph]
 all-features = true
 exclude-dev = true
+# Loom runs on macOS and Linux, so the graph leaves out other targets and the
+# dependencies they alone pull in.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-gnu",
+]
 
 [advisories]
 yanked = "deny"

@@ -11,10 +11,11 @@ use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use loom_core::TaskIndex;
 use loom_process::{OutputStream, ProcessOutput};
+use loom_record::{
+    LogSettings, RunRecorder, RunTarget, STDERR_MARK, STDOUT_MARK, VERB_WIDTH, counts, seconds,
+    status_text, trim_newline, utc,
+};
 use loom_runner::RunEvent;
-
-use crate::log::{LogSettings, RunLog, RunTarget, TaskOutcome};
-use crate::time::utc;
 
 /// How Loom renders the output of workflow tasks.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -58,16 +59,9 @@ const PALETTE: [AnsiColor; 6] = [
     AnsiColor::BrightMagenta,
 ];
 
-/// Width of the status word column, as wide as the longest word.
-pub(crate) const VERB_WIDTH: usize = 8;
-
 /// Indent of grouped task output. Nothing else is indented, so the indent
 /// alone marks a line as a task's.
 const BLOCK_INDENT: &str = "    ";
-
-/// Solid marks a task's standard output, dashed its standard error.
-pub(crate) const STDOUT_MARK: &str = "\u{2502}";
-pub(crate) const STDERR_MARK: &str = "\u{250a}";
 
 const CYAN: Style = Style::new()
     .fg_color(Some(Color::Ansi(AnsiColor::Cyan)))
@@ -116,7 +110,7 @@ struct Streams {
 struct Terminal {
     bars: Option<MultiProgress>,
     streams: Mutex<Streams>,
-    log: Mutex<Option<RunLog>>,
+    log: Mutex<Option<RunRecorder>>,
     started: Instant,
     timestamps: Option<Timestamps>,
 }
@@ -156,13 +150,14 @@ impl Reporter {
         color: ColorMode,
         timestamps: Option<Timestamps>,
         settings: LogSettings<'_>,
+        working_directory: &Path,
     ) -> Self {
         let ids = target.labels();
         let layout = resolve_layout(mode, ids.len());
         let bars = (layout == Layout::Stream)
             .then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr()));
         let choice = color_choice(color);
-        let (log, failure) = match settings.create(target) {
+        let (log, failure) = match RunRecorder::create(settings, target, working_directory) {
             Some(Ok(log)) => (Some(log), None),
             Some(Err(error)) => (None, Some(error)),
             None => (None, None),
@@ -212,6 +207,7 @@ impl Reporter {
     }
 
     pub(crate) fn event(&mut self, event: &RunEvent) -> io::Result<()> {
+        self.terminal.log(|log| log.event(event));
         match event {
             RunEvent::Started { task } => self.started(*task),
             RunEvent::Output { task, stream, line } => self.output(*task, *stream, line),
@@ -251,10 +247,7 @@ impl Reporter {
 
     fn started(&mut self, task: Option<TaskIndex>) -> io::Result<()> {
         let index = position(task);
-        self.terminal.outcome(index, TaskOutcome::Started);
         let id = self.id(index);
-        // Stream shows a spinner instead of a line, so only the log gets this.
-        self.terminal.record("Running", &id);
 
         match self.layout {
             Layout::Plain => Ok(()),
@@ -283,7 +276,6 @@ impl Reporter {
         line: &[u8],
     ) -> io::Result<()> {
         let index = position(task);
-        self.terminal.log(|log| log.output(index, stream, line));
 
         match self.layout {
             // Plain relays the captured streams once the task ends.
@@ -315,13 +307,6 @@ impl Reporter {
         elapsed: Duration,
     ) -> io::Result<()> {
         let index = position(task);
-        self.terminal.outcome(
-            index,
-            TaskOutcome::Finished {
-                exit_status: output.status_code(),
-                elapsed,
-            },
-        );
         if output.succeeded() {
             self.passed += 1;
         } else {
@@ -341,7 +326,6 @@ impl Reporter {
         );
 
         if self.layout == Layout::Plain {
-            self.terminal.record(verb, &message);
             return self.terminal.captured(output);
         }
 
@@ -361,18 +345,10 @@ impl Reporter {
         elapsed: Duration,
     ) -> io::Result<()> {
         let index = position(task);
-        self.terminal.outcome(
-            index,
-            TaskOutcome::Failed {
-                error: error_kind,
-                elapsed,
-            },
-        );
         self.failed += 1;
 
         let message = format!("{} in {} ({error_kind})", self.id(index), seconds(elapsed));
         if self.layout == Layout::Plain {
-            self.terminal.record("Failed", &message);
             return Ok(());
         }
         self.stop_spinner(index);
@@ -381,12 +357,10 @@ impl Reporter {
 
     fn blocked(&mut self, task: TaskIndex) -> io::Result<()> {
         let index = task.position();
-        self.terminal.outcome(index, TaskOutcome::Blocked);
         self.blocked += 1;
 
         let id = self.id(index);
         if self.layout == Layout::Plain {
-            self.terminal.record("Blocked", &id);
             return Ok(());
         }
         self.line(YELLOW, "Blocked", &id)
@@ -494,17 +468,9 @@ impl Terminal {
         self.log(|log| log.status(verb, message));
     }
 
-    fn outcome(&self, index: usize, outcome: TaskOutcome) {
-        if let Ok(mut slot) = self.log.lock()
-            && let Some(log) = slot.as_mut()
-        {
-            log.outcome(index, outcome);
-        }
-    }
-
     /// Writes to the run log, and gives the log up after one failure so the
     /// run itself continues.
-    fn log(&self, action: impl FnOnce(&mut RunLog) -> io::Result<()>) {
+    fn log(&self, action: impl FnOnce(&mut RunRecorder) -> io::Result<()>) {
         let Ok(mut slot) = self.log.lock() else {
             return;
         };
@@ -586,27 +552,6 @@ fn position(task: Option<TaskIndex>) -> usize {
     task.map_or(0, TaskIndex::position)
 }
 
-/// The counts that close a run.
-fn counts(passed: usize, failed: usize, blocked: usize) -> String {
-    let mut counts = vec![format!("{passed} passed")];
-    if failed > 0 {
-        counts.push(format!("{failed} failed"));
-    }
-    if blocked > 0 {
-        counts.push(format!("{blocked} blocked"));
-    }
-    counts.join(", ")
-}
-
-/// How a finished task ended, in brackets at the end of its line.
-fn status_text(exit_status: Option<i32>) -> String {
-    match exit_status {
-        Some(0) => "ok".to_owned(),
-        Some(code) => format!("exit {code}"),
-        None => "signalled".to_owned(),
-    }
-}
-
 fn is_blank(line: &[u8]) -> bool {
     line.iter()
         .all(|byte| matches!(byte, b'\n' | b'\r' | b' ' | b'\t'))
@@ -647,33 +592,6 @@ fn color_choice(color: ColorMode) -> anstream::ColorChoice {
     }
 }
 
-pub(crate) fn trim_newline(line: &[u8]) -> &[u8] {
-    let line = line.strip_suffix(b"\n").unwrap_or(line);
-    line.strip_suffix(b"\r").unwrap_or(line)
-}
-
-fn seconds(elapsed: Duration) -> String {
-    format!("{:.1}s", elapsed.as_secs_f64())
-}
-
 fn paint(style: Style, text: &str) -> String {
     format!("{style}{text}{style:#}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{counts, status_text};
-
-    #[test]
-    fn names_only_the_counts_a_run_reached() {
-        assert_eq!(counts(2, 0, 0), "2 passed");
-        assert_eq!(counts(0, 1, 1), "0 passed, 1 failed, 1 blocked");
-    }
-
-    #[test]
-    fn names_how_a_task_ended() {
-        assert_eq!(status_text(Some(0)), "ok");
-        assert_eq!(status_text(Some(23)), "exit 23");
-        assert_eq!(status_text(None), "signalled");
-    }
 }

@@ -13,6 +13,9 @@ harness-contract = []
 loom-core = { path = "../loom-core" }
 loom-sandbox = { path = "../loom-sandbox" }
 
+[dev-dependencies]
+loom-test-support = { workspace = true }
+
 [[test]]
 name = "harness_contract"
 path = "tests/harness_contract.rs"

@@ -7,7 +7,8 @@ use loom_core::{
 };
 use serde::Deserialize;
 
-use crate::sandbox::{ManifestSandbox, SandboxSetting, resolve};
+use crate::sandbox::{ManifestSandbox, SandboxSetting};
+use crate::schedule::{JobSchedule, ScheduleSetting};
 
 /// Reports an unreadable or invalid workflow manifest.
 #[derive(Debug)]
@@ -20,9 +21,42 @@ pub enum ManifestError {
     Invalid(String),
 }
 
+/// A loaded workflow manifest: its tasks, and when it runs.
+#[derive(Debug)]
+pub struct Manifest {
+    workflow: Workflow,
+    schedules: Vec<JobSchedule>,
+}
+
+impl Manifest {
+    /// The tasks and their dependencies.
+    #[must_use]
+    pub fn workflow(&self) -> &Workflow {
+        &self.workflow
+    }
+
+    /// Takes the workflow out of the manifest.
+    #[must_use]
+    pub fn into_workflow(self) -> Workflow {
+        self.workflow
+    }
+
+    /// Every schedule the manifest declares, in the order it wrote them.
+    ///
+    /// A manifest without a `schedule` section has none, so only `loom run`
+    /// starts it.
+    #[must_use]
+    pub fn schedules(&self) -> &[JobSchedule] {
+        &self.schedules
+    }
+}
+
+/// A manifest as it is written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
+struct Document {
+    #[serde(default)]
+    schedule: Option<ScheduleSetting>,
     #[serde(default)]
     sandbox: Option<ManifestSandbox>,
     tasks: Vec<ManifestTask>,
@@ -71,7 +105,7 @@ impl ManifestTask {
         mut self,
         sandbox: Option<&SandboxPolicy>,
     ) -> Result<TaskDefinition, String> {
-        let task_sandbox = resolve(sandbox, self.sandbox.take())?;
+        let task_sandbox = crate::sandbox::resolve(sandbox, self.sandbox.take())?;
         let definition = TaskDefinition::try_from(self)?;
         Ok(match task_sandbox {
             Some(policy) => definition.sandboxed(policy),
@@ -123,9 +157,9 @@ impl TryFrom<ManifestTask> for TaskDefinition {
 }
 
 /// Loads and validates a workflow manifest.
-pub fn load(path: &Path) -> Result<Workflow, ManifestError> {
+pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
     let source = fs::read_to_string(path).map_err(ManifestError::Io)?;
-    let manifest: Manifest = match path.extension().and_then(|extension| extension.to_str()) {
+    let document: Document = match path.extension().and_then(|extension| extension.to_str()) {
         Some("yaml" | "yml") => {
             noyalib::from_str(&source).map_err(|error| ManifestError::Invalid(error.to_string()))?
         }
@@ -133,17 +167,23 @@ pub fn load(path: &Path) -> Result<Workflow, ManifestError> {
             .map_err(|error| ManifestError::Invalid(error.to_string()))?,
         _ => return Err(ManifestError::UnsupportedFormat(path.into())),
     };
-    let sandbox = manifest
+    let schedules = crate::schedule::resolve(document.schedule).map_err(ManifestError::Invalid)?;
+    let sandbox = document
         .sandbox
         .map(SandboxPolicy::try_from)
         .transpose()
         .map_err(ManifestError::Invalid)?;
-    let definitions = manifest
+    let definitions = document
         .tasks
         .into_iter()
         .map(|task| task.into_definition(sandbox.as_ref()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ManifestError::Invalid)?;
+    let workflow = Workflow::try_from(definitions)
+        .map_err(|error| ManifestError::Invalid(error.to_string()))?;
 
-    Workflow::try_from(definitions).map_err(|error| ManifestError::Invalid(error.to_string()))
+    Ok(Manifest {
+        workflow,
+        schedules,
+    })
 }

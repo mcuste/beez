@@ -17,14 +17,15 @@ anstyle.workspace = true
 clap.workspace = true
 indicatif.workspace = true
 loom-core = { path = "../loom-core" }
+loom-daemon = { path = "../loom-daemon" }
 loom-manifest = { path = "../loom-manifest" }
+loom-record = { path = "../loom-record" }
 loom-runner = { path = "../loom-runner" }
 loom-sandbox = { path = "../loom-sandbox" }
 loom-process.workspace = true
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.151"
 
 [dev-dependencies]
+loom-schedule = { path = "../loom-schedule" }
 loom-test-support = { workspace = true }
 
 [lints]

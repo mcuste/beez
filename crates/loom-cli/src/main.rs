@@ -3,21 +3,21 @@
 use std::ffi::OsString;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use loom_core::{
     DomainRule, FilesystemPolicy, HeadlessHarness, NetworkPolicy, SandboxPath, SandboxPolicy,
 };
+use loom_daemon::{DaemonPaths, Request, Response};
 use loom_manifest::load;
 use loom_process::{ExecutionRequest, HarnessCall, ProcessCall};
+use loom_record::{LogSettings, RunTarget};
 use loom_runner::Runner;
 
-mod log;
 mod report;
-mod time;
+mod schedule;
 
-use log::{LogSettings, RunTarget};
 use report::{ColorMode, OutputMode, Reporter, Timestamps};
 
 #[derive(Debug, Parser)]
@@ -31,6 +31,10 @@ struct Cli {
 enum Command {
     /// Run a supported coding harness, workflow, or direct process.
     Run(Run),
+    /// Run workflows on the schedules their manifests declare.
+    Daemon(DaemonArgs),
+    /// Manage the manifests the daemon watches.
+    Schedule(ScheduleArgs),
     /// Internal: first process inside a Linux sandbox.
     #[command(hide = true)]
     SandboxInit(SandboxInit),
@@ -59,6 +63,94 @@ enum RunCommand {
     Codex(HarnessRun),
     /// Run a program without a shell.
     Command(Process),
+}
+
+#[derive(Debug, Args)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    command: DaemonCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Run the daemon in this terminal.
+    Run(DaemonRun),
+    /// Start the daemon in the background.
+    Start(DaemonRun),
+    /// Stop the daemon once its running runs end.
+    Stop(RootArgs),
+    /// Report the daemon and every job it holds.
+    Status(RootArgs),
+    /// Read every watched manifest again.
+    Reload(RootArgs),
+}
+
+#[derive(Debug, Args)]
+struct DaemonRun {
+    #[command(flatten)]
+    root: RootArgs,
+    /// How many runs the daemon starts at the same time.
+    #[arg(long, value_name = "COUNT", default_value_t = loom_daemon::DEFAULT_RUN_LIMIT)]
+    limit: usize,
+    /// How many runs to keep in the Loom root. Zero keeps every run.
+    #[arg(long, value_name = "COUNT", default_value_t = loom_daemon::DEFAULT_KEPT_RUNS)]
+    keep_runs: usize,
+}
+
+#[derive(Debug, Args)]
+struct ScheduleArgs {
+    #[command(subcommand)]
+    command: ScheduleCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ScheduleCommand {
+    /// Watch one more manifest, so its schedules fire.
+    Add(ManifestArgs),
+    /// Stop watching one manifest.
+    Remove(ManifestArgs),
+    /// Report every job.
+    List(RootArgs),
+    /// Run one job now, beside its schedule.
+    Trigger(JobArgs),
+    /// Hold one job back until it resumes.
+    Pause(JobArgs),
+    /// Let a paused job fire again.
+    Resume(JobArgs),
+}
+
+#[derive(Debug, Args)]
+struct ManifestArgs {
+    /// Path of the workflow manifest.
+    manifest: PathBuf,
+    #[command(flatten)]
+    root: RootArgs,
+}
+
+#[derive(Debug, Args)]
+struct JobArgs {
+    /// Job ID, as `loom schedule list` prints it.
+    job: String,
+    #[command(flatten)]
+    root: RootArgs,
+}
+
+#[derive(Debug, Args)]
+struct RootArgs {
+    /// Directory that holds the daemon's own files and the runs it starts.
+    ///
+    /// Loom uses `~/.loom` by default, so one daemon serves every repository.
+    #[arg(long, value_name = "PATH", env = "LOOM_ROOT")]
+    root: Option<PathBuf>,
+}
+
+impl RootArgs {
+    fn paths(&self) -> io::Result<DaemonPaths> {
+        match &self.root {
+            Some(root) => Ok(DaemonPaths::new(root)),
+            None => DaemonPaths::user(),
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -198,6 +290,11 @@ struct SandboxRelay {
     socket: PathBuf,
 }
 
+/// How long to wait for a started daemon to answer.
+const START_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// How many times to look for the answer, so a slow start still reports.
+const START_ATTEMPTS: usize = 50;
+
 fn main() {
     let status = match run(Cli::parse()) {
         Ok(status) => status,
@@ -212,6 +309,8 @@ fn main() {
 fn run(cli: Cli) -> io::Result<i32> {
     let command = match cli.command {
         Command::Run(Run { command }) => command,
+        Command::Daemon(DaemonArgs { command }) => return daemon(command),
+        Command::Schedule(ScheduleArgs { command }) => return schedule(command),
         Command::SandboxInit(init) => return sandbox_init(&init),
         Command::SandboxRelay(relay) => return sandbox_relay(&relay),
     };
@@ -234,14 +333,24 @@ fn run_workflow(file: WorkflowFile) -> io::Result<i32> {
         log,
     } = file;
     let workflow = load(&path)
+        .map(loom_manifest::Manifest::into_workflow)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let working_directory = std::env::current_dir()?;
     let target = RunTarget::Workflow {
         path: &path,
         workflow: &workflow,
     };
-    let mut reporter = reporter(&target, output, color, timestamps, log.settings());
+    let mut reporter = reporter(
+        &target,
+        output,
+        color,
+        timestamps,
+        log.settings(),
+        &working_directory,
+    );
 
-    let status = Runner.run_workflow(&workflow, &mut |event| reporter.event(event));
+    let status =
+        Runner::new(&working_directory).run_workflow(&workflow, &mut |event| reporter.event(event));
     finish(&mut reporter, status)
 }
 
@@ -254,6 +363,7 @@ fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
         log,
     } = run;
     let policy = sandbox.policy()?;
+    let working_directory = std::env::current_dir()?;
     let target = RunTarget::Request {
         name: harness.name(),
     };
@@ -263,9 +373,10 @@ fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
         ColorMode::Auto,
         None,
         log.settings(),
+        &working_directory,
     );
 
-    let status = Runner.run_request_in(
+    let status = Runner::new(&working_directory).run_request_in(
         harness_request(harness, prompt, model, effort),
         policy.as_ref(),
         &mut |event| reporter.event(event),
@@ -281,6 +392,7 @@ fn run_command(process: Process) -> io::Result<i32> {
         arguments,
     } = process;
     let policy = sandbox.policy()?;
+    let working_directory = std::env::current_dir()?;
     let target = RunTarget::Request { name: "command" };
     let mut reporter = reporter(
         &target,
@@ -288,6 +400,7 @@ fn run_command(process: Process) -> io::Result<i32> {
         ColorMode::Auto,
         None,
         log.settings(),
+        &working_directory,
     );
     let request = ExecutionRequest::Command(
         arguments
@@ -296,8 +409,127 @@ fn run_command(process: Process) -> io::Result<i32> {
     );
 
     let status =
-        Runner.run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event));
+        Runner::new(&working_directory)
+            .run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event));
     finish(&mut reporter, status)
+}
+
+fn daemon(command: DaemonCommand) -> io::Result<i32> {
+    match command {
+        DaemonCommand::Run(run) => {
+            loom_daemon::run(&run.root.paths()?, run.limit, run.keep_runs)?;
+            Ok(0)
+        }
+        DaemonCommand::Start(run) => start_daemon(&run),
+        DaemonCommand::Stop(root) => {
+            Ok(answer(loom_daemon::command(&root.paths()?, Request::Stop)?))
+        }
+        DaemonCommand::Status(root) => {
+            schedule::status(&loom_daemon::status(&root.paths()?)?)?;
+            Ok(0)
+        }
+        DaemonCommand::Reload(root) => Ok(answer(loom_daemon::command(
+            &root.paths()?,
+            Request::Reload,
+        )?)),
+    }
+}
+
+fn schedule(command: ScheduleCommand) -> io::Result<i32> {
+    match command {
+        ScheduleCommand::Add(args) => Ok(answer(loom_daemon::add(
+            &args.root.paths()?,
+            &args.manifest,
+        )?)),
+        ScheduleCommand::Remove(args) => Ok(answer(loom_daemon::command(
+            &args.root.paths()?,
+            Request::Remove {
+                manifest: args.manifest,
+            },
+        )?)),
+        ScheduleCommand::List(root) => {
+            schedule::status(&loom_daemon::status(&root.paths()?)?)?;
+            Ok(0)
+        }
+        ScheduleCommand::Trigger(args) => Ok(answer(loom_daemon::command(
+            &args.root.paths()?,
+            Request::Trigger { job: args.job },
+        )?)),
+        ScheduleCommand::Pause(args) => Ok(answer(loom_daemon::command(
+            &args.root.paths()?,
+            Request::Pause { job: args.job },
+        )?)),
+        ScheduleCommand::Resume(args) => Ok(answer(loom_daemon::command(
+            &args.root.paths()?,
+            Request::Resume { job: args.job },
+        )?)),
+    }
+}
+
+/// Starts the daemon in its own process group, so a closing terminal leaves it
+/// running, with its own lines in `daemon.log`.
+fn start_daemon(run: &DaemonRun) -> io::Result<i32> {
+    use std::os::unix::process::CommandExt;
+
+    let paths = run.root.paths()?;
+    if loom_daemon::is_running(paths.socket()) {
+        eprintln!("a daemon already runs for {}", paths.root().display());
+        return Ok(1);
+    }
+    paths.create()?;
+    let log = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(paths.log())?;
+    let child = std::process::Command::new(std::env::current_exe()?)
+        .args(["daemon", "run", "--root"])
+        .arg(paths.root())
+        .arg("--limit")
+        .arg(run.limit.to_string())
+        .arg("--keep-runs")
+        .arg(run.keep_runs.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()?;
+
+    for _ in 0..START_ATTEMPTS {
+        if loom_daemon::is_running(paths.socket()) {
+            println!(
+                "daemon started, pid {}, writing to {}",
+                child.id(),
+                paths.log().display()
+            );
+            return Ok(0);
+        }
+        std::thread::sleep(START_WAIT);
+    }
+    eprintln!(
+        "the daemon did not answer on {}, see {}",
+        paths.socket().display(),
+        paths.log().display()
+    );
+
+    Ok(1)
+}
+
+/// Prints what a command answered, and returns the status for it.
+fn answer(response: Response) -> i32 {
+    match response {
+        Response::Done { message } => {
+            println!("{message}");
+            0
+        }
+        Response::Error { message } => {
+            eprintln!("{message}");
+            1
+        }
+        Response::Status { .. } => {
+            eprintln!("unexpected answer from the daemon");
+            2
+        }
+    }
 }
 
 /// Builds a reporter and routes sandbox diagnostics through it.
@@ -307,8 +539,9 @@ fn reporter(
     color: ColorMode,
     timestamps: Option<Timestamps>,
     log: LogSettings<'_>,
+    working_directory: &Path,
 ) -> Reporter {
-    let reporter = Reporter::new(target, output, color, timestamps, log);
+    let reporter = Reporter::new(target, output, color, timestamps, log, working_directory);
     loom_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
     reporter
 }

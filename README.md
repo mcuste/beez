@@ -314,3 +314,261 @@ Limits to keep in mind:
   loader can start any file it may read.
 - On Linux a write deny needs its parent directory to exist when the run starts, because the parent is
   what stops a task from renaming it and putting a writable directory in its place.
+
+## Schedules
+
+A manifest can say when it runs. The `loom` daemon reads the manifests it
+watches and starts them at the times they name.
+
+```yaml
+schedule:
+  cron: "0 3 * * *"
+
+sandbox:
+  network:
+    groups: [github]
+
+tasks:
+  - id: review
+    harness: claude
+    prompt: review yesterday's commits
+```
+
+Watch the manifest, then start the daemon:
+
+```sh
+loom schedule add nightly.yaml
+loom daemon start
+loom schedule list
+```
+
+```
+Daemon running, pid 4123, started 2026-09-09T18:18:02Z, 0 running
+JOB      CONDITION  SCHEDULE   NEXT FIRE             LAST RUN
+nightly  waiting    0 3 * * *  2026-09-10T03:00:00Z  20260909T030000004Z-4123 (ok)
+```
+
+The manifest is the only place a schedule lives. Loom keeps the list of
+manifests it watches, and what already happened, and nothing else. Editing a
+manifest changes its schedule without a command, because the daemon reads the
+file again when it changes, and again every time a job fires.
+
+One daemon serves every repository. It lives in `~/.loom`, whatever directory
+a command runs in, and each watched manifest carries the directory its own
+tasks run in. So a manifest anywhere on the machine can be watched, and the
+tasks still run next to the manifest.
+
+```sh
+cd ~/anywhere
+loom schedule add ~/work/alpha/nightly.yaml
+loom schedule add ~/work/beta/weekly.yaml
+loom daemon start
+```
+
+`--root <PATH>`, or `LOOM_ROOT`, uses another directory instead. A second root
+is a second daemon, with its own jobs, its own socket and its own runs.
+
+### Cron expressions
+
+Loom takes the five fields a crontab takes, in the same order and with the same
+meaning.
+
+```
+minute  hour  day-of-month  month  day-of-week
+```
+
+| Form                | Meaning                                       |
+| ------------------- | --------------------------------------------- |
+| `0 3 * * *`         | Every day at 03:00                            |
+| `*/15 9 * * *`      | Every 15 minutes in the 09:00 hour            |
+| `0 9,17 * * Mon-Fri`| 09:00 and 17:00 on weekdays                   |
+| `0 3 * * 1-5`       | The same, with days as numbers                |
+| `0 3 13 * Fri`      | Every 13th, and every Friday                  |
+| `@daily`            | Midnight. Also `@hourly`, `@weekly`, `@monthly`, `@yearly` |
+
+Days of week count from Sunday as 0, and 7 means Sunday as well. A restricted
+day of month and a restricted day of week mean either day, as they do in a
+crontab.
+
+A six-field expression starts with seconds, and a seven-field expression ends
+with a year. The seconds must be one fixed value, so a job starts at most once
+a minute.
+
+Times are UTC. A schedule may name a fixed offset instead:
+
+```yaml
+schedule:
+  cron: "0 3 * * *"
+  offset: "+02:00"
+```
+
+Loom does not read the time zone database, so an offset stays the same all
+year. A schedule in a zone with daylight saving moves by one hour twice a year.
+
+### One-time runs
+
+`at` names one instant instead of a repeating expression. The job runs once and
+is then done.
+
+```yaml
+schedule:
+  at: "2026-09-10T03:00:00Z"
+```
+
+### Schedule fields
+
+| Field               | Default | Meaning                                                   |
+| ------------------- | ------- | --------------------------------------------------------- |
+| `cron`              |         | A cron expression. Either this or `at`.                    |
+| `at`                |         | One RFC 3339 instant. Either this or `cron`.               |
+| `offset`            | `Z`     | Fixed offset a `cron` expression is read in.               |
+| `on_overlap`        | `skip`  | `skip`, `queue`, or `parallel`.                            |
+| `catch_up`          | `false` | Run a fire the daemon was down for, once.                  |
+| `enabled`           | `true`  | `false` keeps the schedule in the file without firing it.  |
+| `allow_unsandboxed` | `false` | Let the job run tasks that no sandbox limits.              |
+| `name`              |         | Names one schedule when a manifest has more than one.      |
+
+A manifest may hold a list of schedules, and each one needs a name:
+
+```yaml
+schedule:
+  - name: weekday
+    cron: "0 3 * * 1-5"
+  - name: weekend
+    cron: "0 5 * * 6,0"
+```
+
+The job ID is the name of the manifest file, and the name of the schedule after
+a colon: `nightly`, or `nightly:weekday`.
+
+### What the daemon does with a fire
+
+The daemon starts two runs at the same time by default, and `--limit` changes
+that. A fire that cannot start now waits, and starts when a run ends. A job
+keeps one waiting fire at most.
+
+A fire that meets the job's own last run follows `on_overlap`. `skip` drops it
+and says so in the log, `queue` starts it when the run ends, and `parallel`
+starts it beside the run.
+
+A fire that happened while the daemon was down runs late only when the schedule
+sets `catch_up: true`, and then only once, however many fires were missed. Every
+other passed fire goes in the log and nowhere else.
+
+A scheduled run starts with nobody watching it, so the daemon refuses a job
+whose tasks no sandbox limits. Set `allow_unsandboxed: true` on the schedule to
+run it anyway.
+
+The daemon reads the manifest again at the moment a job fires, so a run uses the
+tasks the file holds then. A manifest that stops loading keeps its job in the
+list, marked `broken`, with the reason next to it.
+
+### Commands
+
+| Command                            | What it does                                  |
+| ---------------------------------- | --------------------------------------------- |
+| `loom schedule add <manifest>`     | Watches one more manifest                     |
+| `loom schedule remove <manifest>`  | Stops watching one manifest                   |
+| `loom schedule list`               | Reports every job                             |
+| `loom schedule trigger <job>`      | Runs one job now, beside its schedule         |
+| `loom schedule pause <job>`        | Holds one job back                            |
+| `loom schedule resume <job>`       | Lets a paused job fire again                  |
+| `loom daemon run`                  | Runs the daemon in this terminal              |
+| `loom daemon start`                | Starts the daemon in the background           |
+| `loom daemon stop`                 | Stops it once its running runs end            |
+| `loom daemon status`               | Reports the daemon and its jobs               |
+| `loom daemon reload`               | Reads every watched manifest again            |
+
+`add`, `remove`, `list`, `pause` and `resume` work without a daemon, so a
+manifest can be watched before the daemon starts. The others need a running
+daemon.
+
+### Files and artifacts
+
+The daemon keeps its own files and its runs in one root.
+
+```
+~/.loom/
+  daemon/
+    daemon.sock      commands arrive here
+    daemon.json      the pid and start time of the running daemon
+    daemon.log       the daemon's own lines
+    manifests.json   the manifests it watches
+    state.json       the last fire, the last run, and paused jobs
+  runs/
+    20260910T030000004Z-4123/
+```
+
+`manifests.json` holds the path of each watched manifest and the directory its
+tasks run in. Nothing is copied, so a manifest stays in its own repository
+under version control.
+
+Every scheduled run writes the same artifacts as a run a person starts, in the
+daemon's own root, so one directory holds the runs of every job. A run a person
+starts still lands in the `.loom` of the repository they start it in. `run.json`
+names the manifest and the working directory of the run, and `loom schedule
+list` names the last run of each job. The run log names the fire that started
+it.
+
+```
+2026-09-10T03:00:00.004Z Trigger   nightly scheduled for 2026-09-10T03:00:00Z
+2026-09-10T03:00:00.004Z Running   review
+```
+
+The daemon writes its own lines to standard error. `loom daemon start` sends
+them to `daemon.log`, and a service manager keeps them wherever it keeps a
+service's output.
+
+```
+2026-09-10T03:00:00.001Z Firing    nightly scheduled for 2026-09-10T03:00:00Z
+2026-09-10T03:00:00.004Z Logging   nightly: runs/20260910T030000004Z-4123
+2026-09-10T03:04:11.882Z Finished  nightly: 3 passed in 251.3s
+```
+
+The daemon keeps the newest 200 runs of its root and removes the rest, when it
+starts and after every run. `--keep-runs` changes the number, and zero keeps
+every run.
+
+### Running at boot
+
+`loom daemon start` survives a closing terminal, but not a restart. Use launchd
+or systemd for that, with `loom daemon run` in the foreground.
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/usr/local/bin/loom</string>
+  <string>daemon</string>
+  <string>run</string>
+</array>
+<key>StandardErrorPath</key>
+<string>/Users/you/.loom/daemon/daemon.log</string>
+```
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/loom daemon run
+```
+
+The daemon finds its jobs the same way `loom schedule add` does: it reads
+`manifests.json` in the root. The root does not depend on the working
+directory, so a unit needs no `WorkingDirectory` to find the same jobs. A
+daemon that cannot write its root says so and stops.
+
+```
+cannot create /.loom/daemon: Read-only file system (os error 30)
+```
+
+`loom daemon reload` reads that list again, and then every manifest in it, so a
+daemon that already runs picks up a list another daemon or a hand wrote.
+
+A scheduled harness run needs its credentials in the environment of the daemon,
+which is the environment the service manager gives it.
+
+Limits to keep in mind:
+
+- `stop` waits for the running runs to end. A second stop signal leaves them
+  behind.
+- Sandbox notes from a scheduled run go to the daemon's log, not to the log of
+  the run they belong to, because several runs share one sandbox reporter.
+- A schedule holds an offset, not a time zone, so daylight saving moves it.

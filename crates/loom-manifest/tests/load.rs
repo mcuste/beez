@@ -8,7 +8,7 @@ use loom_core::{
     DomainGroup, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, HarnessOptions,
     HeadlessHarness, NetworkPolicy, SandboxPolicy, TaskRequest,
 };
-use loom_manifest::{ManifestError, load};
+use loom_manifest::{ManifestError, Overlap, load};
 use loom_test_support::TemporaryDirectory;
 
 #[test]
@@ -21,7 +21,7 @@ fn loads_yaml_tasks_and_resolves_dependencies() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let tasks = workflow.tasks();
     let inspect = tasks.first().unwrap();
     let summarize = tasks.get(1).unwrap();
@@ -78,7 +78,7 @@ fn loads_json_command_task() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
 
     assert_eq!(task.id().as_str(), "lint");
@@ -99,7 +99,7 @@ fn loads_harness_model_and_effort() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
 
     assert_eq!(
@@ -154,7 +154,7 @@ fn loads_claude_and_codex_harness_tasks() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let inspect = workflow.tasks().first().unwrap();
     let review = workflow.tasks().get(1).unwrap();
 
@@ -236,7 +236,7 @@ fn loads_json_harness_model_and_effort() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
 
     assert_eq!(
@@ -433,7 +433,7 @@ fn applies_a_workflow_sandbox_to_every_task_unless_a_task_opts_out() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let inspect = workflow.tasks().first().unwrap();
     let test = workflow.tasks().get(1).unwrap();
 
@@ -462,7 +462,7 @@ fn enables_the_default_sandbox_with_a_boolean() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
 
     assert_eq!(task.sandbox(), Some(&SandboxPolicy::default()));
@@ -487,7 +487,7 @@ fn replaces_workflow_sandbox_sections_with_task_sections() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
 
     let expected = SandboxPolicy::new(
@@ -513,7 +513,7 @@ fn loads_a_json_sandbox() {
     )
     .unwrap();
 
-    let workflow = load(&manifest).unwrap();
+    let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
 
     let expected = SandboxPolicy::new(
@@ -532,6 +532,8 @@ fn loads_a_json_sandbox() {
 #[test]
 fn rejects_unknown_sandbox_groups_and_fields() {
     let directory = TemporaryDirectory::new("manifest-sandbox-invalid").unwrap();
+    let unknown_field_directory = TemporaryDirectory::new("manifest-sandbox-unknown").unwrap();
+    let bad_rule_directory = TemporaryDirectory::new("manifest-sandbox-rule").unwrap();
     let unknown_group = write_manifest(
         &directory,
         "yaml",
@@ -539,13 +541,13 @@ fn rejects_unknown_sandbox_groups_and_fields() {
     )
     .unwrap();
     let unknown_field = write_manifest(
-        &directory,
+        &unknown_field_directory,
         "json",
         r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"domains":[]}}}]}"#,
     )
     .unwrap();
     let bad_rule = write_manifest(
-        &directory,
+        &bad_rule_directory,
         "json",
         r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"allow":["a.*.com"]}}}]}"#,
     )
@@ -562,5 +564,192 @@ fn rejects_unknown_sandbox_groups_and_fields() {
     assert!(matches!(
         load(&bad_rule),
         Err(ManifestError::Invalid(error)) if error.contains("`*`")
+    ));
+}
+
+#[test]
+fn loads_one_cron_schedule_with_its_defaults() {
+    let directory = TemporaryDirectory::new("manifest-one-schedule").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+
+    let manifest = load(&manifest).unwrap();
+    let schedule = manifest.schedules().first().unwrap();
+
+    assert_eq!(manifest.schedules().len(), 1);
+    assert_eq!(schedule.name(), None);
+    assert_eq!(schedule.schedule().to_string(), "0 3 * * *");
+    assert_eq!(schedule.on_overlap(), Overlap::Skip);
+    assert!(!schedule.catch_up());
+    assert!(schedule.enabled());
+}
+
+#[test]
+fn loads_a_schedule_with_an_offset_and_policies() {
+    let directory = TemporaryDirectory::new("manifest-schedule-policies").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "schedule:\n  cron: \"0 3 * * *\"\n  offset: \"+02:00\"\n  on_overlap: queue\n  catch_up: true\n  enabled: false\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+
+    let manifest = load(&manifest).unwrap();
+    let schedule = manifest.schedules().first().unwrap();
+
+    assert_eq!(schedule.schedule().to_string(), "0 3 * * * +02:00");
+    assert_eq!(schedule.on_overlap(), Overlap::Queue);
+    assert!(schedule.catch_up());
+    assert!(!schedule.enabled());
+}
+
+#[test]
+fn loads_a_one_time_schedule() {
+    let directory = TemporaryDirectory::new("manifest-once-schedule").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "schedule:\n  at: \"2026-09-10T03:00:00Z\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+
+    let manifest = load(&manifest).unwrap();
+    let schedule = manifest.schedules().first().unwrap();
+
+    assert!(!schedule.schedule().is_recurring());
+    assert_eq!(schedule.schedule().to_string(), "2026-09-10T03:00:00Z");
+}
+
+#[test]
+fn loads_a_list_of_named_schedules() {
+    let directory = TemporaryDirectory::new("manifest-many-schedules").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "schedule:\n  - name: weekday\n    cron: \"0 3 * * 1-5\"\n  - name: weekend\n    cron: \"0 5 * * 6,0\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+
+    let manifest = load(&manifest).unwrap();
+    let names: Vec<Option<&str>> = manifest
+        .schedules()
+        .iter()
+        .map(loom_manifest::JobSchedule::name)
+        .collect();
+
+    assert_eq!(names, [Some("weekday"), Some("weekend")]);
+}
+
+#[test]
+fn loads_a_manifest_without_a_schedule() {
+    let directory = TemporaryDirectory::new("manifest-no-schedule").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "yaml",
+        "tasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+
+    assert!(load(&manifest).unwrap().schedules().is_empty());
+}
+
+#[test]
+fn rejects_a_schedule_that_names_neither_or_both_of_cron_and_at() {
+    let neither_directory = TemporaryDirectory::new("manifest-schedule-neither").unwrap();
+    let both_directory = TemporaryDirectory::new("manifest-schedule-both").unwrap();
+    let neither = write_manifest(
+        &neither_directory,
+        "json",
+        r#"{"schedule":{"catch_up":true},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+    let both = write_manifest(
+        &both_directory,
+        "json",
+        r#"{"schedule":{"cron":"0 3 * * *","at":"2026-09-10T03:00:00Z"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&neither),
+        Err(ManifestError::Invalid(error)) if error == "schedule must define either cron or at"
+    ));
+    assert!(matches!(
+        load(&both),
+        Err(ManifestError::Invalid(error)) if error == "schedule must define either cron or at, not both"
+    ));
+}
+
+#[test]
+fn rejects_an_offset_on_a_one_time_schedule() {
+    let directory = TemporaryDirectory::new("manifest-once-offset").unwrap();
+    let manifest = write_manifest(
+        &directory,
+        "json",
+        r#"{"schedule":{"at":"2026-09-10T03:00:00Z","offset":"+02:00"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error)) if error.contains("at already names its own offset")
+    ));
+}
+
+#[test]
+fn rejects_a_cron_expression_the_scheduler_cannot_use() {
+    let sub_minute_directory = TemporaryDirectory::new("manifest-sub-minute-cron").unwrap();
+    let short_directory = TemporaryDirectory::new("manifest-short-cron").unwrap();
+    let sub_minute = write_manifest(
+        &sub_minute_directory,
+        "json",
+        r#"{"schedule":{"cron":"* * * * * *"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+    let short = write_manifest(
+        &short_directory,
+        "json",
+        r#"{"schedule":{"cron":"0 3 * *"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&sub_minute),
+        Err(ManifestError::Invalid(error)) if error.contains("at most once a minute")
+    ));
+    assert!(matches!(
+        load(&short),
+        Err(ManifestError::Invalid(error)) if error.contains("4 fields")
+    ));
+}
+
+#[test]
+fn rejects_a_list_of_schedules_that_does_not_name_each_one() {
+    let unnamed_directory = TemporaryDirectory::new("manifest-unnamed-schedules").unwrap();
+    let repeated_directory = TemporaryDirectory::new("manifest-repeated-schedules").unwrap();
+    let unnamed = write_manifest(
+        &unnamed_directory,
+        "json",
+        r#"{"schedule":[{"cron":"0 3 * * *"},{"name":"late","cron":"0 5 * * *"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+    let repeated = write_manifest(
+        &repeated_directory,
+        "json",
+        r#"{"schedule":[{"name":"nightly","cron":"0 3 * * *"},{"name":"nightly","cron":"0 5 * * *"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load(&unnamed),
+        Err(ManifestError::Invalid(error)) if error.contains("must name each of them")
+    ));
+    assert!(matches!(
+        load(&repeated),
+        Err(ManifestError::Invalid(error)) if error == "schedule name nightly is used twice"
     ));
 }

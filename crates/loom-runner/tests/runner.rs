@@ -85,10 +85,14 @@ fn runs_ready_tasks_and_releases_dependents() {
     ]));
     let mut events = Vec::new();
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     assert_eq!(status, 0);
     assert_eq!(count_started(&events, 0), 1);
@@ -127,10 +131,14 @@ fn blocks_dependents_after_a_failed_task() {
     ]));
     let mut events = Vec::new();
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     assert_eq!(status, 23);
     assert!(!marker.exists());
@@ -155,10 +163,14 @@ fn treats_a_signalled_task_as_a_failure_and_blocks_dependents() {
     ]));
     let mut events = Vec::new();
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     // A signalled task has no exit code, so the workflow reports 1.
     assert_eq!(status, 1);
@@ -194,10 +206,14 @@ fn reports_siblings_that_completed_when_a_task_cannot_start() {
     ]));
     let mut events = Vec::new();
 
-    let error = assert_err!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let error = assert_err!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(events.iter().any(|event| matches!(
@@ -223,7 +239,7 @@ fn reports_direct_start_failures_as_terminal_events() {
     let directory = assert_ok!(TemporaryDirectory::new("runner-direct-missing-program"));
     let mut events = Vec::new();
 
-    let error = assert_err!(Runner.run_request(
+    let error = assert_err!(Runner::here().unwrap().run_request(
         ExecutionRequest::Command(ProcessCall::new(directory.path().join("missing-program"))),
         &mut |event| {
             record_event(&mut events, event);
@@ -256,8 +272,11 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
             .argument(marker.to_string_lossy().into_owned()),
     );
 
-    let error =
-        assert_err!(Runner.run_request(request, &mut |_| Err(io::Error::other("cannot report")),));
+    let error = assert_err!(
+        Runner::here()
+            .unwrap()
+            .run_request(request, &mut |_| Err(io::Error::other("cannot report")),)
+    );
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(!marker.exists());
@@ -280,7 +299,11 @@ fn reports_the_status_of_the_first_failing_task_in_declaration_order() {
         )),
     ]));
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |_| Ok(())));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |_| Ok(()))
+    );
 
     assert_eq!(status, 23);
 }
@@ -296,7 +319,9 @@ fn stops_before_starting_a_workflow_task_when_the_callback_fails() {
     ))]));
 
     let error = assert_err!(
-        Runner.run_workflow(&workflow, &mut |_| Err(io::Error::other("cannot report")))
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |_| Err(io::Error::other("cannot report")))
     );
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -317,10 +342,13 @@ fn stops_a_workflow_when_reporting_a_finished_task_fails() {
         assert_ok!(marker_task("verify", &["prepare"], &marker)),
     ]));
 
-    let error = assert_err!(Runner.run_workflow(&workflow, &mut |event| match event {
-        RunEvent::Finished { .. } => Err(io::Error::other("cannot report")),
-        _ => Ok(()),
-    }));
+    let error = assert_err!(Runner::here().unwrap().run_workflow(
+        &workflow,
+        &mut |event| match event {
+            RunEvent::Finished { .. } => Err(io::Error::other("cannot report")),
+            _ => Ok(()),
+        }
+    ));
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(!marker.exists());
@@ -347,7 +375,9 @@ fn starts_independent_processes_before_either_can_finish() {
     let (finished_sender, finished_receiver) = mpsc::channel();
     let runner_thread = thread::spawn(move || {
         let mut on_event = |_: &RunEvent| Ok(());
-        let result = Runner.run_workflow(&workflow, &mut on_event);
+        let result = Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut on_event);
         let _ = finished_sender.send(result);
     });
 
@@ -380,10 +410,14 @@ fn reports_output_before_the_task_finishes() {
     ))]));
     let mut events = Vec::new();
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     assert_eq!(status, 0);
     let reported = assert_ok!(event_position(&events, |event| matches!(
@@ -413,10 +447,14 @@ fn reports_a_blocked_task_after_a_dependency_fails() {
     ]));
     let mut events = Vec::new();
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     assert_eq!(status, 3);
     assert!(events.contains(&RecordedEvent::Blocked { task: 1 }));
@@ -633,10 +671,14 @@ fn runs_sandboxed_tasks_inside_the_sandbox() {
     ]));
     let mut events = Vec::new();
 
-    let status = assert_ok!(Runner.run_workflow(&workflow, &mut |event| {
-        record_event(&mut events, event);
-        Ok(())
-    }));
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
 
     assert_ne!(status, 0);
     assert!(!outside.exists());

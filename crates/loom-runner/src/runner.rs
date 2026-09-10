@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -51,11 +52,32 @@ pub enum RunEvent {
     },
 }
 
-/// Runs direct requests and validated workflows.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Runner;
+/// Runs direct requests and validated workflows in one working directory.
+#[derive(Clone, Debug)]
+pub struct Runner {
+    working_directory: PathBuf,
+}
 
 impl Runner {
+    /// Runs tasks in `working_directory`.
+    #[must_use]
+    pub fn new(working_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            working_directory: working_directory.into(),
+        }
+    }
+
+    /// Runs tasks in this process's own working directory.
+    pub fn here() -> io::Result<Self> {
+        Ok(Self::new(std::env::current_dir()?))
+    }
+
+    /// The directory every task runs in.
+    #[must_use]
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
     /// Runs one request without a sandbox.
     pub fn run_request(
         &self,
@@ -73,8 +95,11 @@ impl Runner {
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
         on_event(&RunEvent::Started { task: None })?;
-        let mut outcomes =
-            run_requests_concurrently(vec![(None, request, sandbox.cloned())], on_event)?;
+        let mut outcomes = run_requests_concurrently(
+            &self.working_directory,
+            vec![(None, request, sandbox.cloned())],
+            on_event,
+        )?;
         let Some((_, outcome)) = outcomes.pop() else {
             return Err(io::Error::other("request produced no result"));
         };
@@ -110,7 +135,7 @@ impl Runner {
                     )
                 })
                 .collect();
-            let outcomes = run_requests_concurrently(jobs, on_event)?;
+            let outcomes = run_requests_concurrently(&self.working_directory, jobs, on_event)?;
 
             record_outcomes(&mut execution, outcomes, &mut exit_status)?;
         }
@@ -167,10 +192,12 @@ type Outcome = io::Result<Option<i32>>;
 ///
 /// Outcomes come back in completion order, not in the order of `jobs`.
 fn run_requests_concurrently(
+    working_directory: &Path,
     jobs: Vec<Job>,
     on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
 ) -> io::Result<Vec<(Option<TaskIndex>, Outcome)>> {
     let (sender, receiver) = mpsc::channel::<Message>();
+    let runner = ProcessRunner::new(working_directory);
 
     std::thread::scope(|scope| {
         let handles = jobs
@@ -178,6 +205,7 @@ fn run_requests_concurrently(
             .map(|(task, request, sandbox)| {
                 // A Sender is not Sync, so the two reader threads share it under a lock.
                 let sender = Mutex::new(sender.clone());
+                let runner = &runner;
                 scope.spawn(move || {
                     let started = Instant::now();
                     let sink = |stream, line: &[u8]| {
@@ -185,7 +213,7 @@ fn run_requests_concurrently(
                             let _ = sender.send(Message::Line(task, stream, line.to_vec()));
                         }
                     };
-                    let result = ProcessRunner.run_streaming(request, sandbox.as_ref(), &sink);
+                    let result = runner.run_streaming(request, sandbox.as_ref(), &sink);
                     // The reader threads have ended, so no line follows this.
                     if let Ok(sender) = sender.lock() {
                         let _ = sender.send(Message::Done(task, result, started.elapsed()));

@@ -15,7 +15,7 @@ use loom_core::{TaskRequest, Workflow};
 use loom_process::OutputStream;
 use serde::Serialize;
 
-use crate::report::{STDERR_MARK, STDOUT_MARK, VERB_WIDTH, trim_newline};
+use crate::format::{STDERR_MARK, STDOUT_MARK, VERB_WIDTH, trim_newline};
 use crate::time::{compact_utc, utc};
 
 const DIRECTORY: &str = ".loom";
@@ -29,10 +29,12 @@ const SCHEMA: u32 = 1;
 
 /// What one run executes.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum RunTarget<'run> {
+pub enum RunTarget<'run> {
     /// Every task of a workflow manifest.
     Workflow {
+        /// Path of the manifest, as the run named it.
         path: &'run Path,
+        /// Loaded workflow.
         workflow: &'run Workflow,
     },
     /// One direct request, named after the command that asked for it.
@@ -44,7 +46,8 @@ pub(crate) enum RunTarget<'run> {
 
 impl RunTarget<'_> {
     /// Task labels in declaration order.
-    pub(crate) fn labels(&self) -> Vec<String> {
+    #[must_use]
+    pub fn labels(&self) -> Vec<String> {
         match self {
             Self::Workflow { workflow, .. } => workflow
                 .tasks()
@@ -65,31 +68,42 @@ impl RunTarget<'_> {
 
 /// Whether a run writes artifacts, and where.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct LogSettings<'run> {
-    pub(crate) enabled: bool,
+pub struct LogSettings<'run> {
+    /// False writes no artifacts at all.
+    pub enabled: bool,
     /// Directory that replaces the one Loom resolves itself.
-    pub(crate) directory: Option<&'run Path>,
+    pub directory: Option<&'run Path>,
 }
 
 impl LogSettings<'_> {
     /// Returns nothing when artifacts are off.
-    pub(crate) fn create(&self, target: &RunTarget<'_>) -> Option<io::Result<RunLog>> {
-        self.enabled.then(|| RunLog::create(self.directory, target))
+    pub fn create(
+        &self,
+        target: &RunTarget<'_>,
+        working_directory: &Path,
+    ) -> Option<io::Result<RunLog>> {
+        self.enabled
+            .then(|| RunLog::create(self.directory, target, working_directory))
     }
 }
 
 /// What happened to one task.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum TaskOutcome {
+pub enum TaskOutcome {
+    /// The task has started.
     Started,
     /// The task ran to the end. `None` means a signal ended it.
     Finished {
+        /// Status the task exited with.
         exit_status: Option<i32>,
+        /// Time the task took.
         elapsed: Duration,
     },
     /// The task could not start at all.
     Failed {
+        /// Category of the error that stopped it.
         error: io::ErrorKind,
+        /// Time until the task failed.
         elapsed: Duration,
     },
     /// The task never ran, because a dependency failed.
@@ -97,7 +111,7 @@ pub(crate) enum TaskOutcome {
 }
 
 /// The artifacts of one run.
-pub(crate) struct RunLog {
+pub struct RunLog {
     directory: PathBuf,
     run: File,
     width: usize,
@@ -176,10 +190,14 @@ enum RequestRecord {
 impl RunLog {
     /// Creates the directory of one run and opens every file it writes.
     ///
-    /// `root` replaces the directory Loom would resolve itself.
-    pub(crate) fn create(root: Option<&Path>, target: &RunTarget<'_>) -> io::Result<Self> {
-        let working_directory = std::env::current_dir()?;
-        let resolved = root.map_or_else(|| resolve_root(&working_directory), Path::to_path_buf);
+    /// `root` replaces the directory Loom would resolve itself, and
+    /// `working_directory` is the directory the run's tasks run in.
+    pub fn create(
+        root: Option<&Path>,
+        target: &RunTarget<'_>,
+        working_directory: &Path,
+    ) -> io::Result<Self> {
+        let resolved = root.map_or_else(|| resolve_root(working_directory), Path::to_path_buf);
         let started = SystemTime::now();
         // A PID cannot repeat inside one millisecond, so this names one run only.
         let id = format!("{}-{}", compact_utc(started), process::id());
@@ -202,7 +220,7 @@ impl RunLog {
             working_directory: working_directory.display().to_string(),
             manifest: target
                 .manifest()
-                .map(|path| absolute(path, &working_directory).display().to_string()),
+                .map(|path| absolute(path, working_directory).display().to_string()),
             started: utc(started),
             finished: String::new(),
             duration_seconds: 0.0,
@@ -220,12 +238,14 @@ impl RunLog {
         })
     }
 
-    pub(crate) fn directory(&self) -> &Path {
+    /// The directory that holds this run's artifacts.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
         &self.directory
     }
 
     /// Records one of Loom's own status lines.
-    pub(crate) fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
+    pub fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
         let stamp = utc(SystemTime::now());
 
         writeln!(self.run, "{stamp} {verb:<VERB_WIDTH$}  {message}")
@@ -235,12 +255,7 @@ impl RunLog {
     ///
     /// The stream file keeps the bytes as the task wrote them. The run log
     /// keeps the line without its colours, behind the task and the stream.
-    pub(crate) fn output(
-        &mut self,
-        index: usize,
-        stream: OutputStream,
-        line: &[u8],
-    ) -> io::Result<()> {
+    pub fn output(&mut self, index: usize, stream: OutputStream, line: &[u8]) -> io::Result<()> {
         let width = self.width;
         let stamp = utc(SystemTime::now());
         let Some(task) = self.tasks.get_mut(index) else {
@@ -257,7 +272,8 @@ impl RunLog {
         writeln!(self.run, "{stamp} {:<width$} {mark} {text}", task.id)
     }
 
-    pub(crate) fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
+    /// Records what happened to one task.
+    pub fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
         let Some(task) = self.tasks.get_mut(index) else {
             return;
         };
@@ -285,7 +301,7 @@ impl RunLog {
     }
 
     /// Writes the record of the run, with Loom's own exit status.
-    pub(crate) fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
+    pub fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
         let finished = SystemTime::now();
         self.record.finished = utc(finished);
         self.record.duration_seconds = finished

@@ -2,5 +2,7 @@
 
 mod manifest;
 mod sandbox;
+mod schedule;
 
-pub use manifest::{ManifestError, load};
+pub use manifest::{Manifest, ManifestError, load};
+pub use schedule::{JobSchedule, Overlap};
