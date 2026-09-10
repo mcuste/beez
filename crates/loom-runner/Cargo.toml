@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 loom-core = { path = "../loom-core" }
+loom-policy = { path = "../loom-policy" }
 loom-process = { path = "../loom-process" }
 
 [dev-dependencies]

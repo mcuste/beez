@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 loom-core = { path = "../loom-core" }
+loom-policy = { path = "../loom-policy" }
 loom-schedule = { path = "../loom-schedule" }
 noyalib = "0.0.28"
 serde = { version = "1.0.228", features = ["derive"] }

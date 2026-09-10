@@ -1,13 +1,10 @@
 [package]
-name = "loom-core"
+name = "loom-policy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[dependencies]
-loom-policy = { path = "../loom-policy" }
 
 [lints]
 workspace = true

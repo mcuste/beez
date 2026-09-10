@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use loom_core::HeadlessHarness;
+use loom_policy::HeadlessHarness;
 
 use crate::harness::HarnessCall;
 use crate::process_call::ProcessCall;

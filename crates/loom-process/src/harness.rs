@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use loom_core::HeadlessHarness;
+use loom_policy::HeadlessHarness;
 
 /// Sends one prompt through a harness's non-interactive interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,7 +109,7 @@ fn append_effort_arguments(
 mod tests {
     use std::path::PathBuf;
 
-    use loom_core::HeadlessHarness;
+    use loom_policy::HeadlessHarness;
 
     use super::HarnessCall;
 

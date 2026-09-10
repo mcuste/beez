@@ -1,8 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::harness::{HarnessOptions, HeadlessHarness};
-use crate::sandbox::SandboxPolicy;
+use loom_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
 
 /// Reports an invalid task ID.
 #[derive(Clone, Debug, Eq, PartialEq)]

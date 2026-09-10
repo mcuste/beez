@@ -10,7 +10,7 @@ repository.workspace = true
 harness-contract = []
 
 [dependencies]
-loom-core = { path = "../loom-core" }
+loom-policy = { path = "../loom-policy" }
 loom-sandbox = { path = "../loom-sandbox" }
 
 [dev-dependencies]

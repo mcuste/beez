@@ -5,7 +5,8 @@ use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use loom_core::{SandboxPolicy, TaskIndex, TaskRequest, Workflow, WorkflowExecution};
+use loom_core::{TaskIndex, TaskRequest, Workflow, WorkflowExecution};
+use loom_policy::SandboxPolicy;
 use loom_process::{
     ExecutionRequest, HarnessCall, OutputStream, ProcessCall, ProcessOutput, ProcessRunner,
 };

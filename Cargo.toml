@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/loom-policy",
   "crates/loom-core",
   "crates/loom-process",
   "crates/loom-sandbox",

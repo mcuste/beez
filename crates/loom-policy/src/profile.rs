@@ -1,5 +1,4 @@
-use crate::HeadlessHarness;
-use crate::sandbox::{DomainGroup, SandboxPath};
+use crate::{DomainGroup, HeadlessHarness, SandboxPath};
 
 /// What a harness needs from the sandbox to run at all.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,8 +90,7 @@ fn paths(texts: &[&str]) -> Vec<SandboxPath> {
 #[cfg(test)]
 mod tests {
     use super::HarnessProfile;
-    use crate::HeadlessHarness;
-    use crate::sandbox::{DomainGroup, SandboxPath};
+    use crate::{DomainGroup, HeadlessHarness, SandboxPath};
 
     /// Without a domain group a harness reaches no provider, and without a
     /// state path its own configuration directory stays read-only.

@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use loom_core::DomainRule;
+use loom_policy::DomainRule;
 use loom_sandbox::Proxy;
 
 const TIMEOUT: Duration = Duration::from_secs(5);

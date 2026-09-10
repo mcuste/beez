@@ -371,6 +371,7 @@ dependencies = [
  "loom-core",
  "loom-daemon",
  "loom-manifest",
+ "loom-policy",
  "loom-process",
  "loom-record",
  "loom-runner",
@@ -382,6 +383,9 @@ dependencies = [
 [[package]]
 name = "loom-core"
 version = "0.1.0"
+dependencies = [
+ "loom-policy",
+]
 
 [[package]]
 name = "loom-daemon"
@@ -403,6 +407,7 @@ name = "loom-manifest"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+ "loom-policy",
  "loom-schedule",
  "loom-test-support",
  "noyalib",
@@ -411,10 +416,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-policy"
+version = "0.1.0"
+
+[[package]]
 name = "loom-process"
 version = "0.1.0"
 dependencies = [
- "loom-core",
+ "loom-policy",
  "loom-sandbox",
  "loom-test-support",
 ]
@@ -437,6 +446,7 @@ name = "loom-runner"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+ "loom-policy",
  "loom-process",
  "loom-test-support",
 ]
@@ -446,7 +456,7 @@ name = "loom-sandbox"
 version = "0.1.0"
 dependencies = [
  "landlock",
- "loom-core",
+ "loom-policy",
  "loom-test-support",
 ]
 

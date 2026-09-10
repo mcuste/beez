@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use loom_core::SandboxPolicy;
+use loom_policy::SandboxPolicy;
 use loom_sandbox::SandboxedCommand;
 
 use crate::execution::ExecutionRequest;

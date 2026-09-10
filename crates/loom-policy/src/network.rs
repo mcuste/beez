@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::sandbox::{DomainGroup, DomainRule, HarnessProfile, extend};
+use crate::{DomainGroup, DomainRule, HarnessProfile, extend};
 
 /// Which remote hosts sandboxed processes may reach.
 ///
@@ -87,8 +87,7 @@ impl NetworkPolicy {
 #[cfg(test)]
 mod tests {
     use super::NetworkPolicy;
-    use crate::HeadlessHarness;
-    use crate::sandbox::{DomainGroup, DomainRule, HarnessProfile};
+    use crate::{DomainGroup, DomainRule, HarnessProfile, HeadlessHarness};
 
     fn rule(text: &str) -> DomainRule {
         text.parse().unwrap()

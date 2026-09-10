@@ -2,9 +2,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use loom_core::{
-    HarnessOptions, HeadlessHarness, SandboxPolicy, TaskDefinition, TaskId, TaskRequest, Workflow,
-};
+use loom_core::{TaskDefinition, TaskId, TaskRequest, Workflow};
+use loom_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
 use serde::Deserialize;
 
 use crate::sandbox::{ManifestSandbox, SandboxSetting};

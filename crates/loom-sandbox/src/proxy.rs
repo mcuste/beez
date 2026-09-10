@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use loom_core::DomainRule;
+use loom_policy::DomainRule;
 
 use crate::server::Server;
 

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use loom_core::{
+use loom_policy::{
     DomainRule, ExecutableGroup, HarnessProfile, HeadlessHarness, SandboxPath, SandboxPolicy,
 };
 
@@ -378,7 +378,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use loom_core::{
+    use loom_policy::{
         ExecutableGroup, ExecutablePolicy, FilesystemPolicy, HeadlessHarness, NetworkPolicy,
         SandboxPath, SandboxPolicy,
     };

@@ -4,11 +4,12 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use loom_core::{
-    DomainGroup, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, HarnessOptions,
-    HeadlessHarness, NetworkPolicy, SandboxPolicy, TaskRequest,
-};
+use loom_core::TaskRequest;
 use loom_manifest::{ManifestError, Overlap, load};
+use loom_policy::{
+    DomainGroup, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, HarnessOptions,
+    HeadlessHarness, NetworkPolicy, SandboxPolicy,
+};
 use loom_test_support::TemporaryDirectory;
 
 #[test]

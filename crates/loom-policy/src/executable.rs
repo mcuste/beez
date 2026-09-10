@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::sandbox::{ExecutableGroup, SandboxPath, extend};
+use crate::{ExecutableGroup, SandboxPath, extend};
 
 /// Which programs sandboxed processes may execute.
 ///
@@ -78,7 +78,7 @@ impl ExecutablePolicy {
 #[cfg(test)]
 mod tests {
     use super::ExecutablePolicy;
-    use crate::sandbox::ExecutableGroup;
+    use crate::ExecutableGroup;
 
     #[test]
     fn resolves_executable_groups() {

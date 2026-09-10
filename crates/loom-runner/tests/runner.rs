@@ -644,7 +644,7 @@ fn received_workflow_status(
 #[cfg(target_os = "macos")]
 #[test]
 fn runs_sandboxed_tasks_inside_the_sandbox() {
-    use loom_core::{FilesystemPolicy, NetworkPolicy, SandboxPolicy};
+    use loom_policy::{FilesystemPolicy, NetworkPolicy, SandboxPolicy};
 
     let directory = assert_ok!(TemporaryDirectory::new("runner-sandbox"));
     let outside = directory.join("outside.txt");

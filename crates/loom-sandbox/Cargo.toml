@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-loom-core = { path = "../loom-core" }
+loom-policy = { path = "../loom-policy" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"

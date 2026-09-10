@@ -1,20 +1,4 @@
-//! Sandbox policy a task declares for the process that runs it.
-
-mod domain;
-mod executable;
-mod filesystem;
-mod group;
-mod network;
-mod path;
-mod profile;
-
-pub use domain::{DomainRule, DomainRuleError};
-pub use executable::ExecutablePolicy;
-pub use filesystem::FilesystemPolicy;
-pub use group::{DomainGroup, ExecutableGroup, GroupError};
-pub use network::NetworkPolicy;
-pub use path::{SandboxPath, SandboxPathError};
-pub use profile::HarnessProfile;
+use crate::{ExecutablePolicy, FilesystemPolicy, NetworkPolicy};
 
 /// Restrictions Loom applies to a task's process tree.
 ///
@@ -89,7 +73,7 @@ impl SandboxPolicy {
 }
 
 /// Adds every value that is not in `target` yet.
-fn extend<T: PartialEq>(target: &mut Vec<T>, values: Vec<T>) {
+pub(crate) fn extend<T: PartialEq>(target: &mut Vec<T>, values: Vec<T>) {
     for value in values {
         if !target.contains(&value) {
             target.push(value);

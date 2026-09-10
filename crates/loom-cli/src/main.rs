@@ -6,11 +6,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use loom_core::{
-    DomainRule, FilesystemPolicy, HeadlessHarness, NetworkPolicy, SandboxPath, SandboxPolicy,
-};
 use loom_daemon::{DaemonPaths, Request, Response};
 use loom_manifest::load;
+use loom_policy::{
+    DomainRule, FilesystemPolicy, HeadlessHarness, NetworkPolicy, SandboxPath, SandboxPolicy,
+};
 use loom_process::{ExecutionRequest, HarnessCall, ProcessCall};
 use loom_record::{LogSettings, RunTarget};
 use loom_runner::Runner;

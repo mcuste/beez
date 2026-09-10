@@ -1,4 +1,4 @@
-use crate::sandbox::{HarnessProfile, SandboxPath, extend};
+use crate::{HarnessProfile, SandboxPath, extend};
 
 /// Which paths sandboxed processes may read and write.
 ///
@@ -115,8 +115,7 @@ impl FilesystemPolicy {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_READ_DENY, DEFAULT_WRITE_ALLOW, DEFAULT_WRITE_DENY, FilesystemPolicy};
-    use crate::HeadlessHarness;
-    use crate::sandbox::{HarnessProfile, SandboxPath};
+    use crate::{HarnessProfile, HeadlessHarness, SandboxPath};
 
     fn path(text: &str) -> SandboxPath {
         text.parse().unwrap()

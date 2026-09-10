@@ -3,7 +3,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use loom_core::{HeadlessHarness, SandboxPolicy};
+use loom_policy::{HeadlessHarness, SandboxPolicy};
 
 use crate::proxy::Proxy;
 use crate::resolve::ResolvedSandbox;

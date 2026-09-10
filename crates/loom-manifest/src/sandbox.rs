@@ -1,4 +1,4 @@
-use loom_core::{
+use loom_policy::{
     DomainGroup, DomainRule, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, NetworkPolicy,
     SandboxPath, SandboxPolicy,
 };
