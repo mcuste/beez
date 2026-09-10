@@ -13,6 +13,7 @@ mod sandbox;
 pub use domain::{DomainRule, DomainRuleError};
 pub use executable::ExecutablePolicy;
 pub use filesystem::FilesystemPolicy;
+pub(crate) use group::PathGroup;
 pub use group::{DomainGroup, ExecutableGroup, GroupError};
 pub use harness::{HarnessOptions, HeadlessHarness, HeadlessHarnessError};
 pub use network::NetworkPolicy;

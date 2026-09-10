@@ -223,10 +223,12 @@ proxy and a SOCKS5 proxy that only connect to allowed hosts, and points
 `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` at them. The proxies also refuse
 an allowed host that resolves to a loopback or link-local address, such as the
 cloud metadata service, unless `localhost: true`. Reads are allowed
-except for credential stores such as `~/.ssh` and `~/.aws`. Writes are denied
-except inside the working directory, the temporary directory, and the
-harness's own state directory. Files a run could use to escape later, such as
-`.git/hooks`, `.claude`, and `.mcp.json`, stay read-only, and so does `.loom`,
+except for credential stores such as `~/.ssh`, `~/.aws`, and
+`~/.git-credentials`, and except for shell history and password stores.
+Writes are denied except inside the working directory, the temporary
+directory, and the harness's own state directory. Files a run could use to
+execute code later, such as `.git/hooks`, `.github/workflows`, `.envrc`,
+`.vscode`, `.claude`, and `.mcp.json`, stay read-only, and so does `.loom`,
 so a task cannot rewrite the log of its own run.
 
 A `sandbox` section allows more than the defaults, for a whole workflow or for
@@ -286,16 +288,24 @@ Domain groups:
 | `openai`                                                | `api.openai.com`, `chatgpt.com`, `auth.openai.com`                               | codex, pi, omp  |
 | `google`                                                | `generativelanguage.googleapis.com`, `oauth2.googleapis.com`                     | pi, omp         |
 | `openrouter`                                            | `openrouter.ai`                                                                  | pi, omp         |
-| `bedrock`, `vertex`                                     | provider endpoints                                                               | off             |
+| `bedrock`, `vertex`, `azure-openai`                     | cloud provider endpoints                                                         | off             |
+| `mistral`, `deepseek`, `xai`, `groq`, `ollama`          | other model providers                                                            | off             |
+| `huggingface`                                           | `huggingface.co` and its content hosts                                           | off             |
 | `claude-optional`                                       | Claude Code updates, plugins, and documentation                                  | off             |
 | `claude-telemetry`                                      | Claude Code operational telemetry                                                | off             |
 | `github`                                                | `github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com` | off             |
-| `npm`, `pypi`, `crates`, `go`, `homebrew`, `docker-hub` | package registries                                                               | off             |
+| `gitlab`, `bitbucket`                                   | forge web and API hosts                                                          | off             |
+| `npm`, `pypi`, `crates`, `go`, `rubygems`, `maven`, `nuget`, `homebrew` | package registries                                               | off             |
+| `docker-hub`, `container-registry`                      | container registries                                                             | off             |
+| `hashicorp`                                             | Terraform registry and releases                                                  | off             |
+| `playwright`                                            | Playwright browser downloads                                                     | off             |
 
 Executable groups: `coreutils`, `text`, `git`, and `net` are on by default.
-`node`, `python`, `rust`, and `go` add the toolchain and its cache
-directories. The harness binary, `sh`, `bash`, `zsh`, `env`, `node`, `bun`,
-and `rg` always may run. Tool version managers that use shims, such as mise,
+`node`, `python`, `rust`, `go`, `jvm`, `ruby`, `dotnet`, and `zig` add the
+toolchain and its cache directories. `build` adds `make` and `cmake`,
+`container` adds `docker` and `kubectl`, `iac` adds `terraform` and
+`ansible`, and `process` adds `ps` and `lsof`. The harness binary, `sh`,
+`bash`, `zsh`, `env`, `node`, `bun`, and `rg` always may run. Tool version managers that use shims, such as mise,
 need their install directory in `allow`.
 
 A single prompt or command from the command line runs sandboxed as well:

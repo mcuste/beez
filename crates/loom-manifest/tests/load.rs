@@ -563,7 +563,7 @@ fn rejects_unknown_sandbox_groups_and_fields() {
     let unknown_group = write_manifest(
         &directory,
         "yaml",
-        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      network:\n        groups: [gitlab]\n",
+        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      network:\n        groups: [nowhere]\n",
     )
     .unwrap();
     let unknown_field = write_manifest(
@@ -581,7 +581,7 @@ fn rejects_unknown_sandbox_groups_and_fields() {
 
     assert!(matches!(
         load(&unknown_group),
-        Err(ManifestError::Invalid(error)) if error.contains("gitlab")
+        Err(ManifestError::Invalid(error)) if error.contains("nowhere")
     ));
     assert!(matches!(
         load(&unknown_field),

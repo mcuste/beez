@@ -1,4 +1,12 @@
-use crate::{DomainGroup, HeadlessHarness, SandboxPath};
+use crate::{DomainGroup, HeadlessHarness, PathGroup, SandboxPath};
+
+/// Pi and Omp pick the provider from their own configuration.
+const MULTI_PROVIDER_GROUPS: [DomainGroup; 4] = [
+    DomainGroup::Anthropic,
+    DomainGroup::OpenAi,
+    DomainGroup::Google,
+    DomainGroup::OpenRouter,
+];
 
 /// What a harness needs from the sandbox to run at all.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,7 +25,7 @@ impl HarnessProfile {
             HeadlessHarness::Claude => Self {
                 required_domain_groups: vec![DomainGroup::Anthropic],
                 default_domain_groups: Vec::new(),
-                state_paths: paths(&["~/.claude", "~/.claude.json"]),
+                state_paths: PathGroup::ClaudeState.sandbox_paths(),
                 // Optional traffic must not retry against a closed network.
                 environment: vec![
                     ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
@@ -28,19 +36,19 @@ impl HarnessProfile {
             HeadlessHarness::Codex => Self {
                 required_domain_groups: vec![DomainGroup::OpenAi],
                 default_domain_groups: Vec::new(),
-                state_paths: paths(&["~/.codex"]),
+                state_paths: PathGroup::CodexState.sandbox_paths(),
                 environment: Vec::new(),
             },
             HeadlessHarness::Pi => Self {
                 required_domain_groups: Vec::new(),
                 default_domain_groups: MULTI_PROVIDER_GROUPS.to_vec(),
-                state_paths: paths(&["~/.pi"]),
+                state_paths: PathGroup::PiState.sandbox_paths(),
                 environment: Vec::new(),
             },
             HeadlessHarness::Omp => Self {
                 required_domain_groups: Vec::new(),
                 default_domain_groups: MULTI_PROVIDER_GROUPS.to_vec(),
-                state_paths: paths(&["~/.omp"]),
+                state_paths: PathGroup::OmpState.sandbox_paths(),
                 environment: Vec::new(),
             },
         }
@@ -71,22 +79,6 @@ impl HarnessProfile {
     }
 }
 
-/// Pi and Omp pick the provider from their own configuration.
-const MULTI_PROVIDER_GROUPS: [DomainGroup; 4] = [
-    DomainGroup::Anthropic,
-    DomainGroup::OpenAi,
-    DomainGroup::Google,
-    DomainGroup::OpenRouter,
-];
-
-fn paths(texts: &[&str]) -> Vec<SandboxPath> {
-    texts
-        .iter()
-        .map(|text| text.parse())
-        .filter_map(Result::ok)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::HarnessProfile;
@@ -107,7 +99,6 @@ mod tests {
         }
     }
 
-    /// `paths` drops a state path that fails to parse, which makes it read-only.
     #[test]
     fn grants_every_harness_its_own_state_paths() {
         let expected = [
