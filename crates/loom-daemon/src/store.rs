@@ -19,10 +19,9 @@ const SCHEMA: u32 = 1;
 
 /// The manifests the daemon watches.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub(crate) struct Registry {
-    #[serde(default = "schema")]
     schema: u32,
-    #[serde(default)]
     manifests: Vec<Watched>,
 }
 
@@ -84,10 +83,9 @@ impl Registry {
 
 /// What already happened to each job.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub(crate) struct States {
-    #[serde(default = "schema")]
     schema: u32,
-    #[serde(default)]
     jobs: BTreeMap<String, JobState>,
 }
 
@@ -143,10 +141,6 @@ impl States {
     pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
         save_json(path, self)
     }
-}
-
-fn schema() -> u32 {
-    SCHEMA
 }
 
 fn load_json<T: DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
