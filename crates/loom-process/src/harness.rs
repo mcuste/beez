@@ -24,20 +24,6 @@ impl HarnessCall {
         }
     }
 
-    /// Sets the model the harness must use.
-    #[must_use]
-    pub fn model(mut self, model: impl Into<OsString>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    /// Sets the reasoning effort the harness must use.
-    #[must_use]
-    pub fn effort(mut self, effort: impl Into<OsString>) -> Self {
-        self.effort = Some(effort.into());
-        self
-    }
-
     /// Uses the model and the effort the options name.
     ///
     /// An option that names neither keeps the harness default.
@@ -123,9 +109,22 @@ fn append_effort_arguments(
 mod tests {
     use std::path::PathBuf;
 
-    use loom_policy::HeadlessHarness;
+    use loom_policy::{HarnessOptions, HeadlessHarness};
 
     use super::HarnessCall;
+
+    /// A call that names the model and the effort a test needs.
+    fn call(
+        harness: HeadlessHarness,
+        prompt: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> HarnessCall {
+        HarnessCall::new(harness, prompt).options(&HarnessOptions::new(
+            model.map(str::to_owned),
+            effort.map(str::to_owned),
+        ))
+    }
 
     #[test]
     fn omits_the_model_and_effort_when_unset() {
@@ -139,7 +138,12 @@ mod tests {
 
     #[test]
     fn places_the_model_before_the_prompt() {
-        let sut = HarnessCall::new(HeadlessHarness::Pi, "inspect the repository").model("opus");
+        let sut = call(
+            HeadlessHarness::Pi,
+            "inspect the repository",
+            Some("opus"),
+            None,
+        );
 
         let (_, arguments) = sut.into_parts();
 
@@ -151,7 +155,12 @@ mod tests {
 
     #[test]
     fn places_the_effort_before_the_prompt() {
-        let sut = HarnessCall::new(HeadlessHarness::Pi, "inspect the repository").effort("high");
+        let sut = call(
+            HeadlessHarness::Pi,
+            "inspect the repository",
+            None,
+            Some("high"),
+        );
 
         let (_, arguments) = sut.into_parts();
 
@@ -163,7 +172,12 @@ mod tests {
 
     #[test]
     fn sends_the_effort_to_omp_as_a_thinking_level() {
-        let sut = HarnessCall::new(HeadlessHarness::Omp, "inspect the repository").effort("high");
+        let sut = call(
+            HeadlessHarness::Omp,
+            "inspect the repository",
+            None,
+            Some("high"),
+        );
 
         let (program, arguments) = sut.into_parts();
 
@@ -176,9 +190,12 @@ mod tests {
 
     #[test]
     fn prints_from_claude_code_with_a_model_and_effort() {
-        let sut = HarnessCall::new(HeadlessHarness::Claude, "inspect the repository")
-            .model("opus")
-            .effort("high");
+        let sut = call(
+            HeadlessHarness::Claude,
+            "inspect the repository",
+            Some("opus"),
+            Some("high"),
+        );
 
         let (program, arguments) = sut.into_parts();
 
@@ -198,9 +215,12 @@ mod tests {
 
     #[test]
     fn runs_codex_through_exec_and_sends_the_effort_as_a_config_override() {
-        let sut = HarnessCall::new(HeadlessHarness::Codex, "inspect the repository")
-            .model("gpt-5")
-            .effort("high");
+        let sut = call(
+            HeadlessHarness::Codex,
+            "inspect the repository",
+            Some("gpt-5"),
+            Some("high"),
+        );
 
         let (program, arguments) = sut.into_parts();
 
@@ -220,9 +240,12 @@ mod tests {
 
     #[test]
     fn places_the_model_and_effort_before_the_prompt() {
-        let sut = HarnessCall::new(HeadlessHarness::Omp, "inspect the repository")
-            .model("opus")
-            .effort("high");
+        let sut = call(
+            HeadlessHarness::Omp,
+            "inspect the repository",
+            Some("opus"),
+            Some("high"),
+        );
 
         let (_, arguments) = sut.into_parts();
 
@@ -241,9 +264,12 @@ mod tests {
 
     #[test]
     fn separates_a_hyphenated_prompt_after_the_model_and_effort() {
-        let sut = HarnessCall::new(HeadlessHarness::Pi, "--inspect the repository")
-            .model("opus")
-            .effort("high");
+        let sut = call(
+            HeadlessHarness::Pi,
+            "--inspect the repository",
+            Some("opus"),
+            Some("high"),
+        );
 
         let (_, arguments) = sut.into_parts();
 

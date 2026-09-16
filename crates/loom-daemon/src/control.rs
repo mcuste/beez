@@ -6,6 +6,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// What a command asks the daemon to do.
@@ -74,6 +75,24 @@ pub enum Response {
     },
 }
 
+impl Response {
+    /// The command took effect.
+    #[must_use]
+    pub fn done(message: impl Into<String>) -> Self {
+        Self::Done {
+            message: message.into(),
+        }
+    }
+
+    /// The command did not take effect.
+    #[must_use]
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+        }
+    }
+}
+
 /// One job, as a command reports it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JobReport {
@@ -102,13 +121,8 @@ pub struct JobReport {
 pub(crate) fn send(socket: &Path, request: &Request) -> io::Result<Response> {
     let stream = UnixStream::connect(socket)?;
     write_line(&stream, request)?;
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Err(io::Error::other("daemon closed the connection"));
-    }
 
-    serde_json::from_str(&line).map_err(io::Error::other)
+    read_line(&stream, "daemon closed the connection")
 }
 
 /// True when a daemon answers on the socket.
@@ -128,10 +142,15 @@ pub(crate) fn write_line<T: Serialize>(mut stream: &UnixStream, message: &T) -> 
 
 /// Reads one message from one line.
 pub(crate) fn read_request(stream: &UnixStream) -> io::Result<Request> {
+    read_line(stream, "no command arrived")
+}
+
+/// Reads one message from one line, and reports `empty` when none arrives.
+fn read_line<T: DeserializeOwned>(stream: &UnixStream, empty: &'static str) -> io::Result<T> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
-        return Err(io::Error::other("no command arrived"));
+        return Err(io::Error::other(empty));
     }
 
     serde_json::from_str(&line).map_err(io::Error::other)

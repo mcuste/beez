@@ -72,20 +72,19 @@ impl ResolvedSandbox {
         if filesystem.defaults() {
             write_allow.extend(fs::canonicalize(std::env::temp_dir()));
         }
-        let write_deny = filesystem
-            .write_deny()
-            .iter()
-            .map(|path| canonicalize_lenient(&path.resolve(home, &working_directory)))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let write_deny = dedup(
+            filesystem
+                .write_deny()
+                .iter()
+                .map(|path| canonicalize_lenient(&path.resolve(home, &working_directory)))
+                .collect(),
+        );
 
         let executables = policy.executables().map(|executables| {
             let groups = executables.groups();
             let state_paths = groups
                 .iter()
-                .flat_map(|group| group.state_paths().iter().map(|path| path.parse()))
-                .filter_map(Result::ok)
+                .flat_map(|group| group.state_sandbox_paths())
                 .collect::<Vec<_>>();
             write_allow.extend(existing(&state_paths, home, &working_directory));
             resolve_executables(
@@ -169,9 +168,14 @@ fn existing(paths: &[SandboxPath], home: &Path, working_directory: &Path) -> Vec
     dedup(
         paths
             .iter()
-            .filter_map(|path| fs::canonicalize(path.resolve(home, working_directory)).ok())
+            .filter_map(|path| canonical(path, home, working_directory))
             .collect(),
     )
+}
+
+/// The canonical path of one rule, when it exists on this host.
+fn canonical(path: &SandboxPath, home: &Path, working_directory: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path.resolve(home, working_directory)).ok()
 }
 
 /// Canonicalizes the longest existing prefix and appends the rest unchanged.
@@ -263,7 +267,7 @@ fn resolve_executables(
         allow
             .iter()
             .filter(|path| !path.is_bare_name())
-            .filter_map(|path| fs::canonicalize(path.resolve(home, working_directory)).ok()),
+            .filter_map(|path| canonical(path, home, working_directory)),
     );
 
     if groups.contains(&ExecutableGroup::Git) {

@@ -1,7 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::SandboxPath;
+use crate::named::{self, Named};
+use crate::{DomainRule, SandboxPath};
 
 /// Reports an unknown group name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,20 +19,12 @@ impl fmt::Display for GroupError {
             Self::UnknownDomainGroup(name) => write!(
                 formatter,
                 "unknown domain group {name:?}; expected one of {}",
-                DomainGroup::ALL
-                    .iter()
-                    .map(|group| group.name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                named::names::<DomainGroup>()
             ),
             Self::UnknownExecutableGroup(name) => write!(
                 formatter,
                 "unknown executable group {name:?}; expected one of {}",
-                ExecutableGroup::ALL
-                    .iter()
-                    .map(|group| group.name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                named::names::<ExecutableGroup>()
             ),
         }
     }
@@ -263,16 +256,33 @@ impl DomainGroup {
             ],
         }
     }
+
+    /// Host rules in the group. A rule that fails to parse is dropped.
+    #[must_use]
+    pub fn rules(self) -> Vec<DomainRule> {
+        self.domains()
+            .iter()
+            .map(|domain| domain.parse())
+            .filter_map(Result::ok)
+            .collect()
+    }
+}
+
+impl Named for DomainGroup {
+    fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    fn named(self) -> &'static str {
+        self.name()
+    }
 }
 
 impl FromStr for DomainGroup {
     type Err = GroupError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|group| group.name() == value)
-            .ok_or_else(|| GroupError::UnknownDomainGroup(value.to_owned()))
+        named::from_name(value).ok_or_else(|| GroupError::UnknownDomainGroup(value.to_owned()))
     }
 }
 
@@ -418,24 +428,38 @@ impl ExecutableGroup {
     /// Directories the group's programs need to write, in `SandboxPath` syntax.
     #[must_use]
     pub fn state_paths(self) -> &'static [&'static str] {
-        match self {
-            Self::Node => PathGroup::NodeState.paths(),
-            Self::Python => PathGroup::PythonState.paths(),
-            Self::Rust => PathGroup::RustState.paths(),
-            Self::Go => PathGroup::GoState.paths(),
-            Self::Jvm => PathGroup::JvmState.paths(),
-            Self::Ruby => PathGroup::RubyState.paths(),
-            Self::Dotnet => PathGroup::DotnetState.paths(),
-            Self::Zig => PathGroup::ZigState.paths(),
-            Self::Iac => PathGroup::IacState.paths(),
+        self.state_group().map_or(&[], PathGroup::paths)
+    }
+
+    /// Directories the group's programs need to write. A path that fails to
+    /// parse is dropped.
+    #[must_use]
+    pub fn state_sandbox_paths(self) -> Vec<SandboxPath> {
+        self.state_group()
+            .map(PathGroup::sandbox_paths)
+            .unwrap_or_default()
+    }
+
+    /// The path group that holds the caches of this toolchain, when it has one.
+    fn state_group(self) -> Option<PathGroup> {
+        Some(match self {
+            Self::Node => PathGroup::NodeState,
+            Self::Python => PathGroup::PythonState,
+            Self::Rust => PathGroup::RustState,
+            Self::Go => PathGroup::GoState,
+            Self::Jvm => PathGroup::JvmState,
+            Self::Ruby => PathGroup::RubyState,
+            Self::Dotnet => PathGroup::DotnetState,
+            Self::Zig => PathGroup::ZigState,
+            Self::Iac => PathGroup::IacState,
             Self::Coreutils
             | Self::Text
             | Self::Git
             | Self::Net
             | Self::Build
             | Self::Container
-            | Self::Process => &[],
-        }
+            | Self::Process => return None,
+        })
     }
 }
 
@@ -634,14 +658,21 @@ impl fmt::Display for PathGroup {
     }
 }
 
+impl Named for ExecutableGroup {
+    fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    fn named(self) -> &'static str {
+        self.name()
+    }
+}
+
 impl FromStr for ExecutableGroup {
     type Err = GroupError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|group| group.name() == value)
-            .ok_or_else(|| GroupError::UnknownExecutableGroup(value.to_owned()))
+        named::from_name(value).ok_or_else(|| GroupError::UnknownExecutableGroup(value.to_owned()))
     }
 }
 

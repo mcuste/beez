@@ -7,9 +7,9 @@
 
 use std::time::SystemTime;
 
-use loom_record::{VERB_WIDTH, utc};
+use loom_record::{status_line, utc};
 
 /// Writes one line of the daemon's own log.
 pub(crate) fn line(verb: &str, message: &str) {
-    eprintln!("{} {verb:<VERB_WIDTH$}  {message}", utc(SystemTime::now()));
+    eprintln!("{} {}", utc(SystemTime::now()), status_line(verb, message));
 }

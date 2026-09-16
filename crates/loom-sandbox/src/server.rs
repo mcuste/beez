@@ -157,6 +157,14 @@ impl Server {
             thread: Some(thread),
         }
     }
+
+    /// Waits until the accept loop ends, which it does only on a permanent error.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wait(mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Drop for Server {

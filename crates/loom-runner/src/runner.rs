@@ -52,6 +52,28 @@ pub enum RunEvent {
     },
 }
 
+impl RunEvent {
+    /// The workflow task this event belongs to, when it belongs to one.
+    #[must_use]
+    pub fn task(&self) -> Option<TaskIndex> {
+        match self {
+            Self::Started { task }
+            | Self::Output { task, .. }
+            | Self::Finished { task, .. }
+            | Self::Failed { task, .. } => *task,
+            Self::Blocked { task } => Some(*task),
+        }
+    }
+
+    /// The position of the task this event belongs to.
+    ///
+    /// A direct request has one task of its own, at position zero.
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.task().map_or(0, TaskIndex::position)
+    }
+}
+
 /// Runs direct requests and validated workflows in one working directory.
 #[derive(Clone, Debug)]
 pub struct Runner {
@@ -70,12 +92,6 @@ impl Runner {
     /// Runs tasks in this process's own working directory.
     pub fn here() -> io::Result<Self> {
         Ok(Self::new(std::env::current_dir()?))
-    }
-
-    /// The directory every task runs in.
-    #[must_use]
-    pub fn working_directory(&self) -> &Path {
-        &self.working_directory
     }
 
     /// Runs one request without a sandbox.

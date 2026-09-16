@@ -77,8 +77,7 @@ impl NetworkPolicy {
 
         groups
             .into_iter()
-            .flat_map(|group| group.domains().iter().map(|domain| domain.parse()))
-            .filter_map(Result::ok)
+            .flat_map(DomainGroup::rules)
             .chain(self.allow.iter().cloned())
             .collect()
     }

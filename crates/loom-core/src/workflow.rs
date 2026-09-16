@@ -95,14 +95,11 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
         }
 
         let indexes = task_indexes(&definitions)?;
+        let dependencies = resolve_all_dependencies(&definitions, &indexes)?;
+        if let Err(cycle) = validate_acyclic(&dependencies) {
+            return Err(WorkflowError::Cycle(task_ids(&definitions, &cycle)));
+        }
 
-        let (dependencies, dependency_ids) = resolve_all_dependencies(&definitions, &indexes)?;
-
-        validate_acyclic(&definitions, &dependency_ids)?;
-
-        // End references into definitions before moving them into tasks.
-        drop(dependency_ids);
-        drop(indexes);
         let tasks = definitions
             .into_iter()
             .zip(dependencies)
@@ -129,24 +126,15 @@ impl WorkflowExecution<'_> {
     /// Returns all pending tasks whose dependencies succeeded.
     #[must_use]
     pub fn ready(&self) -> Vec<TaskIndex> {
-        self.workflow
-            .tasks
-            .iter()
-            .zip(&self.statuses)
-            .enumerate()
-            .filter(|(_, (task, status))| {
-                **status == TaskStatus::Pending
-                    && task.dependencies().iter().all(|dependency| {
-                        self.statuses.get(dependency.position()) == Some(&TaskStatus::Succeeded)
-                    })
-            })
-            .map(|(index, _)| TaskIndex(index))
+        (0..self.workflow.tasks.len())
+            .map(TaskIndex)
+            .filter(|index| self.is_ready(*index))
             .collect()
     }
 
     /// Marks a ready task as running and returns it.
     pub fn start(&mut self, index: TaskIndex) -> Option<&Task> {
-        if !self.ready().contains(&index) {
+        if !self.is_ready(index) {
             return None;
         }
 
@@ -187,6 +175,17 @@ impl WorkflowExecution<'_> {
             .map(|(index, _)| TaskIndex(index))
             .collect()
     }
+
+    /// True when the task has not started and every dependency succeeded.
+    fn is_ready(&self, index: TaskIndex) -> bool {
+        let Some(task) = self.workflow.tasks.get(index.position()) else {
+            return false;
+        };
+        self.statuses.get(index.position()) == Some(&TaskStatus::Pending)
+            && task.dependencies().iter().all(|dependency| {
+                self.statuses.get(dependency.position()) == Some(&TaskStatus::Succeeded)
+            })
+    }
 }
 
 fn task_indexes(
@@ -206,16 +205,15 @@ fn task_indexes(
     Ok(indexes)
 }
 
-fn resolve_dependencies<'a>(
-    definition: &'a TaskDefinition,
+fn resolve_dependencies(
+    definition: &TaskDefinition,
     task_index: TaskIndex,
-    indexes: &HashMap<&'a TaskId, TaskIndex>,
-) -> Result<(Vec<TaskIndex>, Vec<&'a TaskId>), WorkflowError> {
+    indexes: &HashMap<&TaskId, TaskIndex>,
+) -> Result<Vec<TaskIndex>, WorkflowError> {
     let mut dependencies = Vec::with_capacity(definition.depends_on.len());
-    let mut dependency_ids = Vec::with_capacity(definition.depends_on.len());
 
     for dependency_id in &definition.depends_on {
-        let Some((resolved_id, &dependency)) = indexes.get_key_value(dependency_id) else {
+        let Some(&dependency) = indexes.get(dependency_id) else {
             return Err(WorkflowError::UnknownDependency {
                 task: definition.id.clone(),
                 dependency: dependency_id.clone(),
@@ -225,43 +223,23 @@ fn resolve_dependencies<'a>(
             return Err(WorkflowError::SelfDependency(definition.id.clone()));
         }
         dependencies.push(dependency);
-        dependency_ids.push(*resolved_id);
     }
 
-    Ok((dependencies, dependency_ids))
+    Ok(dependencies)
 }
 
-fn resolve_all_dependencies<'a>(
-    definitions: &'a [TaskDefinition],
-    indexes: &HashMap<&'a TaskId, TaskIndex>,
-) -> Result<(Vec<Vec<TaskIndex>>, HashMap<&'a TaskId, Vec<&'a TaskId>>), WorkflowError> {
-    let mut dependencies = Vec::with_capacity(definitions.len());
-    let mut dependency_ids = HashMap::with_capacity(definitions.len());
-
-    for (position, definition) in definitions.iter().enumerate() {
-        let task_index = TaskIndex(position);
-        let (task_dependencies, task_dependency_ids) =
-            resolve_dependencies(definition, task_index, indexes)?;
-
-        dependencies.push(task_dependencies);
-        dependency_ids.insert(&definition.id, task_dependency_ids);
-    }
-
-    Ok((dependencies, dependency_ids))
-}
-
-fn validate_acyclic<'a>(
-    definitions: &'a [TaskDefinition],
-    dependencies: &HashMap<&'a TaskId, Vec<&'a TaskId>>,
-) -> Result<(), WorkflowError> {
-    let mut states = HashMap::with_capacity(definitions.len());
-    let mut trail = Vec::new();
-
-    for definition in definitions {
-        visit(&definition.id, dependencies, &mut states, &mut trail)?;
-    }
-
-    Ok(())
+/// The predecessors of every task, in declaration order.
+fn resolve_all_dependencies(
+    definitions: &[TaskDefinition],
+    indexes: &HashMap<&TaskId, TaskIndex>,
+) -> Result<Vec<Vec<TaskIndex>>, WorkflowError> {
+    definitions
+        .iter()
+        .enumerate()
+        .map(|(position, definition)| {
+            resolve_dependencies(definition, TaskIndex(position), indexes)
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -271,42 +249,68 @@ enum Visit {
     Complete,
 }
 
-fn visit<'a>(
-    id: &'a TaskId,
-    dependencies: &HashMap<&'a TaskId, Vec<&'a TaskId>>,
-    states: &mut HashMap<&'a TaskId, Visit>,
-    trail: &mut Vec<&'a TaskId>,
-) -> Result<(), WorkflowError> {
-    match states.get(id).copied().unwrap_or(Visit::Unseen) {
+/// Reports the first cycle as the positions on it, first repeated last.
+fn validate_acyclic(dependencies: &[Vec<TaskIndex>]) -> Result<(), Vec<TaskIndex>> {
+    let mut states = vec![Visit::Unseen; dependencies.len()];
+    let mut trail = Vec::new();
+
+    for position in 0..dependencies.len() {
+        visit(TaskIndex(position), dependencies, &mut states, &mut trail)?;
+    }
+
+    Ok(())
+}
+
+fn visit(
+    index: TaskIndex,
+    dependencies: &[Vec<TaskIndex>],
+    states: &mut [Visit],
+    trail: &mut Vec<TaskIndex>,
+) -> Result<(), Vec<TaskIndex>> {
+    match states
+        .get(index.position())
+        .copied()
+        .unwrap_or(Visit::Complete)
+    {
         Visit::Complete => return Ok(()),
         Visit::Visiting => {
             let start = trail
                 .iter()
-                .position(|task| *task == id)
+                .position(|task| *task == index)
                 .unwrap_or_default();
-            let cycle = trail
+            return Err(trail
                 .iter()
                 .skip(start)
-                .map(|task| (*task).clone())
-                .chain(std::iter::once(id.clone()))
-                .collect();
-            return Err(WorkflowError::Cycle(cycle));
+                .copied()
+                .chain(std::iter::once(index))
+                .collect());
         }
         Visit::Unseen => {}
     }
 
-    states.insert(id, Visit::Visiting);
-    trail.push(id);
+    if let Some(state) = states.get_mut(index.position()) {
+        *state = Visit::Visiting;
+    }
+    trail.push(index);
 
-    if let Some(task_dependencies) = dependencies.get(id) {
-        for dependency in task_dependencies {
-            visit(dependency, dependencies, states, trail)?;
-        }
+    for dependency in dependencies.get(index.position()).into_iter().flatten() {
+        visit(*dependency, dependencies, states, trail)?;
     }
 
     let _ = trail.pop();
-    states.insert(id, Visit::Complete);
+    if let Some(state) = states.get_mut(index.position()) {
+        *state = Visit::Complete;
+    }
     Ok(())
+}
+
+/// The IDs of the tasks at `positions`.
+fn task_ids(definitions: &[TaskDefinition], positions: &[TaskIndex]) -> Vec<TaskId> {
+    positions
+        .iter()
+        .filter_map(|index| definitions.get(index.position()))
+        .map(|definition| definition.id.clone())
+        .collect()
 }
 
 #[cfg(test)]

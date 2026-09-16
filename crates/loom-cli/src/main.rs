@@ -353,28 +353,11 @@ fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
         sandbox,
         log,
     } = run;
-    let policy = sandbox.policy()?;
-    let working_directory = std::env::current_dir()?;
-    let target = RunTarget::Request {
-        name: harness.name(),
-    };
-    let mut reporter = reporter(
-        &target,
-        OutputMode::Stream,
-        ColorMode::Auto,
-        None,
-        log.settings(),
-        &working_directory,
-    );
-
     let request = ExecutionRequest::Harness(
         HarnessCall::new(harness, prompt).options(&HarnessOptions::new(model, effort)),
     );
 
-    let status =
-        Runner::new(&working_directory)
-            .run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event));
-    finish(&mut reporter, status)
+    run_request(harness.name(), request, &sandbox, &log)
 }
 
 fn run_command(process: Process) -> io::Result<i32> {
@@ -384,9 +367,21 @@ fn run_command(process: Process) -> io::Result<i32> {
         program,
         arguments,
     } = process;
+    let request = ExecutionRequest::Command(ProcessCall::new(program).arguments(arguments));
+
+    run_request("command", request, &sandbox, &log)
+}
+
+/// Runs one direct request, named after the command that asked for it.
+fn run_request(
+    name: &str,
+    request: ExecutionRequest,
+    sandbox: &SandboxArgs,
+    log: &LogArgs,
+) -> io::Result<i32> {
     let policy = sandbox.policy()?;
     let working_directory = std::env::current_dir()?;
-    let target = RunTarget::Request { name: "command" };
+    let target = RunTarget::Request { name };
     let mut reporter = reporter(
         &target,
         OutputMode::Stream,
@@ -395,7 +390,6 @@ fn run_command(process: Process) -> io::Result<i32> {
         log.settings(),
         &working_directory,
     );
-    let request = ExecutionRequest::Command(ProcessCall::new(program).arguments(arguments));
 
     let status =
         Runner::new(&working_directory)
@@ -414,17 +408,9 @@ fn daemon(command: DaemonCommand) -> io::Result<i32> {
             run.limit,
             run.keep_runs,
         )?)),
-        DaemonCommand::Stop(root) => {
-            Ok(answer(loom_daemon::command(&root.paths()?, Request::Stop)?))
-        }
-        DaemonCommand::Status(root) => {
-            schedule::status(&loom_daemon::status(&root.paths()?)?)?;
-            Ok(0)
-        }
-        DaemonCommand::Reload(root) => Ok(answer(loom_daemon::command(
-            &root.paths()?,
-            Request::Reload,
-        )?)),
+        DaemonCommand::Stop(root) => send(&root, Request::Stop),
+        DaemonCommand::Status(root) => report_jobs(&root),
+        DaemonCommand::Reload(root) => send(&root, Request::Reload),
     }
 }
 
@@ -434,29 +420,29 @@ fn schedule(command: ScheduleCommand) -> io::Result<i32> {
             &args.root.paths()?,
             &args.manifest,
         )?)),
-        ScheduleCommand::Remove(args) => Ok(answer(loom_daemon::command(
-            &args.root.paths()?,
+        ScheduleCommand::Remove(args) => send(
+            &args.root,
             Request::Remove {
                 manifest: args.manifest,
             },
-        )?)),
-        ScheduleCommand::List(root) => {
-            schedule::status(&loom_daemon::status(&root.paths()?)?)?;
-            Ok(0)
-        }
-        ScheduleCommand::Trigger(args) => Ok(answer(loom_daemon::command(
-            &args.root.paths()?,
-            Request::Trigger { job: args.job },
-        )?)),
-        ScheduleCommand::Pause(args) => Ok(answer(loom_daemon::command(
-            &args.root.paths()?,
-            Request::Pause { job: args.job },
-        )?)),
-        ScheduleCommand::Resume(args) => Ok(answer(loom_daemon::command(
-            &args.root.paths()?,
-            Request::Resume { job: args.job },
-        )?)),
+        ),
+        ScheduleCommand::List(root) => report_jobs(&root),
+        ScheduleCommand::Trigger(args) => send(&args.root, Request::Trigger { job: args.job }),
+        ScheduleCommand::Pause(args) => send(&args.root, Request::Pause { job: args.job }),
+        ScheduleCommand::Resume(args) => send(&args.root, Request::Resume { job: args.job }),
     }
+}
+
+/// Gives one command, whether the daemon runs or not, and prints its answer.
+fn send(root: &RootArgs, request: Request) -> io::Result<i32> {
+    Ok(answer(loom_daemon::command(&root.paths()?, request)?))
+}
+
+/// Prints the daemon and every job it holds.
+fn report_jobs(root: &RootArgs) -> io::Result<i32> {
+    schedule::status(&loom_daemon::status(&root.paths()?)?)?;
+
+    Ok(0)
 }
 
 /// Prints what a command answered, and returns the status for it.

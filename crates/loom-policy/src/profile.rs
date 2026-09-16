@@ -21,36 +21,19 @@ impl HarnessProfile {
     /// The profile of a supported harness.
     #[must_use]
     pub fn for_harness(harness: HeadlessHarness) -> Self {
-        match harness {
-            HeadlessHarness::Claude => Self {
-                required_domain_groups: vec![DomainGroup::Anthropic],
-                default_domain_groups: Vec::new(),
-                state_paths: PathGroup::ClaudeState.sandbox_paths(),
-                // Optional traffic must not retry against a closed network.
-                environment: vec![
-                    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
-                    ("DISABLE_AUTOUPDATER", "1"),
-                    ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
-                ],
-            },
-            HeadlessHarness::Codex => Self {
-                required_domain_groups: vec![DomainGroup::OpenAi],
-                default_domain_groups: Vec::new(),
-                state_paths: PathGroup::CodexState.sandbox_paths(),
-                environment: Vec::new(),
-            },
-            HeadlessHarness::Pi => Self {
-                required_domain_groups: Vec::new(),
-                default_domain_groups: MULTI_PROVIDER_GROUPS.to_vec(),
-                state_paths: PathGroup::PiState.sandbox_paths(),
-                environment: Vec::new(),
-            },
-            HeadlessHarness::Omp => Self {
-                required_domain_groups: Vec::new(),
-                default_domain_groups: MULTI_PROVIDER_GROUPS.to_vec(),
-                state_paths: PathGroup::OmpState.sandbox_paths(),
-                environment: Vec::new(),
-            },
+        let (required_domain_groups, default_domain_groups) = match harness {
+            HeadlessHarness::Claude => (vec![DomainGroup::Anthropic], Vec::new()),
+            HeadlessHarness::Codex => (vec![DomainGroup::OpenAi], Vec::new()),
+            HeadlessHarness::Pi | HeadlessHarness::Omp => {
+                (Vec::new(), MULTI_PROVIDER_GROUPS.to_vec())
+            }
+        };
+
+        Self {
+            required_domain_groups,
+            default_domain_groups,
+            state_paths: state_group(harness).sandbox_paths(),
+            environment: environment(harness),
         }
     }
 
@@ -76,6 +59,28 @@ impl HarnessProfile {
     #[must_use]
     pub fn environment(&self) -> &[(&'static str, &'static str)] {
         &self.environment
+    }
+}
+
+/// Where the harness keeps its own configuration and state.
+fn state_group(harness: HeadlessHarness) -> PathGroup {
+    match harness {
+        HeadlessHarness::Claude => PathGroup::ClaudeState,
+        HeadlessHarness::Codex => PathGroup::CodexState,
+        HeadlessHarness::Pi => PathGroup::PiState,
+        HeadlessHarness::Omp => PathGroup::OmpState,
+    }
+}
+
+fn environment(harness: HeadlessHarness) -> Vec<(&'static str, &'static str)> {
+    match harness {
+        // Optional traffic must not retry against a closed network.
+        HeadlessHarness::Claude => vec![
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+            ("DISABLE_AUTOUPDATER", "1"),
+            ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
+        ],
+        HeadlessHarness::Codex | HeadlessHarness::Pi | HeadlessHarness::Omp => Vec::new(),
     }
 }
 

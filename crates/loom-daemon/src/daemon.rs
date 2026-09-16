@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use crate::control::{self, JobReport, Request, Response};
 use crate::job::{self, Job, WatchedManifest};
+use crate::message;
 use crate::paths::DaemonPaths;
 use crate::report;
 use crate::run::{self, JobRun, RunOutcome};
@@ -198,9 +199,7 @@ impl Daemon {
                         }
                     }
                     Err(error) => {
-                        let response = Response::Error {
-                            message: error.to_string(),
-                        };
+                        let response = Response::error(error.to_string());
                         let _ = control::write_line(&stream, &response);
                     }
                 }
@@ -293,16 +292,12 @@ impl Daemon {
             Request::Trigger { job } => self.trigger(&job, now),
             Request::Reload => {
                 let count = self.reload_all(now);
-                Response::Done {
-                    message: format!("read {count} manifests again"),
-                }
+                Response::done(format!("read {count} manifests again"))
             }
             Request::Stop => {
                 self.stopping = true;
                 report::line("Daemon", &waiting_message(self.running));
-                Response::Done {
-                    message: waiting_message(self.running),
-                }
+                Response::done(waiting_message(self.running))
             }
         }
     }
@@ -314,16 +309,12 @@ impl Daemon {
         };
         let ids = job::ids_of(&watched, &self.states);
         if let Some(taken) = self.taken_id(&ids, &watched.path) {
-            return Response::Error {
-                message: format!("job {taken} already comes from another manifest"),
-            };
+            return Response::error(message::taken_id(&taken));
         }
         let added = !self.registry.watches(&watched.path);
         self.registry.add(watched.clone());
         if let Err(error) = self.registry.save(&self.paths.manifests()) {
-            return Response::Error {
-                message: format!("cannot write the manifest list: {error}"),
-            };
+            return Response::error(message::unwritable_registry(&error));
         }
         self.reload(&watched, now);
         report::line(
@@ -331,26 +322,20 @@ impl Daemon {
             &format!("{} as {}", watched.path.display(), ids.join(", ")),
         );
 
-        Response::Done {
-            message: format!(
-                "{} {} as {}",
-                if added { "watching" } else { "read again" },
-                watched.path.display(),
-                ids.join(", ")
-            ),
-        }
+        Response::done(format!(
+            "{} {} as {}",
+            if added { "watching" } else { "read again" },
+            watched.path.display(),
+            ids.join(", ")
+        ))
     }
 
     fn remove(&mut self, manifest: &PathBuf) -> Response {
         if !self.registry.remove(manifest) {
-            return Response::Error {
-                message: format!("{} is not watched", manifest.display()),
-            };
+            return Response::error(message::not_watched(manifest));
         }
         if let Err(error) = self.registry.save(&self.paths.manifests()) {
-            return Response::Error {
-                message: format!("cannot write the manifest list: {error}"),
-            };
+            return Response::error(message::unwritable_registry(&error));
         }
         // A run of this manifest keeps going, and reports itself as it ends.
         self.jobs.retain(|job| &job.manifest != manifest);
@@ -359,9 +344,7 @@ impl Daemon {
         self.prune_states();
         report::line("Watching", &format!("dropped {}", manifest.display()));
 
-        Response::Done {
-            message: format!("stopped watching {}", manifest.display()),
-        }
+        Response::done(message::stopped_watching(manifest))
     }
 
     fn hold(&mut self, id: &str, paused: bool, now: SystemTime) -> Response {
@@ -373,12 +356,10 @@ impl Daemon {
         }
         self.save_state(index);
         self.plan_job(index, now, false);
-        let verb = if paused { "paused" } else { "resumed" };
-        report::line("Job", &format!("{verb} {id}"));
+        let held = message::held(id, paused);
+        report::line("Job", &held);
 
-        Response::Done {
-            message: format!("{verb} {id}"),
-        }
+        Response::done(held)
     }
 
     fn trigger(&mut self, id: &str, now: SystemTime) -> Response {
@@ -389,26 +370,18 @@ impl Daemon {
             return unknown_job(id);
         };
         if let Some(error) = &job.error {
-            return Response::Error {
-                message: format!("{id} cannot run: {error}"),
-            };
+            return Response::error(format!("{id} cannot run: {error}"));
         }
         if job.running {
-            return Response::Error {
-                message: format!("{id} is already running"),
-            };
+            return Response::error(format!("{id} is already running"));
         }
         if self.running >= self.limit {
-            return Response::Error {
-                message: format!("the daemon already runs {} workflows", self.limit),
-            };
+            return Response::error(format!("the daemon already runs {} workflows", self.limit));
         }
         // A triggered run stands beside the schedule, so it moves no fire.
         self.start(index, now);
 
-        Response::Done {
-            message: format!("running {id} now"),
-        }
+        Response::done(format!("running {id} now"))
     }
 
     /// Reads a manifest again when the file changed.
@@ -711,14 +684,16 @@ impl Daemon {
             return;
         };
         self.states.set(&job.id, job.state.clone());
-        if let Err(error) = self.states.save(&self.paths.state()) {
-            report::line("Warning", &format!("cannot write the state: {error}"));
-        }
+        self.write_states();
     }
 
     fn prune_states(&mut self) {
         let ids: Vec<String> = self.jobs.iter().map(|job| job.id.clone()).collect();
         self.states.keep_only(&ids);
+        self.write_states();
+    }
+
+    fn write_states(&self) {
         if let Err(error) = self.states.save(&self.paths.state()) {
             report::line("Warning", &format!("cannot write the state: {error}"));
         }
@@ -798,7 +773,5 @@ fn waiting_message(running: usize) -> String {
 }
 
 fn unknown_job(id: &str) -> Response {
-    Response::Error {
-        message: format!("no job named {id}"),
-    }
+    Response::error(message::unknown_job(id))
 }

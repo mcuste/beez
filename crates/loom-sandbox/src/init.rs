@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::proxy::loopback;
+use crate::server::Server;
 use crate::stream::pipe;
 
 const RELAY_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -129,22 +130,26 @@ fn restrict_execution(executables: &[PathBuf]) -> io::Result<()> {
     Ok(())
 }
 
-/// Accepts loopback TCP connections and forwards each to a Unix socket. Never returns.
+/// Accepts loopback TCP connections and forwards each to a Unix socket.
+///
+/// Returns only when the relay stops accepting, which ends the sandbox helper.
 pub fn relay(listen: SocketAddr, socket: &Path) -> io::Result<()> {
-    serve_relay(&TcpListener::bind(listen)?, socket)
+    serve_relay(TcpListener::bind(listen)?, socket).wait();
+
+    Err(io::Error::other(
+        "sandbox relay stopped accepting connections",
+    ))
 }
 
 /// Forwards every connection `listener` accepts to `socket`.
-fn serve_relay(listener: &TcpListener, socket: &Path) -> io::Result<()> {
-    loop {
-        let (client, _) = listener.accept()?;
-        let socket = socket.to_path_buf();
-        thread::spawn(move || {
-            if let Ok(upstream) = UnixStream::connect(socket) {
-                let _ = pipe(client, upstream);
-            }
-        });
-    }
+fn serve_relay(listener: TcpListener, socket: &Path) -> Server {
+    let socket = socket.to_path_buf();
+
+    Server::spawn(listener, move |client| {
+        if let Ok(upstream) = UnixStream::connect(&socket) {
+            let _ = pipe(client, upstream);
+        }
+    })
 }
 
 #[cfg(test)]
@@ -160,7 +165,7 @@ mod tests {
 
     use loom_test_support::TemporaryDirectory;
 
-    use super::{parse_relay, relay_argument, serve_relay, wait_for_listener};
+    use super::{Server, parse_relay, relay_argument, serve_relay, wait_for_listener};
 
     #[test]
     fn reads_back_every_relay_argument_it_writes() {
@@ -196,7 +201,7 @@ mod tests {
             stream.write_all(b"answer").unwrap();
             request
         });
-        let port = start_relay(&socket);
+        let (_relay, port) = start_relay(&socket);
 
         let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         client.write_all(b"request").unwrap();
@@ -219,12 +224,12 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
-    /// Serves `socket` on an ephemeral loopback port and returns the port.
-    fn start_relay(socket: &Path) -> u16 {
+    /// Serves `socket` on an ephemeral loopback port, which it returns with
+    /// the server that must stay alive while the test runs.
+    fn start_relay(socket: &Path) -> (Server, u16) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let socket = socket.to_path_buf();
-        thread::spawn(move || serve_relay(&listener, &socket));
-        port
+
+        (serve_relay(listener, socket), port)
     }
 }

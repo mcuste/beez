@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use loom_runner::RunEvent;
+
 /// Width of the status word column, as wide as the longest word.
 pub const VERB_WIDTH: usize = 8;
 
@@ -9,6 +11,12 @@ pub const VERB_WIDTH: usize = 8;
 pub const STDOUT_MARK: &str = "\u{2502}";
 /// Dashed marks a task's standard error.
 pub const STDERR_MARK: &str = "\u{250a}";
+
+/// One of Loom's own lines: the status word in its own column, then the message.
+#[must_use]
+pub fn status_line(verb: &str, message: &str) -> String {
+    format!("{verb:<VERB_WIDTH$}  {message}")
+}
 
 /// Removes one trailing line ending, so a line can go in a column.
 #[must_use]
@@ -30,6 +38,41 @@ pub fn status_text(exit_status: Option<i32>) -> String {
         Some(0) => "ok".to_owned(),
         Some(code) => format!("exit {code}"),
         None => "signalled".to_owned(),
+    }
+}
+
+/// How one event reads as a status line: the status word, then the message.
+///
+/// An output line carries no status of its own, so it has none.
+#[must_use]
+pub fn event_status(event: &RunEvent, label: &str) -> Option<(&'static str, String)> {
+    match event {
+        RunEvent::Output { .. } => None,
+        RunEvent::Started { .. } => Some(("Running", label.to_owned())),
+        RunEvent::Blocked { .. } => Some(("Blocked", label.to_owned())),
+        RunEvent::Finished {
+            output, elapsed, ..
+        } => {
+            let verb = if output.succeeded() {
+                "Finished"
+            } else {
+                "Failed"
+            };
+            let message = format!(
+                "{label} in {} ({})",
+                seconds(*elapsed),
+                status_text(output.status_code())
+            );
+            Some((verb, message))
+        }
+        RunEvent::Failed {
+            error_kind,
+            elapsed,
+            ..
+        } => Some((
+            "Failed",
+            format!("{label} in {} ({error_kind})", seconds(*elapsed)),
+        )),
     }
 }
 

@@ -16,7 +16,6 @@ anstream.workspace = true
 anstyle.workspace = true
 clap.workspace = true
 indicatif.workspace = true
-loom-core = { path = "../loom-core" }
 loom-policy = { path = "../loom-policy" }
 loom-daemon = { path = "../loom-daemon" }
 loom-manifest = { path = "../loom-manifest" }

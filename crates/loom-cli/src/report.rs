@@ -9,11 +9,10 @@ use anstream::AutoStream;
 use anstyle::{AnsiColor, Color, Effects, Style};
 use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use loom_core::TaskIndex;
 use loom_process::{OutputStream, ProcessOutput};
 use loom_record::{
     LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, STDERR_MARK, STDOUT_MARK, VERB_WIDTH,
-    seconds, status_text, trim_newline, utc,
+    event_status, seconds, trim_newline, utc,
 };
 use loom_runner::RunEvent;
 
@@ -155,12 +154,7 @@ impl Reporter {
         let bars = (layout == Layout::Stream)
             .then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr()));
         let choice = color_choice(color);
-        let (log, failure) = match RunRecorder::create(settings, target, working_directory) {
-            Some(Ok(log)) => (Some(log), None),
-            Some(Err(error)) => (None, Some(error)),
-            None => (None, None),
-        };
-        let log = OpenLog::new(log);
+        let (log, failure) = OpenLog::open(settings, target, working_directory);
         let directory = log.directory().map(Path::to_path_buf);
         let terminal = Arc::new(Terminal {
             bars: bars.clone(),
@@ -199,28 +193,41 @@ impl Reporter {
         let terminal = Arc::clone(&self.terminal);
         Box::new(move |message| {
             terminal.record("Sandbox", message);
-            let _ = terminal.line(Target::Err, &status_line(YELLOW, "Sandbox", message));
+            let _ = terminal.line(Target::Err, &styled_status(YELLOW, "Sandbox", message));
         })
     }
 
     pub(crate) fn event(&mut self, event: &RunEvent) -> io::Result<()> {
         self.terminal.log(|log| log.event(event));
         self.tally.add(event);
+        let index = event.position();
+
         match event {
-            RunEvent::Started { task } => self.started(*task),
-            RunEvent::Output { task, stream, line } => self.output(*task, *stream, line),
-            RunEvent::Finished {
-                task,
-                output,
-                elapsed,
-            } => self.finished(*task, output, *elapsed),
-            RunEvent::Failed {
-                task,
-                error_kind,
-                elapsed,
-            } => self.failed(*task, *error_kind, *elapsed),
-            RunEvent::Blocked { task } => self.blocked(*task),
+            RunEvent::Output { stream, line, .. } => return self.output(index, *stream, line),
+            // A plain run relays the captured streams of its one task instead.
+            RunEvent::Finished { output, .. } if self.layout == Layout::Plain => {
+                return self.terminal.captured(output);
+            }
+            // A stream layout shows a running task as a spinner row, not a line.
+            RunEvent::Started { .. } if self.layout == Layout::Stream => {
+                self.start_spinner(index);
+                return Ok(());
+            }
+            RunEvent::Started { .. } => {}
+            // Every other event ends the task, so its spinner goes.
+            _ => self.stop_spinner(index),
         }
+        // The status line closes the task, so its collected output comes first.
+        if self.layout == Layout::Grouped && matches!(event, RunEvent::Finished { .. }) {
+            let buffer = self.buffers.get(index).cloned().unwrap_or_default();
+            self.terminal.bytes(Target::Out, &buffer)?;
+        }
+
+        let Some((verb, message)) = event_status(event, &self.id(index)) else {
+            return Ok(());
+        };
+        // The event wrote this line to the run log already.
+        self.show(style_of(verb), verb, &message)
     }
 
     /// Prints the closing summary of a decorated run, then writes its record.
@@ -239,38 +246,20 @@ impl Reporter {
         result
     }
 
-    fn started(&mut self, task: Option<TaskIndex>) -> io::Result<()> {
-        let index = position(task);
-        let id = self.id(index);
-
-        match self.layout {
-            Layout::Plain => Ok(()),
-            Layout::Grouped => self
-                .terminal
-                .line(Target::Err, &status_line(CYAN, "Running", &id)),
-            Layout::Stream => {
-                let prefix = self.prefix(index);
-                if let (Some(bars), Some(slot)) = (&self.bars, self.spinners.get_mut(index)) {
-                    let bar = bars.add(ProgressBar::new_spinner().with_style(self.spinner.clone()));
-                    bar.set_prefix(prefix);
-                    bar.set_message("running");
-                    // Without a steady tick the spinner moves only when a line arrives.
-                    bar.enable_steady_tick(Duration::from_millis(80));
-                    *slot = Some(bar);
-                }
-                Ok(())
-            }
+    /// Shows one running task as a spinner row of its own.
+    fn start_spinner(&mut self, index: usize) {
+        let prefix = self.prefix(index);
+        if let (Some(bars), Some(slot)) = (&self.bars, self.spinners.get_mut(index)) {
+            let bar = bars.add(ProgressBar::new_spinner().with_style(self.spinner.clone()));
+            bar.set_prefix(prefix);
+            bar.set_message("running");
+            // Without a steady tick the spinner moves only when a line arrives.
+            bar.enable_steady_tick(Duration::from_millis(80));
+            *slot = Some(bar);
         }
     }
 
-    fn output(
-        &mut self,
-        task: Option<TaskIndex>,
-        stream: OutputStream,
-        line: &[u8],
-    ) -> io::Result<()> {
-        let index = position(task);
-
+    fn output(&mut self, index: usize, stream: OutputStream, line: &[u8]) -> io::Result<()> {
         match self.layout {
             // Plain relays the captured streams once the task ends.
             Layout::Plain => Ok(()),
@@ -294,61 +283,6 @@ impl Reporter {
         }
     }
 
-    fn finished(
-        &mut self,
-        task: Option<TaskIndex>,
-        output: &ProcessOutput,
-        elapsed: Duration,
-    ) -> io::Result<()> {
-        let index = position(task);
-        let (style, verb) = if output.succeeded() {
-            (GREEN, "Finished")
-        } else {
-            (RED, "Failed")
-        };
-        let message = format!(
-            "{} in {} ({})",
-            self.id(index),
-            seconds(elapsed),
-            status_text(output.status_code())
-        );
-
-        if self.layout == Layout::Plain {
-            return self.terminal.captured(output);
-        }
-
-        self.stop_spinner(index);
-        // The status line closes the task, so its output comes first.
-        if self.layout == Layout::Grouped {
-            let buffer = self.buffers.get(index).cloned().unwrap_or_default();
-            self.terminal.bytes(Target::Out, &buffer)?;
-        }
-        self.line(style, verb, &message)
-    }
-
-    fn failed(
-        &mut self,
-        task: Option<TaskIndex>,
-        error_kind: io::ErrorKind,
-        elapsed: Duration,
-    ) -> io::Result<()> {
-        let index = position(task);
-        let message = format!("{} in {} ({error_kind})", self.id(index), seconds(elapsed));
-        if self.layout == Layout::Plain {
-            return Ok(());
-        }
-        self.stop_spinner(index);
-        self.line(RED, "Failed", &message)
-    }
-
-    fn blocked(&mut self, task: TaskIndex) -> io::Result<()> {
-        let id = self.id(task.position());
-        if self.layout == Layout::Plain {
-            return Ok(());
-        }
-        self.line(YELLOW, "Blocked", &id)
-    }
-
     /// Renders one line for its task's block, with its own newline. A blank
     /// line stays blank, to keep trailing spaces out of a log.
     fn grouped_line(&self, line: &[u8]) -> String {
@@ -360,16 +294,23 @@ impl Reporter {
     }
 
     /// Writes one of Loom's own status lines, to the terminal and the log.
+    fn line(&self, style: Style, verb: &str, message: &str) -> io::Result<()> {
+        self.terminal.record(verb, message);
+
+        self.show(style, verb, message)
+    }
+
+    /// Shows one status line on the terminal, for a line the log already holds.
     ///
     /// A plain run keeps its terminal free of Loom's lines, so there the line
     /// reaches the log alone.
-    fn line(&self, style: Style, verb: &str, message: &str) -> io::Result<()> {
-        self.terminal.record(verb, message);
+    fn show(&self, style: Style, verb: &str, message: &str) -> io::Result<()> {
         if self.layout == Layout::Plain {
             return Ok(());
         }
+
         self.terminal
-            .line(Target::Err, &status_line(style, verb, message))
+            .line(Target::Err, &styled_status(style, verb, message))
     }
 
     fn stop_spinner(&mut self, index: usize) {
@@ -417,12 +358,7 @@ impl Terminal {
         };
         let text = match timestamps {
             Timestamps::DateTime => utc(SystemTime::now()),
-            Timestamps::Elapsed => {
-                format!(
-                    "{:>8}",
-                    format!("{:.1}s", self.started.elapsed().as_secs_f64())
-                )
-            }
+            Timestamps::Elapsed => format!("{:>8}", seconds(self.started.elapsed())),
         };
         paint(DIM, &text) + " "
     }
@@ -462,7 +398,7 @@ impl Terminal {
         if let Some(error) = failure {
             let _ = self.line(
                 Target::Err,
-                &status_line(YELLOW, "Warning", &format!("run log: {error}")),
+                &styled_status(YELLOW, "Warning", &format!("run log: {error}")),
             );
         }
     }
@@ -500,13 +436,13 @@ fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<io::E
     if let Some(directory) = directory {
         let _ = terminal.line(
             Target::Err,
-            &status_line(CYAN, "Logging", &display(directory)),
+            &styled_status(CYAN, "Logging", &display(directory)),
         );
     }
     if let Some(error) = failure {
         let _ = terminal.line(
             Target::Err,
-            &status_line(YELLOW, "Warning", &format!("run log: {error}")),
+            &styled_status(YELLOW, "Warning", &format!("run log: {error}")),
         );
     }
 }
@@ -526,18 +462,23 @@ fn display(directory: &Path) -> String {
     relative.display().to_string()
 }
 
-/// The task an event belongs to. A direct request has one task of its own.
-fn position(task: Option<TaskIndex>) -> usize {
-    task.map_or(0, TaskIndex::position)
-}
-
 fn is_blank(line: &[u8]) -> bool {
     line.iter()
         .all(|byte| matches!(byte, b'\n' | b'\r' | b' ' | b'\t'))
 }
 
+/// The colour of one status word an event carries.
+fn style_of(verb: &str) -> Style {
+    match verb {
+        "Finished" => GREEN,
+        "Failed" => RED,
+        "Blocked" => YELLOW,
+        _ => CYAN,
+    }
+}
+
 /// Formats one of Loom's own lines, with the status word in its own column.
-fn status_line(style: Style, verb: &str, message: &str) -> String {
+fn styled_status(style: Style, verb: &str, message: &str) -> String {
     // A task can leave its own styling on, so start from a known state.
     let verb = paint(style, &format!("{verb:<VERB_WIDTH$}"));
     format!("{}{verb}  {message}", anstyle::Reset)

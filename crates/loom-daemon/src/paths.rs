@@ -92,12 +92,8 @@ impl DaemonPaths {
     /// Creates the daemon directory, and keeps the Loom root out of Git.
     pub fn create(&self) -> io::Result<()> {
         std::fs::create_dir_all(self.directory())?;
-        let ignore = self.root.join(".gitignore");
-        if !ignore.exists() {
-            std::fs::write(ignore, "*\n")?;
-        }
 
-        Ok(())
+        loom_record::ignore_everything(&self.root)
     }
 }
 

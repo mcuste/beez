@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use loom_policy::{HeadlessHarness, SandboxPolicy};
 
@@ -87,11 +87,6 @@ impl SandboxedCommand {
     /// The wrapped command, for adjusting stdio before running it.
     pub fn command_mut(&mut self) -> &mut Command {
         &mut self.command
-    }
-
-    /// Runs the program and captures its output.
-    pub fn output(mut self) -> io::Result<Output> {
-        self.command.output()
     }
 }
 

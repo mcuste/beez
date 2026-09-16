@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::named::{self, Named};
+
 /// A headless coding harness Loom can prompt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeadlessHarness {
@@ -30,14 +32,21 @@ impl HeadlessHarness {
     }
 }
 
+impl Named for HeadlessHarness {
+    fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    fn named(self) -> &'static str {
+        self.name()
+    }
+}
+
 impl FromStr for HeadlessHarness {
     type Err = HeadlessHarnessError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|harness| harness.name() == value)
-            .ok_or_else(|| HeadlessHarnessError::Unknown(value.to_owned()))
+        named::from_name(value).ok_or_else(|| HeadlessHarnessError::Unknown(value.to_owned()))
     }
 }
 
@@ -61,11 +70,7 @@ impl fmt::Display for HeadlessHarnessError {
                 write!(
                     formatter,
                     "unsupported headless harness {value:?}; expected one of {}",
-                    HeadlessHarness::ALL
-                        .iter()
-                        .map(|harness| harness.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    named::names::<HeadlessHarness>()
                 )
             }
         }

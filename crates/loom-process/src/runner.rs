@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
@@ -81,24 +81,9 @@ impl ProcessRunner {
         Ok(Self::new(std::env::current_dir()?))
     }
 
-    /// The directory every request runs in.
-    #[must_use]
-    pub fn working_directory(&self) -> &Path {
-        &self.working_directory
-    }
-
     /// Starts a request and captures its output.
     pub fn run(&self, request: ExecutionRequest) -> io::Result<ProcessOutput> {
         self.run_streaming(request, None, &|_, _| {})
-    }
-
-    /// Starts a request inside an operating-system sandbox and captures its output.
-    pub fn run_sandboxed(
-        &self,
-        request: ExecutionRequest,
-        policy: &SandboxPolicy,
-    ) -> io::Result<ProcessOutput> {
-        self.run_streaming(request, Some(policy), &|_, _| {})
     }
 
     /// Runs a request and hands every output line to `sink` while it runs.
@@ -110,9 +95,10 @@ impl ProcessRunner {
         sandbox: Option<&SandboxPolicy>,
         sink: &OutputSink<'_>,
     ) -> io::Result<ProcessOutput> {
+        let harness = request.harness();
+        let (program, arguments) = request.into_parts();
+
         if let Some(policy) = sandbox {
-            let harness = request.harness();
-            let (program, arguments) = request.into_parts();
             // The sandbox must outlive the child, because it owns the proxy.
             let mut sandboxed = SandboxedCommand::new(
                 policy,
@@ -123,7 +109,6 @@ impl ProcessRunner {
             )?;
             relay(sandboxed.command_mut(), sink)
         } else {
-            let (program, arguments) = request.into_parts();
             let mut command = Command::new(program);
             command.args(arguments).current_dir(&self.working_directory);
             relay(&mut command, sink)

@@ -13,13 +13,16 @@ use std::time::{Duration, SystemTime};
 use anstream::adapter::strip_bytes;
 use loom_core::{TaskRequest, Workflow};
 use loom_process::OutputStream;
+use loom_runner::RunEvent;
 use serde::Serialize;
 
-use crate::format::{STDERR_MARK, STDOUT_MARK, VERB_WIDTH, trim_newline};
+use crate::format::{STDERR_MARK, STDOUT_MARK, status_line, trim_newline};
 use crate::time::{compact_utc, utc};
 
 const DIRECTORY: &str = ".loom";
-const RUNS: &str = "runs";
+
+/// Directory that holds every run, inside the Loom root.
+pub const RUNS: &str = "runs";
 const TASKS: &str = "tasks";
 const LATEST: &str = "latest";
 const RUN_LOG: &str = "run.log";
@@ -77,7 +80,7 @@ pub struct LogSettings<'run> {
 
 impl LogSettings<'_> {
     /// Returns nothing when artifacts are off.
-    pub fn create(
+    pub(crate) fn create(
         &self,
         target: &RunTarget<'_>,
         working_directory: &Path,
@@ -89,7 +92,7 @@ impl LogSettings<'_> {
 
 /// What happened to one task.
 #[derive(Clone, Copy, Debug)]
-pub enum TaskOutcome {
+pub(crate) enum TaskOutcome {
     /// The task has started.
     Started,
     /// The task ran to the end. `None` means a signal ended it.
@@ -110,8 +113,33 @@ pub enum TaskOutcome {
     Blocked,
 }
 
+impl TaskOutcome {
+    /// What one event records about its task, or nothing for an output line.
+    pub(crate) fn of(event: &RunEvent) -> Option<Self> {
+        match event {
+            RunEvent::Output { .. } => None,
+            RunEvent::Started { .. } => Some(Self::Started),
+            RunEvent::Blocked { .. } => Some(Self::Blocked),
+            RunEvent::Finished {
+                output, elapsed, ..
+            } => Some(Self::Finished {
+                exit_status: output.status_code(),
+                elapsed: *elapsed,
+            }),
+            RunEvent::Failed {
+                error_kind,
+                elapsed,
+                ..
+            } => Some(Self::Failed {
+                error: *error_kind,
+                elapsed: *elapsed,
+            }),
+        }
+    }
+}
+
 /// The artifacts of one run.
-pub struct RunLog {
+pub(crate) struct RunLog {
     directory: PathBuf,
     run: File,
     width: usize,
@@ -192,15 +220,14 @@ impl RunLog {
     ///
     /// `root` replaces the directory Loom would resolve itself, and
     /// `working_directory` is the directory the run's tasks run in.
-    pub fn create(
+    pub(crate) fn create(
         root: Option<&Path>,
         target: &RunTarget<'_>,
         working_directory: &Path,
     ) -> io::Result<Self> {
         let resolved = root.map_or_else(|| resolve_root(working_directory), Path::to_path_buf);
         let started = SystemTime::now();
-        // A PID cannot repeat inside one millisecond, so this names one run only.
-        let id = format!("{}-{}", compact_utc(started), process::id());
+        let id = run_id(started);
         let directory = resolved.join(RUNS).join(&id);
 
         fs::create_dir_all(directory.join(TASKS))?;
@@ -240,22 +267,27 @@ impl RunLog {
 
     /// The directory that holds this run's artifacts.
     #[must_use]
-    pub fn directory(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
 
     /// Records one of Loom's own status lines.
-    pub fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
+    pub(crate) fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
         let stamp = utc(SystemTime::now());
 
-        writeln!(self.run, "{stamp} {verb:<VERB_WIDTH$}  {message}")
+        writeln!(self.run, "{stamp} {}", status_line(verb, message))
     }
 
     /// Records one output line of a task.
     ///
     /// The stream file keeps the bytes as the task wrote them. The run log
     /// keeps the line without its colours, behind the task and the stream.
-    pub fn output(&mut self, index: usize, stream: OutputStream, line: &[u8]) -> io::Result<()> {
+    pub(crate) fn output(
+        &mut self,
+        index: usize,
+        stream: OutputStream,
+        line: &[u8],
+    ) -> io::Result<()> {
         let width = self.width;
         let stamp = utc(SystemTime::now());
         let Some(task) = self.tasks.get_mut(index) else {
@@ -273,7 +305,7 @@ impl RunLog {
     }
 
     /// Records what happened to one task.
-    pub fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
+    pub(crate) fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
         let Some(task) = self.tasks.get_mut(index) else {
             return;
         };
@@ -301,7 +333,7 @@ impl RunLog {
     }
 
     /// Writes the record of the run, with Loom's own exit status.
-    pub fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
+    pub(crate) fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
         let finished = SystemTime::now();
         self.record.finished = utc(finished);
         self.record.duration_seconds = finished
@@ -333,8 +365,32 @@ fn resolve_root(working_directory: &Path) -> PathBuf {
     working_directory.join(DIRECTORY)
 }
 
+/// The name of one run.
+///
+/// A PID cannot repeat inside one millisecond, so this names one run only, and
+/// the stamp sorts the runs in the order they happened.
+fn run_id(started: SystemTime) -> String {
+    format!("{}-{}", compact_utc(started), process::id())
+}
+
+/// True for a name Loom gives a run, such as `20260910T030000004Z-4123`.
+///
+/// Anything else in the runs directory, such as the `latest` link, is not a run.
+#[must_use]
+pub fn is_run_name(name: &str) -> bool {
+    let Some((stamp, pid)) = name.split_once('-') else {
+        return false;
+    };
+
+    stamp.len() == 19
+        && stamp.ends_with('Z')
+        && stamp.get(8..9) == Some("T")
+        && !pid.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// Keeps the artifacts out of Git without a change to the repository.
-fn ignore_everything(root: &Path) -> io::Result<()> {
+pub fn ignore_everything(root: &Path) -> io::Result<()> {
     let path = root.join(".gitignore");
     if path.exists() {
         return Ok(());
@@ -448,11 +504,28 @@ fn absolute(path: &Path, working_directory: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_root;
+    use super::{is_run_name, resolve_root, run_id};
     use std::fs;
     use std::path::Path;
+    use std::time::SystemTime;
 
     use loom_test_support::TemporaryDirectory;
+
+    #[test]
+    fn reads_back_the_name_it_gives_a_run() {
+        let id = run_id(SystemTime::now());
+
+        assert!(is_run_name(&id), "{id}");
+    }
+
+    #[test]
+    fn tells_a_run_from_anything_else_in_the_directory() {
+        assert!(!is_run_name("latest"));
+        assert!(!is_run_name("20260910T030000004Z"));
+        assert!(!is_run_name("20260910T030000004Z-"));
+        assert!(!is_run_name("20260910T030000004Z-abc"));
+        assert!(!is_run_name("2026-09-10"));
+    }
 
     #[test]
     fn resolves_an_existing_directory_above_the_working_directory() {

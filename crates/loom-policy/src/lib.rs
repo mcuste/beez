@@ -5,6 +5,7 @@ mod executable;
 mod filesystem;
 mod group;
 mod harness;
+mod named;
 mod network;
 mod parse;
 mod path;

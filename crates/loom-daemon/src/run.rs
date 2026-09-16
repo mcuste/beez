@@ -57,16 +57,10 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
         enabled: true,
         directory: Some(&job.log_directory),
     };
-    let mut log = OpenLog::new(
-        match RunRecorder::create(settings, &target, &job.working_directory) {
-            Some(Ok(recorder)) => Some(recorder),
-            Some(Err(error)) => {
-                report::line("Warning", &format!("{}: run log: {error}", job.id));
-                None
-            }
-            None => None,
-        },
-    );
+    let (mut log, failure) = OpenLog::open(settings, &target, &job.working_directory);
+    if let Some(error) = failure {
+        report::line("Warning", &format!("{}: run log: {error}", job.id));
+    }
     let directory = log
         .directory()
         .and_then(Path::file_name)

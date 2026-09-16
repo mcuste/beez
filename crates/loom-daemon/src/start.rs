@@ -20,7 +20,7 @@ const ATTEMPTS: usize = 50;
 /// names must match its options.
 pub fn start(paths: &DaemonPaths, limit: usize, keep_runs: usize) -> io::Result<Response> {
     if control::is_running(paths.socket()) {
-        return Ok(error(&format!(
+        return Ok(Response::error(format!(
             "a daemon already runs for {}",
             paths.root().display()
         )));
@@ -45,26 +45,18 @@ pub fn start(paths: &DaemonPaths, limit: usize, keep_runs: usize) -> io::Result<
 
     for _ in 0..ATTEMPTS {
         if control::is_running(paths.socket()) {
-            return Ok(Response::Done {
-                message: format!(
-                    "daemon started, pid {}, writing to {}",
-                    child.id(),
-                    paths.log().display()
-                ),
-            });
+            return Ok(Response::done(format!(
+                "daemon started, pid {}, writing to {}",
+                child.id(),
+                paths.log().display()
+            )));
         }
         std::thread::sleep(WAIT);
     }
 
-    Ok(error(&format!(
+    Ok(Response::error(format!(
         "the daemon did not answer on {}, see {}",
         paths.socket().display(),
         paths.log().display()
     )))
-}
-
-fn error(message: &str) -> Response {
-    Response::Error {
-        message: message.to_owned(),
-    }
 }

@@ -10,6 +10,7 @@ mod client;
 mod control;
 mod daemon;
 mod job;
+mod message;
 mod paths;
 mod prune;
 mod report;

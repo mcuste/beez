@@ -8,8 +8,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// Directory that holds the runs, inside the Loom root.
-const RUNS: &str = "runs";
+use loom_record::{RUNS, is_run_name};
 
 /// Removes every run but the newest `keep`, and reports how many went.
 ///
@@ -49,22 +48,9 @@ pub(crate) fn prune(root: &Path, keep: usize) -> io::Result<usize> {
     Ok(removed)
 }
 
-/// True for a name Loom gives a run, such as `20260910T030000004Z-4123`.
-fn is_run_name(name: &str) -> bool {
-    let Some((stamp, pid)) = name.split_once('-') else {
-        return false;
-    };
-
-    stamp.len() == 19
-        && stamp.ends_with('Z')
-        && stamp.get(8..9) == Some("T")
-        && !pid.is_empty()
-        && pid.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{is_run_name, prune};
+    use super::prune;
     use loom_test_support::TemporaryDirectory;
     use std::fs;
 
@@ -131,15 +117,5 @@ mod tests {
 
         assert_eq!(prune(root.path(), 1).unwrap(), 1);
         assert_eq!(remaining(&root), ["20260909T030000000Z-2", "notes"]);
-    }
-
-    #[test]
-    fn reads_the_name_loom_gives_a_run() {
-        assert!(is_run_name("20260910T030000004Z-4123"));
-        assert!(!is_run_name("latest"));
-        assert!(!is_run_name("20260910T030000004Z"));
-        assert!(!is_run_name("20260910T030000004Z-"));
-        assert!(!is_run_name("20260910T030000004Z-abc"));
-        assert!(!is_run_name("2026-09-10"));
     }
 }

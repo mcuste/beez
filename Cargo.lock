@@ -368,7 +368,6 @@ dependencies = [
  "anstyle",
  "clap",
  "indicatif",
- "loom-core",
  "loom-daemon",
  "loom-manifest",
  "loom-policy",

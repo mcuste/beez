@@ -6,10 +6,9 @@
 use std::io;
 use std::path::Path;
 
-use loom_core::TaskIndex;
 use loom_runner::RunEvent;
 
-use crate::format::{seconds, status_text};
+use crate::format::event_status;
 use crate::log::{LogSettings, RunLog, RunTarget, TaskOutcome};
 
 /// Turns the events of one run into its artifacts.
@@ -21,7 +20,7 @@ pub struct RunRecorder {
 
 impl RunRecorder {
     /// Opens the artifacts of one run. Returns nothing when they are off.
-    pub fn create(
+    pub(crate) fn create(
         settings: LogSettings<'_>,
         target: &RunTarget<'_>,
         working_directory: &Path,
@@ -42,68 +41,17 @@ impl RunRecorder {
 
     /// Records one lifecycle or output event.
     pub fn event(&mut self, event: &RunEvent) -> io::Result<()> {
-        match event {
-            RunEvent::Started { task } => {
-                let index = position(*task);
-                self.log.outcome(index, TaskOutcome::Started);
-                let label = self.label(index);
-                self.log.status("Running", &label)
-            }
-            RunEvent::Output { task, stream, line } => {
-                self.log.output(position(*task), *stream, line)
-            }
-            RunEvent::Finished {
-                task,
-                output,
-                elapsed,
-            } => {
-                let index = position(*task);
-                self.log.outcome(
-                    index,
-                    TaskOutcome::Finished {
-                        exit_status: output.status_code(),
-                        elapsed: *elapsed,
-                    },
-                );
-                let verb = if output.succeeded() {
-                    "Finished"
-                } else {
-                    "Failed"
-                };
-                let message = format!(
-                    "{} in {} ({})",
-                    self.label(index),
-                    seconds(*elapsed),
-                    status_text(output.status_code())
-                );
-                self.log.status(verb, &message)
-            }
-            RunEvent::Failed {
-                task,
-                error_kind,
-                elapsed,
-            } => {
-                let index = position(*task);
-                self.log.outcome(
-                    index,
-                    TaskOutcome::Failed {
-                        error: *error_kind,
-                        elapsed: *elapsed,
-                    },
-                );
-                let message = format!(
-                    "{} in {} ({error_kind})",
-                    self.label(index),
-                    seconds(*elapsed)
-                );
-                self.log.status("Failed", &message)
-            }
-            RunEvent::Blocked { task } => {
-                let index = task.position();
-                self.log.outcome(index, TaskOutcome::Blocked);
-                let label = self.label(index);
-                self.log.status("Blocked", &label)
-            }
+        let index = event.position();
+        if let RunEvent::Output { stream, line, .. } = event {
+            return self.log.output(index, *stream, line);
+        }
+        if let Some(outcome) = TaskOutcome::of(event) {
+            self.log.outcome(index, outcome);
+        }
+
+        match event_status(event, &self.label(index)) {
+            Some((verb, message)) => self.log.status(verb, &message),
+            None => Ok(()),
         }
     }
 
@@ -125,11 +73,6 @@ impl RunRecorder {
     }
 }
 
-/// The task an event belongs to. A direct request has one task of its own.
-fn position(task: Option<TaskIndex>) -> usize {
-    task.map_or(0, TaskIndex::position)
-}
-
 /// The run log of one run, which may be absent or closed.
 ///
 /// A write failure closes the log and the run goes on, because the result of
@@ -138,10 +81,20 @@ fn position(task: Option<TaskIndex>) -> usize {
 pub struct OpenLog(Option<RunRecorder>);
 
 impl OpenLog {
-    /// Holds a recorder, or nothing when the run writes no artifacts.
-    #[must_use]
-    pub fn new(recorder: Option<RunRecorder>) -> Self {
-        Self(recorder)
+    /// Opens the artifacts of one run, with the error when they cannot open.
+    ///
+    /// The run goes on either way, so the caller reports the error and keeps
+    /// going.
+    pub fn open(
+        settings: LogSettings<'_>,
+        target: &RunTarget<'_>,
+        working_directory: &Path,
+    ) -> (Self, Option<io::Error>) {
+        match RunRecorder::create(settings, target, working_directory) {
+            Some(Ok(recorder)) => (Self(Some(recorder)), None),
+            Some(Err(error)) => (Self(None), Some(error)),
+            None => (Self(None), None),
+        }
     }
 
     /// The directory that holds the artifacts, while the log is open.
