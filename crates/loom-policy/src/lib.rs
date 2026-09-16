@@ -23,4 +23,4 @@ pub use parse::parse_all;
 pub use path::{SandboxPath, SandboxPathError};
 pub use profile::HarnessProfile;
 pub use sandbox::SandboxPolicy;
-pub(crate) use sandbox::extend;
+pub(crate) use sandbox::{extend, selected_groups};

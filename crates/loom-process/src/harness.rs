@@ -60,16 +60,7 @@ impl HarnessCall {
         // The prompt stays last because harnesses read it as a positional argument.
         arguments.push(self.prompt);
 
-        (default_program(self.harness).into(), arguments)
-    }
-}
-
-fn default_program(harness: HeadlessHarness) -> &'static str {
-    match harness {
-        HeadlessHarness::Pi => "pi",
-        HeadlessHarness::Omp => "omp",
-        HeadlessHarness::Claude => "claude",
-        HeadlessHarness::Codex => "codex",
+        (self.harness.name().into(), arguments)
     }
 }
 

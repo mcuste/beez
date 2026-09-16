@@ -96,14 +96,12 @@ fn write_registry(
 ) -> io::Result<Response> {
     paths.create()?;
     let path = watched.path.clone();
-    let added = !registry.watches(&path);
-    registry.add(watched);
+    let added = registry.add(watched);
     registry.save(&paths.manifests())?;
 
     Ok(Response::done(format!(
-        "{} {}, and the daemon reads it when it starts",
-        if added { "watching" } else { "read again" },
-        path.display()
+        "{}, and the daemon reads it when it starts",
+        message::watching(&path, added)
     )))
 }
 

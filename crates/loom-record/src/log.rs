@@ -8,15 +8,15 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anstream::adapter::strip_bytes;
 use loom_core::{TaskRequest, Workflow};
 use loom_process::OutputStream;
-use loom_runner::RunEvent;
 use serde::Serialize;
 
 use crate::format::{STDERR_MARK, STDOUT_MARK, status_line, trim_newline};
+use crate::outcome::TaskOutcome;
 use crate::time::{compact_utc, utc};
 
 const DIRECTORY: &str = ".loom";
@@ -76,66 +76,6 @@ pub struct LogSettings<'run> {
     pub enabled: bool,
     /// Directory that replaces the one Loom resolves itself.
     pub directory: Option<&'run Path>,
-}
-
-impl LogSettings<'_> {
-    /// Returns nothing when artifacts are off.
-    pub(crate) fn create(
-        &self,
-        target: &RunTarget<'_>,
-        working_directory: &Path,
-    ) -> Option<io::Result<RunLog>> {
-        self.enabled
-            .then(|| RunLog::create(self.directory, target, working_directory))
-    }
-}
-
-/// What happened to one task.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum TaskOutcome {
-    /// The task has started.
-    Started,
-    /// The task ran to the end. `None` means a signal ended it.
-    Finished {
-        /// Status the task exited with.
-        exit_status: Option<i32>,
-        /// Time the task took.
-        elapsed: Duration,
-    },
-    /// The task could not start at all.
-    Failed {
-        /// Category of the error that stopped it.
-        error: io::ErrorKind,
-        /// Time until the task failed.
-        elapsed: Duration,
-    },
-    /// The task never ran, because a dependency failed.
-    Blocked,
-}
-
-impl TaskOutcome {
-    /// What one event records about its task, or nothing for an output line.
-    pub(crate) fn of(event: &RunEvent) -> Option<Self> {
-        match event {
-            RunEvent::Output { .. } => None,
-            RunEvent::Started { .. } => Some(Self::Started),
-            RunEvent::Blocked { .. } => Some(Self::Blocked),
-            RunEvent::Finished {
-                output, elapsed, ..
-            } => Some(Self::Finished {
-                exit_status: output.status_code(),
-                elapsed: *elapsed,
-            }),
-            RunEvent::Failed {
-                error_kind,
-                elapsed,
-                ..
-            } => Some(Self::Failed {
-                error: *error_kind,
-                elapsed: *elapsed,
-            }),
-        }
-    }
 }
 
 /// The artifacts of one run.
@@ -309,26 +249,20 @@ impl RunLog {
         let Some(task) = self.tasks.get_mut(index) else {
             return;
         };
+        task.record.state = outcome.state();
         match outcome {
-            TaskOutcome::Started => task.record.state = "running",
             TaskOutcome::Finished {
                 exit_status,
                 elapsed,
             } => {
-                task.record.state = if exit_status == Some(0) {
-                    "finished"
-                } else {
-                    "failed"
-                };
                 task.record.exit_status = exit_status;
                 task.record.duration_seconds = Some(elapsed.as_secs_f64());
             }
             TaskOutcome::Failed { error, elapsed } => {
-                task.record.state = "failed";
                 task.record.error = Some(error.to_string());
                 task.record.duration_seconds = Some(elapsed.as_secs_f64());
             }
-            TaskOutcome::Blocked => task.record.state = "blocked",
+            TaskOutcome::Started | TaskOutcome::Blocked => {}
         }
     }
 

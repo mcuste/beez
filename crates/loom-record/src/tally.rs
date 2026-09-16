@@ -2,9 +2,8 @@
 
 use std::time::Duration;
 
-use loom_runner::RunEvent;
-
 use crate::format::{counts, seconds};
+use crate::outcome::TaskOutcome;
 
 /// How many tasks of one run passed, failed and never ran.
 ///
@@ -18,13 +17,13 @@ pub struct RunTally {
 }
 
 impl RunTally {
-    /// Counts one event. An event that does not end a task changes nothing.
-    pub fn add(&mut self, event: &RunEvent) {
-        match event {
-            RunEvent::Finished { output, .. } if output.succeeded() => self.passed += 1,
-            RunEvent::Finished { .. } | RunEvent::Failed { .. } => self.failed += 1,
-            RunEvent::Blocked { .. } => self.blocked += 1,
-            RunEvent::Started { .. } | RunEvent::Output { .. } => {}
+    /// Counts one outcome. An outcome that does not end a task changes nothing.
+    pub fn add(&mut self, outcome: TaskOutcome) {
+        match outcome {
+            TaskOutcome::Finished { .. } if outcome.succeeded() => self.passed += 1,
+            TaskOutcome::Finished { .. } | TaskOutcome::Failed { .. } => self.failed += 1,
+            TaskOutcome::Blocked => self.blocked += 1,
+            TaskOutcome::Started => {}
         }
     }
 

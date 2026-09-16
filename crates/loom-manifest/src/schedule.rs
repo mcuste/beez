@@ -1,6 +1,8 @@
 use loom_schedule::{CronSchedule, Schedule, UtcOffset, parse_instant};
 use serde::Deserialize;
 
+use crate::message;
+
 /// A manifest's `schedule` field: one entry, or a list of entries.
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -101,21 +103,20 @@ impl TryFrom<ScheduleFields> for JobSchedule {
             .as_deref()
             .map(str::parse::<UtcOffset>)
             .transpose()
-            .map_err(|error| error.to_string())?;
+            .map_err(message)?;
         let schedule = match (fields.cron, fields.at) {
             (Some(_), Some(_)) => {
                 return Err("schedule must define either cron or at, not both".into());
             }
             (None, None) => return Err("schedule must define either cron or at".into()),
             (Some(cron), None) => Schedule::Cron(
-                CronSchedule::new(&cron, offset.unwrap_or_default())
-                    .map_err(|error| error.to_string())?,
+                CronSchedule::new(&cron, offset.unwrap_or_default()).map_err(message)?,
             ),
             (None, Some(at)) => {
                 if offset.is_some() {
                     return Err("at already names its own offset, so offset must be absent".into());
                 }
-                Schedule::Once(parse_instant(&at).map_err(|error| error.to_string())?)
+                Schedule::Once(parse_instant(&at).map_err(message)?)
             }
         };
 

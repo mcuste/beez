@@ -290,20 +290,18 @@ fn record_outcomes(
         let Some(index) = task else {
             continue;
         };
+        // A task that could not run at all counts as a failed one.
+        let status = outcome.as_ref().map_or(1, |status| status.unwrap_or(1));
+        if !execution.complete(index, status == 0) {
+            return Err(io::Error::other("workflow task is not running"));
+        }
         match outcome {
-            Ok(status) => {
-                let status = status.unwrap_or(1);
-                if !execution.complete(index, status == 0) {
-                    return Err(io::Error::other("workflow task is not running"));
-                }
+            Ok(_) => {
                 if status != 0 && *exit_status == 0 {
                     *exit_status = status;
                 }
             }
             Err(error) => {
-                if !execution.complete(index, false) {
-                    return Err(io::Error::other("workflow task is not running"));
-                }
                 if execution_error.is_none() {
                     execution_error = Some(error);
                 }

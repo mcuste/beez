@@ -11,8 +11,8 @@ use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use loom_process::{OutputStream, ProcessOutput};
 use loom_record::{
-    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, STDERR_MARK, STDOUT_MARK, VERB_WIDTH,
-    event_status, seconds, trim_newline, utc,
+    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, STDERR_MARK, STDOUT_MARK, TaskOutcome,
+    VERB_WIDTH, log_failure, seconds, trim_newline, utc,
 };
 use loom_runner::RunEvent;
 
@@ -199,8 +199,11 @@ impl Reporter {
 
     pub(crate) fn event(&mut self, event: &RunEvent) -> io::Result<()> {
         self.terminal.log(|log| log.event(event));
-        self.tally.add(event);
         let index = event.position();
+        let outcome = TaskOutcome::of(event);
+        if let Some(outcome) = outcome {
+            self.tally.add(outcome);
+        }
 
         match event {
             RunEvent::Output { stream, line, .. } => return self.output(index, *stream, line),
@@ -223,7 +226,7 @@ impl Reporter {
             self.terminal.bytes(Target::Out, &buffer)?;
         }
 
-        let Some((verb, message)) = event_status(event, &self.id(index)) else {
+        let Some((verb, message)) = outcome.map(|outcome| outcome.status(&self.id(index))) else {
             return Ok(());
         };
         // The event wrote this line to the run log already.
@@ -241,9 +244,9 @@ impl Reporter {
 
         let style = if self.tally.failed() > 0 { RED } else { GREEN };
         let message = self.tally.summary(self.started.elapsed());
-        let result = self.line(style, "Summary", &message);
-        self.terminal.log(|log| log.finish(exit_status));
-        result
+        self.terminal.log(|log| log.finish(&message, exit_status));
+
+        self.show(style, "Summary", &message)
     }
 
     /// Shows one running task as a spinner row of its own.
@@ -291,13 +294,6 @@ impl Reporter {
         }
         let text = String::from_utf8_lossy(trim_newline(line));
         format!("{}{BLOCK_INDENT}{text}\n", self.terminal.stamp())
-    }
-
-    /// Writes one of Loom's own status lines, to the terminal and the log.
-    fn line(&self, style: Style, verb: &str, message: &str) -> io::Result<()> {
-        self.terminal.record(verb, message);
-
-        self.show(style, verb, message)
     }
 
     /// Shows one status line on the terminal, for a line the log already holds.
@@ -392,13 +388,13 @@ impl Terminal {
         let Ok(mut log) = self.log.lock() else {
             return;
         };
-        let failure = log.write(action);
+        let failure = log.write(action).err();
         // The warning writes a line of its own, so the log lock goes first.
         drop(log);
         if let Some(error) = failure {
             let _ = self.line(
                 Target::Err,
-                &styled_status(YELLOW, "Warning", &format!("run log: {error}")),
+                &styled_status(YELLOW, "Warning", &log_failure(&error)),
             );
         }
     }
@@ -442,7 +438,7 @@ fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<io::E
     if let Some(error) = failure {
         let _ = terminal.line(
             Target::Err,
-            &styled_status(YELLOW, "Warning", &format!("run log: {error}")),
+            &styled_status(YELLOW, "Warning", &log_failure(&error)),
         );
     }
 }

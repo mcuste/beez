@@ -9,6 +9,15 @@ pub(crate) fn not_watched(manifest: &Path) -> String {
     format!("{} is not watched", manifest.display())
 }
 
+/// What `add` answers: the manifest, and whether the daemon is new to it.
+pub(crate) fn watching(manifest: &Path, added: bool) -> String {
+    format!(
+        "{} {}",
+        if added { "watching" } else { "read again" },
+        manifest.display()
+    )
+}
+
 pub(crate) fn stopped_watching(manifest: &Path) -> String {
     format!("stopped watching {}", manifest.display())
 }

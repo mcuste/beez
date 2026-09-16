@@ -1,8 +1,7 @@
 //! The shape of one line of `run.log`, shared with Loom's terminal output.
 
+use std::io;
 use std::time::Duration;
-
-use loom_runner::RunEvent;
 
 /// Width of the status word column, as wide as the longest word.
 pub const VERB_WIDTH: usize = 8;
@@ -41,39 +40,10 @@ pub fn status_text(exit_status: Option<i32>) -> String {
     }
 }
 
-/// How one event reads as a status line: the status word, then the message.
-///
-/// An output line carries no status of its own, so it has none.
+/// What Loom reports when it cannot write the artifacts of a run.
 #[must_use]
-pub fn event_status(event: &RunEvent, label: &str) -> Option<(&'static str, String)> {
-    match event {
-        RunEvent::Output { .. } => None,
-        RunEvent::Started { .. } => Some(("Running", label.to_owned())),
-        RunEvent::Blocked { .. } => Some(("Blocked", label.to_owned())),
-        RunEvent::Finished {
-            output, elapsed, ..
-        } => {
-            let verb = if output.succeeded() {
-                "Finished"
-            } else {
-                "Failed"
-            };
-            let message = format!(
-                "{label} in {} ({})",
-                seconds(*elapsed),
-                status_text(output.status_code())
-            );
-            Some((verb, message))
-        }
-        RunEvent::Failed {
-            error_kind,
-            elapsed,
-            ..
-        } => Some((
-            "Failed",
-            format!("{label} in {} ({error_kind})", seconds(*elapsed)),
-        )),
-    }
+pub fn log_failure(error: &io::Error) -> String {
+    format!("run log: {error}")
 }
 
 /// The counts that close a run.

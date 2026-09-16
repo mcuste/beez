@@ -1,6 +1,4 @@
-use std::collections::BTreeSet;
-
-use crate::{DomainGroup, DomainRule, HarnessProfile, extend};
+use crate::{DomainGroup, DomainRule, HarnessProfile, extend, selected_groups};
 
 /// Which remote hosts sandboxed processes may reach.
 ///
@@ -60,20 +58,17 @@ impl NetworkPolicy {
     /// disabled. Explicit groups and rules always apply.
     #[must_use]
     pub fn allowed_domains(&self, profile: Option<&HarnessProfile>) -> Vec<DomainRule> {
-        let mut groups = BTreeSet::new();
+        let defaults = profile.map_or(&[][..], HarnessProfile::default_domain_groups);
+        let mut groups = selected_groups(
+            self.defaults.unwrap_or(true),
+            defaults,
+            &self.disable,
+            &self.groups,
+        );
+        // A harness reaches no provider at all without its required groups.
         if let Some(profile) = profile {
             groups.extend(profile.required_domain_groups().iter().copied());
-            if self.defaults.unwrap_or(true) {
-                groups.extend(
-                    profile
-                        .default_domain_groups()
-                        .iter()
-                        .filter(|group| !self.disable.contains(group))
-                        .copied(),
-                );
-            }
         }
-        groups.extend(self.groups.iter().copied());
 
         groups
             .into_iter()

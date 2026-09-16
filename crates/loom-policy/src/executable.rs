@@ -1,6 +1,4 @@
-use std::collections::BTreeSet;
-
-use crate::{ExecutableGroup, SandboxPath, extend};
+use crate::{ExecutableGroup, SandboxPath, extend, selected_groups};
 
 /// Which programs sandboxed processes may execute.
 ///
@@ -58,14 +56,14 @@ impl ExecutablePolicy {
     /// when the same group is also disabled.
     #[must_use]
     pub fn groups(&self) -> Vec<ExecutableGroup> {
-        DEFAULT_EXECUTABLE_GROUPS
-            .iter()
-            .filter(|group| self.defaults.unwrap_or(true) && !self.disable.contains(group))
-            .chain(self.groups.iter())
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
+        selected_groups(
+            self.defaults.unwrap_or(true),
+            &DEFAULT_EXECUTABLE_GROUPS,
+            &self.disable,
+            &self.groups,
+        )
+        .into_iter()
+        .collect()
     }
 
     /// Program names, files, or directories that may run in addition to the groups.

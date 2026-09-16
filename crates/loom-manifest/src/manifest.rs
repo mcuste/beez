@@ -6,6 +6,7 @@ use loom_core::{TaskDefinition, TaskId, TaskRequest, Workflow};
 use loom_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
 use serde::Deserialize;
 
+use crate::message;
 use crate::sandbox::{ManifestSandbox, SandboxSetting};
 use crate::schedule::{JobSchedule, ScheduleSetting};
 
@@ -90,6 +91,12 @@ impl fmt::Display for ManifestError {
     }
 }
 
+impl ManifestError {
+    fn invalid(error: impl fmt::Display) -> Self {
+        Self::Invalid(message(error))
+    }
+}
+
 impl std::error::Error for ManifestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -100,58 +107,39 @@ impl std::error::Error for ManifestError {
 }
 
 impl ManifestTask {
-    fn into_definition(
-        mut self,
-        sandbox: Option<&SandboxPolicy>,
-    ) -> Result<TaskDefinition, String> {
-        let task_sandbox = crate::sandbox::resolve(sandbox, self.sandbox.take())?;
-        let definition = TaskDefinition::try_from(self)?;
-        Ok(match task_sandbox {
-            Some(policy) => definition.sandboxed(policy),
-            None => definition,
-        })
-    }
-}
-
-impl TryFrom<ManifestTask> for TaskDefinition {
-    type Error = String;
-
-    fn try_from(task: ManifestTask) -> Result<Self, Self::Error> {
-        let id = task
-            .id
-            .parse::<TaskId>()
-            .map_err(|error| error.to_string())?;
-        let depends_on = task
+    /// Builds the task, with the sandbox resolved from the workflow and the task.
+    fn into_definition(self, workflow: Option<&SandboxPolicy>) -> Result<TaskDefinition, String> {
+        let sandbox = crate::sandbox::resolve(workflow, self.sandbox)?;
+        let id = self.id.parse::<TaskId>().map_err(message)?;
+        let depends_on = self
             .depends_on
             .into_iter()
-            .map(|dependency| {
-                dependency
-                    .parse::<TaskId>()
-                    .map_err(|error| error.to_string())
-            })
+            .map(|dependency| dependency.parse::<TaskId>().map_err(message))
             .collect::<Result<Vec<_>, _>>()?;
-        let options = HarnessOptions::new(task.model, task.effort);
-        let request = match (task.harness, task.prompt, task.command) {
+        let options = HarnessOptions::new(self.model, self.effort);
+        let request = match (self.harness, self.prompt, self.command) {
             (Some(harness), Some(prompt), None) => {
-                let harness = harness
-                    .parse::<HeadlessHarness>()
-                    .map_err(|error| error.to_string())?;
+                let harness = harness.parse::<HeadlessHarness>().map_err(message)?;
                 TaskRequest::harness(harness, prompt, options)
             }
-            (None, None, Some(mut command)) => {
+            (None, None, Some(command)) => {
                 if !options.is_empty() {
                     return Err("model and effort require a harness task".into());
                 }
-                let Some(program) = command.first().cloned() else {
+                let mut command = command.into_iter();
+                let Some(program) = command.next() else {
                     return Err("command must contain a program".into());
                 };
-                command.remove(0);
-                TaskRequest::command(program, command)
+                TaskRequest::command(program, command.collect())
             }
             _ => return Err("task must define either harness and prompt, or command".into()),
         };
+        let definition = TaskDefinition::new(id, depends_on, request);
 
-        Ok(TaskDefinition::new(id, depends_on, request))
+        Ok(match sandbox {
+            Some(policy) => definition.sandboxed(policy),
+            None => definition,
+        })
     }
 }
 
@@ -159,11 +147,8 @@ impl TryFrom<ManifestTask> for TaskDefinition {
 pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
     let source = fs::read_to_string(path).map_err(ManifestError::Io)?;
     let document: Document = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("yaml" | "yml") => {
-            noyalib::from_str(&source).map_err(|error| ManifestError::Invalid(error.to_string()))?
-        }
-        Some("json") => serde_json::from_str(&source)
-            .map_err(|error| ManifestError::Invalid(error.to_string()))?,
+        Some("yaml" | "yml") => noyalib::from_str(&source).map_err(ManifestError::invalid)?,
+        Some("json") => serde_json::from_str(&source).map_err(ManifestError::invalid)?,
         _ => return Err(ManifestError::UnsupportedFormat(path.into())),
     };
     let schedules = crate::schedule::resolve(document.schedule).map_err(ManifestError::Invalid)?;
@@ -178,8 +163,7 @@ pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
         .map(|task| task.into_definition(sandbox.as_ref()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ManifestError::Invalid)?;
-    let workflow = Workflow::try_from(definitions)
-        .map_err(|error| ManifestError::Invalid(error.to_string()))?;
+    let workflow = Workflow::try_from(definitions).map_err(ManifestError::invalid)?;
 
     Ok(Manifest {
         workflow,

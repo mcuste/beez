@@ -8,8 +8,8 @@ use std::path::Path;
 
 use loom_runner::RunEvent;
 
-use crate::format::event_status;
-use crate::log::{LogSettings, RunLog, RunTarget, TaskOutcome};
+use crate::log::{LogSettings, RunLog, RunTarget};
+use crate::outcome::TaskOutcome;
 
 /// Turns the events of one run into its artifacts.
 #[derive(Debug)]
@@ -19,20 +19,6 @@ pub struct RunRecorder {
 }
 
 impl RunRecorder {
-    /// Opens the artifacts of one run. Returns nothing when they are off.
-    pub(crate) fn create(
-        settings: LogSettings<'_>,
-        target: &RunTarget<'_>,
-        working_directory: &Path,
-    ) -> Option<io::Result<Self>> {
-        let labels = target.labels();
-        Some(
-            settings
-                .create(target, working_directory)?
-                .map(|log| Self { log, labels }),
-        )
-    }
-
     /// The directory that holds the artifacts.
     #[must_use]
     pub fn directory(&self) -> &Path {
@@ -45,14 +31,13 @@ impl RunRecorder {
         if let RunEvent::Output { stream, line, .. } = event {
             return self.log.output(index, *stream, line);
         }
-        if let Some(outcome) = TaskOutcome::of(event) {
-            self.log.outcome(index, outcome);
-        }
+        let Some(outcome) = TaskOutcome::of(event) else {
+            return Ok(());
+        };
+        self.log.outcome(index, outcome);
+        let (verb, message) = outcome.status(&self.label(index));
 
-        match event_status(event, &self.label(index)) {
-            Some((verb, message)) => self.log.status(verb, &message),
-            None => Ok(()),
-        }
+        self.log.status(verb, &message)
     }
 
     /// Records one of Loom's own status lines, such as a sandbox note.
@@ -60,8 +45,13 @@ impl RunRecorder {
         self.log.status(verb, message)
     }
 
-    /// Writes the record of the run, with Loom's own exit status.
-    pub fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
+    /// Writes the line that closes the run, then the record of the run.
+    ///
+    /// `exit_status` is the status Loom itself returns. It is absent when the
+    /// run ended in an execution error.
+    pub fn finish(&mut self, summary: &str, exit_status: Option<i32>) -> io::Result<()> {
+        self.status("Summary", summary)?;
+
         self.log.finish(exit_status)
     }
 
@@ -90,10 +80,18 @@ impl OpenLog {
         target: &RunTarget<'_>,
         working_directory: &Path,
     ) -> (Self, Option<io::Error>) {
-        match RunRecorder::create(settings, target, working_directory) {
-            Some(Ok(recorder)) => (Self(Some(recorder)), None),
-            Some(Err(error)) => (Self(None), Some(error)),
-            None => (Self(None), None),
+        if !settings.enabled {
+            return (Self(None), None);
+        }
+        match RunLog::create(settings.directory, target, working_directory) {
+            Ok(log) => {
+                let recorder = RunRecorder {
+                    log,
+                    labels: target.labels(),
+                };
+                (Self(Some(recorder)), None)
+            }
+            Err(error) => (Self(None), Some(error)),
         }
     }
 
@@ -103,15 +101,20 @@ impl OpenLog {
         self.0.as_ref().map(RunRecorder::directory)
     }
 
-    /// Writes to the log. Returns the error and closes the log after a
-    /// failure, so the caller reports it once.
+    /// Writes to the log, and closes it after a failure, so the caller reports
+    /// the failure once. A closed log ignores every later write.
     pub fn write(
         &mut self,
         action: impl FnOnce(&mut RunRecorder) -> io::Result<()>,
-    ) -> Option<io::Error> {
-        let error = action(self.0.as_mut()?).err()?;
-        self.0 = None;
+    ) -> io::Result<()> {
+        let Some(recorder) = self.0.as_mut() else {
+            return Ok(());
+        };
+        let result = action(recorder);
+        if result.is_err() {
+            self.0 = None;
+        }
 
-        Some(error)
+        result
     }
 }

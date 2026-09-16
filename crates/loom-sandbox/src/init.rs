@@ -12,8 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::proxy::loopback;
-use crate::server::Server;
-use crate::stream::pipe;
+use crate::server::{Server, forward};
 
 const RELAY_START_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -145,11 +144,7 @@ pub fn relay(listen: SocketAddr, socket: &Path) -> io::Result<()> {
 fn serve_relay(listener: TcpListener, socket: &Path) -> Server {
     let socket = socket.to_path_buf();
 
-    Server::spawn(listener, move |client| {
-        if let Ok(upstream) = UnixStream::connect(&socket) {
-            let _ = pipe(client, upstream);
-        }
-    })
+    forward(listener, move || UnixStream::connect(&socket))
 }
 
 #[cfg(test)]

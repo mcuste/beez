@@ -62,9 +62,14 @@ impl Registry {
     }
 
     /// Adds a manifest, replacing an entry for the same file.
-    pub(crate) fn add(&mut self, watched: Watched) {
+    ///
+    /// Returns false when the daemon already watched the manifest.
+    pub(crate) fn add(&mut self, watched: Watched) -> bool {
+        let added = !self.watches(&watched.path);
         self.manifests.retain(|entry| entry.path != watched.path);
         self.manifests.push(watched);
+
+        added
     }
 
     /// Removes a manifest and reports whether it was there.

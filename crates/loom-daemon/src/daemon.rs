@@ -311,8 +311,7 @@ impl Daemon {
         if let Some(taken) = self.taken_id(&ids, &watched.path) {
             return Response::error(message::taken_id(&taken));
         }
-        let added = !self.registry.watches(&watched.path);
-        self.registry.add(watched.clone());
+        let added = self.registry.add(watched.clone());
         if let Err(error) = self.registry.save(&self.paths.manifests()) {
             return Response::error(message::unwritable_registry(&error));
         }
@@ -323,9 +322,8 @@ impl Daemon {
         );
 
         Response::done(format!(
-            "{} {} as {}",
-            if added { "watching" } else { "read again" },
-            watched.path.display(),
+            "{} as {}",
+            message::watching(&watched.path, added),
             ids.join(", ")
         ))
     }

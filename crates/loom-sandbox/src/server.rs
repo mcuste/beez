@@ -8,8 +8,32 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 
+#[cfg(target_os = "linux")]
+use crate::stream::{Stream, pipe};
+
 /// How many connections one server handles at the same time.
 const MAX_CONNECTIONS: usize = 256;
+
+/// Accepts connections and copies each one to the stream `connect` opens.
+///
+/// Both ends of the sandbox bridge use this. The host forwards a Unix socket
+/// to a proxy port. The sandbox forwards a loopback port back to that socket.
+#[cfg(target_os = "linux")]
+pub(crate) fn forward<L, S>(
+    listener: L,
+    connect: impl Fn() -> io::Result<S> + Send + Sync + 'static,
+) -> Server
+where
+    L: Listener + Sync,
+    L::Stream: Stream,
+    S: Stream,
+{
+    Server::spawn(listener, move |client| {
+        if let Ok(upstream) = connect() {
+            let _ = pipe(client, upstream);
+        }
+    })
+}
 
 /// A socket that accepts connections and can wake its own accept loop.
 pub(crate) trait Listener: Send + 'static {

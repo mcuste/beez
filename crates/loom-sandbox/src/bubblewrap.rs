@@ -11,8 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::init::relay_argument;
 use crate::proxy::loopback;
 use crate::resolve::ResolvedSandbox;
-use crate::server::{Server, UnixPathListener};
-use crate::stream::pipe;
+use crate::server::{Server, UnixPathListener, forward};
 
 /// Loopback port of the HTTP proxy inside the sandbox.
 pub(crate) const HTTP_PORT: u16 = 3128;
@@ -51,8 +50,8 @@ impl Bridge {
         fs::create_dir(&empty)?;
         let http_socket = directory.path().join("http.sock");
         let socks_socket = directory.path().join("socks.sock");
-        let http = forward(&http_socket, http_port)?;
-        let socks = forward(&socks_socket, socks_port)?;
+        let http = forward_socket(&http_socket, http_port)?;
+        let socks = forward_socket(&socks_socket, socks_port)?;
 
         Ok(Self {
             _servers: [http, socks],
@@ -85,12 +84,12 @@ impl Drop for SocketDirectory {
     }
 }
 
-fn forward(socket: &Path, port: u16) -> io::Result<Server> {
+/// A Unix socket on the host that forwards to a proxy port.
+fn forward_socket(socket: &Path, port: u16) -> io::Result<Server> {
     let listener = UnixPathListener::bind(socket.to_path_buf())?;
-    Ok(Server::spawn(listener, move |client| {
-        if let Ok(upstream) = TcpStream::connect(loopback(port)) {
-            let _ = pipe(client, upstream);
-        }
+
+    Ok(forward(listener, move || {
+        TcpStream::connect(loopback(port))
     }))
 }
 
