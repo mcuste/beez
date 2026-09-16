@@ -25,6 +25,13 @@ impl ProcessCall {
         self
     }
 
+    /// Adds literal process arguments, in the order they are given.
+    #[must_use]
+    pub fn arguments(mut self, arguments: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        self.arguments.extend(arguments.into_iter().map(Into::into));
+        self
+    }
+
     pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
         (self.program, self.arguments)
     }

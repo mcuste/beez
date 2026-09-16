@@ -129,3 +129,36 @@ impl RunRecorder {
 fn position(task: Option<TaskIndex>) -> usize {
     task.map_or(0, TaskIndex::position)
 }
+
+/// The run log of one run, which may be absent or closed.
+///
+/// A write failure closes the log and the run goes on, because the result of
+/// a run matters more than its record.
+#[derive(Debug)]
+pub struct OpenLog(Option<RunRecorder>);
+
+impl OpenLog {
+    /// Holds a recorder, or nothing when the run writes no artifacts.
+    #[must_use]
+    pub fn new(recorder: Option<RunRecorder>) -> Self {
+        Self(recorder)
+    }
+
+    /// The directory that holds the artifacts, while the log is open.
+    #[must_use]
+    pub fn directory(&self) -> Option<&Path> {
+        self.0.as_ref().map(RunRecorder::directory)
+    }
+
+    /// Writes to the log. Returns the error and closes the log after a
+    /// failure, so the caller reports it once.
+    pub fn write(
+        &mut self,
+        action: impl FnOnce(&mut RunRecorder) -> io::Result<()>,
+    ) -> Option<io::Error> {
+        let error = action(self.0.as_mut()?).err()?;
+        self.0 = None;
+
+        Some(error)
+    }
+}

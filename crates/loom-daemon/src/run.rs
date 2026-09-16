@@ -4,12 +4,12 @@
 //! holds at the moment it fires. The artifacts land in `.loom/runs` beside the
 //! runs a person starts, and they hold the same lines.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use loom_manifest::load;
-use loom_record::{LogSettings, RunRecorder, RunTarget, counts, seconds};
-use loom_runner::{RunEvent, Runner};
+use loom_record::{LogSettings, OpenLog, RunRecorder, RunTally, RunTarget};
+use loom_runner::Runner;
 use loom_schedule::format_instant;
 
 use crate::report;
@@ -39,33 +39,6 @@ pub(crate) struct RunOutcome {
     pub(crate) error: Option<String>,
 }
 
-/// Counts how the tasks of one run ended.
-#[derive(Debug, Default)]
-struct Counts {
-    passed: usize,
-    failed: usize,
-    blocked: usize,
-}
-
-impl Counts {
-    fn add(&mut self, event: &RunEvent) {
-        match event {
-            RunEvent::Finished { output, .. } if output.succeeded() => self.passed += 1,
-            RunEvent::Finished { .. } | RunEvent::Failed { .. } => self.failed += 1,
-            RunEvent::Blocked { .. } => self.blocked += 1,
-            RunEvent::Started { .. } | RunEvent::Output { .. } => {}
-        }
-    }
-
-    fn summary(&self, elapsed: std::time::Duration) -> String {
-        format!(
-            "{} in {}",
-            counts(self.passed, self.failed, self.blocked),
-            seconds(elapsed)
-        )
-    }
-}
-
 /// Runs one job to the end.
 pub(crate) fn execute(job: &JobRun) -> RunOutcome {
     let started = Instant::now();
@@ -84,26 +57,26 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
         enabled: true,
         directory: Some(&job.log_directory),
     };
-    let mut recorder = match RunRecorder::create(settings, &target, &job.working_directory) {
-        Some(Ok(recorder)) => Some(recorder),
-        Some(Err(error)) => {
-            report::line("Warning", &format!("{}: run log: {error}", job.id));
-            None
-        }
-        None => None,
-    };
-    let directory = recorder.as_ref().and_then(|recorder| {
-        recorder
-            .directory()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-    });
+    let mut log = OpenLog::new(
+        match RunRecorder::create(settings, &target, &job.working_directory) {
+            Some(Ok(recorder)) => Some(recorder),
+            Some(Err(error)) => {
+                report::line("Warning", &format!("{}: run log: {error}", job.id));
+                None
+            }
+            None => None,
+        },
+    );
+    let directory = log
+        .directory()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned());
     if let Some(directory) = &directory {
         report::line("Logging", &format!("{}: runs/{directory}", job.id));
     }
     // The run log says which fire started the run, so a run explains itself.
     record(
-        &mut recorder,
+        &mut log,
         |recorder| {
             recorder.status(
                 "Trigger",
@@ -113,18 +86,18 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
         &job.id,
     );
 
-    let mut tallies = Counts::default();
+    let mut tally = RunTally::default();
     let outcome = Runner::new(&job.working_directory).run_workflow(&workflow, &mut |event| {
-        tallies.add(event);
-        match recorder.as_mut() {
-            Some(recorder) => recorder.event(event),
+        tally.add(event);
+        match log.write(|recorder| recorder.event(event)) {
+            Some(error) => Err(error),
             None => Ok(()),
         }
     });
-    let summary = tallies.summary(started.elapsed());
+    let summary = tally.summary(started.elapsed());
     let status = outcome.as_ref().ok().copied();
     record(
-        &mut recorder,
+        &mut log,
         |recorder| {
             recorder.status("Summary", &summary)?;
             recorder.finish(status)
@@ -140,19 +113,14 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
     }
 }
 
-/// Writes to the run log, and gives the log up after one failure so the run
-/// itself keeps its result.
+/// Writes to the run log, and names the job of a log that could not be written.
 fn record(
-    recorder: &mut Option<RunRecorder>,
+    log: &mut OpenLog,
     action: impl FnOnce(&mut RunRecorder) -> std::io::Result<()>,
     job: &str,
 ) {
-    let Some(open) = recorder.as_mut() else {
-        return;
-    };
-    if let Err(error) = action(open) {
+    if let Some(error) = log.write(action) {
         report::line("Warning", &format!("{job}: run log: {error}"));
-        *recorder = None;
     }
 }
 

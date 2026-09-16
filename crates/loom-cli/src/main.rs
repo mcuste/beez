@@ -9,7 +9,8 @@ use clap::{Args, Parser, Subcommand};
 use loom_daemon::{DaemonPaths, Request, Response};
 use loom_manifest::load;
 use loom_policy::{
-    DomainRule, FilesystemPolicy, HeadlessHarness, NetworkPolicy, SandboxPath, SandboxPolicy,
+    DomainRule, FilesystemPolicy, HarnessOptions, HeadlessHarness, NetworkPolicy, SandboxPath,
+    SandboxPolicy, parse_all,
 };
 use loom_process::{ExecutionRequest, HarnessCall, ProcessCall};
 use loom_record::{LogSettings, RunTarget};
@@ -183,10 +184,10 @@ struct HarnessRun {
     prompt: OsString,
     /// Model the harness must use.
     #[arg(long)]
-    model: Option<OsString>,
+    model: Option<String>,
     /// Reasoning effort the harness must use.
     #[arg(long)]
-    effort: Option<OsString>,
+    effort: Option<String>,
     #[command(flatten)]
     sandbox: SandboxArgs,
     #[command(flatten)]
@@ -245,27 +246,21 @@ impl SandboxArgs {
         if self.no_sandbox {
             return Ok(None);
         }
-        let allow = parse_all::<DomainRule>(&self.allow_domain)?;
-        let write_allow = parse_all::<SandboxPath>(&self.allow_write)?;
+        let allow = parse_values::<DomainRule>(&self.allow_domain)?;
+        let write_allow = parse_values::<SandboxPath>(&self.allow_write)?;
         let network = NetworkPolicy::new(None, Vec::new(), Vec::new(), allow, None);
         let filesystem = FilesystemPolicy::new(None, Vec::new(), write_allow, Vec::new());
         Ok(Some(SandboxPolicy::new(network, filesystem, None)))
     }
 }
 
-fn parse_all<T>(values: &[String]) -> io::Result<Vec<T>>
+/// Reads policy values a flag holds, and reports a wrong one as bad input.
+fn parse_values<T>(values: &[String]) -> io::Result<Vec<T>>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
 {
-    values
-        .iter()
-        .map(|value| {
-            value
-                .parse::<T>()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
-        })
-        .collect()
+    parse_all(values).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
 #[derive(Debug, Args)]
@@ -290,11 +285,6 @@ struct SandboxRelay {
     #[arg(long)]
     socket: PathBuf,
 }
-
-/// How long to wait for a started daemon to answer.
-const START_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-/// How many times to look for the answer, so a slow start still reports.
-const START_ATTEMPTS: usize = 50;
 
 fn main() {
     let status = match run(Cli::parse()) {
@@ -377,11 +367,13 @@ fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
         &working_directory,
     );
 
-    let status = Runner::new(&working_directory).run_request_in(
-        harness_request(harness, prompt, model, effort),
-        policy.as_ref(),
-        &mut |event| reporter.event(event),
+    let request = ExecutionRequest::Harness(
+        HarnessCall::new(harness, prompt).options(&HarnessOptions::new(model, effort)),
     );
+
+    let status =
+        Runner::new(&working_directory)
+            .run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event));
     finish(&mut reporter, status)
 }
 
@@ -403,11 +395,7 @@ fn run_command(process: Process) -> io::Result<i32> {
         log.settings(),
         &working_directory,
     );
-    let request = ExecutionRequest::Command(
-        arguments
-            .into_iter()
-            .fold(ProcessCall::new(program), ProcessCall::argument),
-    );
+    let request = ExecutionRequest::Command(ProcessCall::new(program).arguments(arguments));
 
     let status =
         Runner::new(&working_directory)
@@ -421,7 +409,11 @@ fn daemon(command: DaemonCommand) -> io::Result<i32> {
             loom_daemon::run(&run.root.paths()?, run.limit, run.keep_runs)?;
             Ok(0)
         }
-        DaemonCommand::Start(run) => start_daemon(&run),
+        DaemonCommand::Start(run) => Ok(answer(loom_daemon::start(
+            &run.root.paths()?,
+            run.limit,
+            run.keep_runs,
+        )?)),
         DaemonCommand::Stop(root) => {
             Ok(answer(loom_daemon::command(&root.paths()?, Request::Stop)?))
         }
@@ -465,54 +457,6 @@ fn schedule(command: ScheduleCommand) -> io::Result<i32> {
             Request::Resume { job: args.job },
         )?)),
     }
-}
-
-/// Starts the daemon in its own process group, so a closing terminal leaves it
-/// running, with its own lines in `daemon.log`.
-fn start_daemon(run: &DaemonRun) -> io::Result<i32> {
-    use std::os::unix::process::CommandExt;
-
-    let paths = run.root.paths()?;
-    if loom_daemon::is_running(paths.socket()) {
-        eprintln!("a daemon already runs for {}", paths.root().display());
-        return Ok(1);
-    }
-    paths.create()?;
-    let log = std::fs::File::options()
-        .create(true)
-        .append(true)
-        .open(paths.log())?;
-    let child = std::process::Command::new(std::env::current_exe()?)
-        .args(["daemon", "run", "--root"])
-        .arg(paths.root())
-        .arg("--limit")
-        .arg(run.limit.to_string())
-        .arg("--keep-runs")
-        .arg(run.keep_runs.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()?;
-
-    for _ in 0..START_ATTEMPTS {
-        if loom_daemon::is_running(paths.socket()) {
-            println!(
-                "daemon started, pid {}, writing to {}",
-                child.id(),
-                paths.log().display()
-            );
-            return Ok(0);
-        }
-        std::thread::sleep(START_WAIT);
-    }
-    eprintln!(
-        "the daemon did not answer on {}, see {}",
-        paths.socket().display(),
-        paths.log().display()
-    );
-
-    Ok(1)
 }
 
 /// Prints what a command answered, and returns the status for it.
@@ -593,21 +537,4 @@ fn unsupported_sandbox_helper() -> io::Error {
         io::ErrorKind::Unsupported,
         "sandbox helper commands run only inside a Linux sandbox",
     )
-}
-
-fn harness_request(
-    harness: HeadlessHarness,
-    prompt: OsString,
-    model: Option<OsString>,
-    effort: Option<OsString>,
-) -> ExecutionRequest {
-    let mut call = HarnessCall::new(harness, prompt);
-    if let Some(model) = model {
-        call = call.model(model);
-    }
-    if let Some(effort) = effort {
-        call = call.effort(effort);
-    }
-
-    ExecutionRequest::Harness(call)
 }

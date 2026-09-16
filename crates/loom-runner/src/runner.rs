@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -308,22 +307,9 @@ fn execution_request(request: TaskRequest) -> ExecutionRequest {
             harness,
             prompt,
             options,
-        } => {
-            let mut call = HarnessCall::new(harness, OsString::from(prompt));
-            if let Some(model) = options.model() {
-                call = call.model(model);
-            }
-            if let Some(effort) = options.effort() {
-                call = call.effort(effort);
-            }
-            ExecutionRequest::Harness(call)
+        } => ExecutionRequest::Harness(HarnessCall::new(harness, prompt).options(&options)),
+        TaskRequest::Command { program, arguments } => {
+            ExecutionRequest::Command(ProcessCall::new(program).arguments(arguments))
         }
-        TaskRequest::Command { program, arguments } => ExecutionRequest::Command(
-            arguments
-                .into_iter()
-                .fold(ProcessCall::new(program), |call, argument| {
-                    call.argument(argument)
-                }),
-        ),
     }
 }

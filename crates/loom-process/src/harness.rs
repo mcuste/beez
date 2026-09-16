@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use loom_policy::HeadlessHarness;
+use loom_policy::{HarnessOptions, HeadlessHarness};
 
 /// Sends one prompt through a harness's non-interactive interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +35,20 @@ impl HarnessCall {
     #[must_use]
     pub fn effort(mut self, effort: impl Into<OsString>) -> Self {
         self.effort = Some(effort.into());
+        self
+    }
+
+    /// Uses the model and the effort the options name.
+    ///
+    /// An option that names neither keeps the harness default.
+    #[must_use]
+    pub fn options(mut self, options: &HarnessOptions) -> Self {
+        if let Some(model) = options.model() {
+            self.model = Some(model.into());
+        }
+        if let Some(effort) = options.effort() {
+            self.effort = Some(effort.into());
+        }
         self
     }
 

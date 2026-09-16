@@ -12,8 +12,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use loom_core::TaskIndex;
 use loom_process::{OutputStream, ProcessOutput};
 use loom_record::{
-    LogSettings, RunRecorder, RunTarget, STDERR_MARK, STDOUT_MARK, VERB_WIDTH, counts, seconds,
-    status_text, trim_newline, utc,
+    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, STDERR_MARK, STDOUT_MARK, VERB_WIDTH,
+    seconds, status_text, trim_newline, utc,
 };
 use loom_runner::RunEvent;
 
@@ -110,7 +110,7 @@ struct Streams {
 struct Terminal {
     bars: Option<MultiProgress>,
     streams: Mutex<Streams>,
-    log: Mutex<Option<RunRecorder>>,
+    log: Mutex<OpenLog>,
     started: Instant,
     timestamps: Option<Timestamps>,
 }
@@ -125,9 +125,7 @@ pub(crate) struct Reporter {
     spinner: ProgressStyle,
     spinners: Vec<Option<ProgressBar>>,
     buffers: Vec<Vec<u8>>,
-    passed: usize,
-    failed: usize,
-    blocked: usize,
+    tally: RunTally,
     started: Instant,
 }
 
@@ -162,7 +160,8 @@ impl Reporter {
             Some(Err(error)) => (None, Some(error)),
             None => (None, None),
         };
-        let directory = log.as_ref().map(|log| log.directory().to_path_buf());
+        let log = OpenLog::new(log);
+        let directory = log.directory().map(Path::to_path_buf);
         let terminal = Arc::new(Terminal {
             bars: bars.clone(),
             streams: Mutex::new(Streams {
@@ -187,9 +186,7 @@ impl Reporter {
             terminal,
             bars,
             spinner: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
-            passed: 0,
-            failed: 0,
-            blocked: 0,
+            tally: RunTally::default(),
             started: Instant::now(),
         }
     }
@@ -208,6 +205,7 @@ impl Reporter {
 
     pub(crate) fn event(&mut self, event: &RunEvent) -> io::Result<()> {
         self.terminal.log(|log| log.event(event));
+        self.tally.add(event);
         match event {
             RunEvent::Started { task } => self.started(*task),
             RunEvent::Output { task, stream, line } => self.output(*task, *stream, line),
@@ -234,12 +232,8 @@ impl Reporter {
             let _ = bars.clear();
         }
 
-        let style = if self.failed > 0 { RED } else { GREEN };
-        let message = format!(
-            "{} in {}",
-            counts(self.passed, self.failed, self.blocked),
-            seconds(self.started.elapsed())
-        );
+        let style = if self.tally.failed() > 0 { RED } else { GREEN };
+        let message = self.tally.summary(self.started.elapsed());
         let result = self.line(style, "Summary", &message);
         self.terminal.log(|log| log.finish(exit_status));
         result
@@ -307,12 +301,6 @@ impl Reporter {
         elapsed: Duration,
     ) -> io::Result<()> {
         let index = position(task);
-        if output.succeeded() {
-            self.passed += 1;
-        } else {
-            self.failed += 1;
-        }
-
         let (style, verb) = if output.succeeded() {
             (GREEN, "Finished")
         } else {
@@ -345,8 +333,6 @@ impl Reporter {
         elapsed: Duration,
     ) -> io::Result<()> {
         let index = position(task);
-        self.failed += 1;
-
         let message = format!("{} in {} ({error_kind})", self.id(index), seconds(elapsed));
         if self.layout == Layout::Plain {
             return Ok(());
@@ -356,10 +342,7 @@ impl Reporter {
     }
 
     fn blocked(&mut self, task: TaskIndex) -> io::Result<()> {
-        let index = task.position();
-        self.blocked += 1;
-
-        let id = self.id(index);
+        let id = self.id(task.position());
         if self.layout == Layout::Plain {
             return Ok(());
         }
@@ -468,24 +451,20 @@ impl Terminal {
         self.log(|log| log.status(verb, message));
     }
 
-    /// Writes to the run log, and gives the log up after one failure so the
-    /// run itself continues.
+    /// Writes to the run log, and warns once when the log closes.
     fn log(&self, action: impl FnOnce(&mut RunRecorder) -> io::Result<()>) {
-        let Ok(mut slot) = self.log.lock() else {
+        let Ok(mut log) = self.log.lock() else {
             return;
         };
-        let Some(log) = slot.as_mut() else {
-            return;
-        };
-        let Err(error) = action(log) else {
-            return;
-        };
-        *slot = None;
-        drop(slot);
-        let _ = self.line(
-            Target::Err,
-            &status_line(YELLOW, "Warning", &format!("run log: {error}")),
-        );
+        let failure = log.write(action);
+        // The warning writes a line of its own, so the log lock goes first.
+        drop(log);
+        if let Some(error) = failure {
+            let _ = self.line(
+                Target::Err,
+                &status_line(YELLOW, "Warning", &format!("run log: {error}")),
+            );
+        }
     }
 
     /// Holds the spinners still, then takes the stream lock, always in this

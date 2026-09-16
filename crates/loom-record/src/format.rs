@@ -34,8 +34,7 @@ pub fn status_text(exit_status: Option<i32>) -> String {
 }
 
 /// The counts that close a run.
-#[must_use]
-pub fn counts(passed: usize, failed: usize, blocked: usize) -> String {
+pub(crate) fn counts(passed: usize, failed: usize, blocked: usize) -> String {
     let mut counts = vec![format!("{passed} passed")];
     if failed > 0 {
         counts.push(format!("{failed} failed"));

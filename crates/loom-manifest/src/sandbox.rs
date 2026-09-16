@@ -1,6 +1,6 @@
 use loom_policy::{
     DomainGroup, DomainRule, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, NetworkPolicy,
-    SandboxPath, SandboxPolicy,
+    SandboxPath, SandboxPolicy, parse_all,
 };
 use serde::Deserialize;
 
@@ -139,15 +139,4 @@ impl TryFrom<ManifestExecutables> for ExecutablePolicy {
             parse_all::<SandboxPath>(&executables.allow)?,
         ))
     }
-}
-
-fn parse_all<T>(values: &[String]) -> Result<Vec<T>, String>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    values
-        .iter()
-        .map(|value| value.parse::<T>().map_err(|error| error.to_string()))
-        .collect()
 }

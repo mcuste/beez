@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use loom_daemon::{JobReport, Response, Status};
+use loom_record::status_text;
 
 /// Columns of the job table, in the order they are printed.
 const HEADINGS: [&str; 5] = ["JOB", "CONDITION", "SCHEDULE", "NEXT FIRE", "LAST RUN"];
@@ -66,9 +67,9 @@ fn last_run(job: &JobReport) -> String {
         return "-".to_owned();
     };
     match job.last_status {
-        Some(0) => format!("{directory} (ok)"),
-        Some(status) => format!("{directory} (exit {status})"),
+        // No status means the run never reached its end, so there is none to name.
         None => format!("{directory} (unfinished)"),
+        status => format!("{directory} ({})", status_text(status)),
     }
 }
 
