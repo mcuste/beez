@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fs;
 use std::process::{Command, Output};
 
-use loom_test_support::{TemporaryDirectory, fake_harness};
+use loom_test_support::{TemporaryDirectory, extended_path, fake_harness};
 
 /// `loom-process` unit tests cover each harness's arguments; this pins the result relay.
 #[test]
@@ -34,7 +34,7 @@ fn passes_the_model_and_effort_to_claude() {
             "high",
             "inspect the repository",
         ])
-        .env("PATH", directory.path())
+        .env("PATH", extended_path(directory.path()))
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -61,7 +61,7 @@ fn passes_the_effort_to_codex_as_a_config_override() {
             "high",
             "inspect the repository",
         ])
-        .env("PATH", directory.path())
+        .env("PATH", extended_path(directory.path()))
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -126,7 +126,7 @@ fn runs_a_workflow_codex_task_with_a_model_and_effort() {
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
         .args(["run", "workflow"])
         .arg(workflow)
-        .env("PATH", directory.path())
+        .env("PATH", extended_path(directory.path()))
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -152,7 +152,7 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
         .args(["run", "workflow"])
         .arg(workflow)
-        .env("PATH", directory.path())
+        .env("PATH", extended_path(directory.path()))
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -695,7 +695,7 @@ fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>>
     Command::new(env!("CARGO_BIN_EXE_loom"))
         .args(["run", name])
         .args(arguments)
-        .env("PATH", directory.path())
+        .env("PATH", extended_path(directory.path()))
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .map_err(Into::into)

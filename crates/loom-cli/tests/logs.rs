@@ -260,7 +260,7 @@ fn runs_a_harness_prompt_and_records_it() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
         .args(["run", "pi", "inspect the repository"])
-        .env("PATH", directory.path())
+        .env("PATH", loom_test_support::extended_path(directory.path()))
         .env("LOOM_LOG_DIR", &root)
         .output()
         .unwrap();

@@ -15,6 +15,9 @@ pub struct SandboxedCommand {
     _proxy: Proxy,
     #[cfg(target_os = "linux")]
     _bridge: crate::bubblewrap::Bridge,
+    // The guard gives the mask directories back once the child has ended.
+    #[cfg(target_os = "linux")]
+    _masks: crate::bubblewrap::HeldMasks,
 }
 
 impl SandboxedCommand {
@@ -65,12 +68,13 @@ impl SandboxedCommand {
             use crate::bubblewrap::{Bridge, HTTP_PORT, SOCKS_PORT};
 
             let bridge = Bridge::start(proxy.http_port(), proxy.socks_port())?;
-            let mut command = crate::bubblewrap::command(&resolved, &bridge, arguments)?;
+            let (mut command, masks) = crate::bubblewrap::command(&resolved, &bridge, arguments)?;
             configure(&mut command, &resolved, HTTP_PORT, SOCKS_PORT);
             Ok(Self {
                 command,
                 _proxy: proxy,
                 _bridge: bridge,
+                _masks: masks,
             })
         }
 

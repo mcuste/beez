@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 
-use loom_test_support::TemporaryDirectory;
+use loom_test_support::{TemporaryDirectory, extended_path};
 
 /// A temporary directory with an empty working directory inside it.
 fn working_directory(name: &str) -> io::Result<(TemporaryDirectory, PathBuf)> {
@@ -260,6 +260,16 @@ fn refuses_to_create_a_denied_directory_that_does_not_exist_yet() {
 }
 
 #[test]
+fn leaves_no_mount_point_behind_for_a_denied_path_that_does_not_exist_yet() {
+    let (directory, work) = working_directory("cli-sandbox-mask-cleanup").unwrap();
+
+    let output = run_workflow(&directory, &work, &manifest(PROTECTED_HOOKS, "true")).unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(!work.join(".git").exists());
+}
+
+#[test]
 fn refuses_to_create_a_denied_file_that_does_not_exist_yet() {
     let (directory, work) = working_directory("cli-sandbox-missing-deny-file").unwrap();
     let sandbox = "  filesystem:\n    defaults: false\n    write_allow: [\".\"]\n    write_deny: [\".mcp.json\"]\n";
@@ -439,12 +449,6 @@ fn applies_the_harness_environment_inside_the_sandbox() {
         .unwrap();
 
     assert_eq!(output.stdout, b"1-false", "{output:?}");
-}
-
-/// `directory` before the host `PATH`, which the sandbox needs for its own tools.
-fn extended_path(directory: &Path) -> String {
-    let host = std::env::var("PATH").unwrap_or_default();
-    format!("{}:{host}", directory.display())
 }
 
 /// Writes a `claude` stub that prints the harness environment it received.
