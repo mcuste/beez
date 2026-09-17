@@ -174,17 +174,18 @@ pub(crate) fn ids(jobs: &[Job]) -> Vec<String> {
 
 /// Checks the jobs of a manifest a command wants to watch, and names their IDs.
 ///
-/// `taken` names the first of the IDs that another watched manifest already
-/// uses. The error is the line the command answers with.
+/// `others` holds the job IDs of every other watched manifest. An ID one of
+/// them already uses is refused. The error is the line the command answers
+/// with.
 pub(crate) fn admit(
     jobs: &[Job],
-    taken: impl FnOnce(&[String]) -> Option<String>,
+    others: impl IntoIterator<Item = String>,
 ) -> Result<Vec<String>, String> {
     if let Some(error) = manifest_error(jobs) {
         return Err(error.to_owned());
     }
     let ids = ids(jobs);
-    if let Some(taken) = taken(&ids) {
+    if let Some(taken) = others.into_iter().find(|id| ids.contains(id)) {
         return Err(message::taken_id(&taken));
     }
 
@@ -197,21 +198,6 @@ fn manifest_error(jobs: &[Job]) -> Option<&str> {
     jobs.iter()
         .find(|job| job.schedule.is_none())
         .and_then(|job| job.error.as_deref())
-}
-
-/// The first job ID of `ids` that another watched manifest already uses.
-pub(crate) fn conflicting_id(
-    registry: &Registry,
-    states: &States,
-    manifest: &Path,
-    ids: &[String],
-) -> Option<String> {
-    registry
-        .manifests()
-        .iter()
-        .filter(|watched| watched.path != manifest)
-        .flat_map(|watched| ids_of(watched, states))
-        .find(|id| ids.contains(id))
 }
 
 /// The name a manifest gives its jobs.

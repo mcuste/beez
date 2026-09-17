@@ -157,15 +157,16 @@ fn rewrite_head(head: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
-    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, TcpStream};
     use std::thread;
 
     use super::{parse_request, read_head, rewrite_head, split_authority};
+    use crate::proxy::loopback_listener;
 
     /// A connected loopback pair, client end first.
     fn socket_pair() -> io::Result<(TcpStream, TcpStream)> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let client = TcpStream::connect(listener.local_addr()?)?;
+        let (listener, port) = loopback_listener()?;
+        let client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))?;
         let (server, _) = listener.accept()?;
         Ok((client, server))
     }

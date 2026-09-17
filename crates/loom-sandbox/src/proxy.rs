@@ -75,7 +75,7 @@ impl Proxy {
 }
 
 /// A listener on an ephemeral loopback port, with the port it got.
-fn loopback_listener() -> io::Result<(TcpListener, u16)> {
+pub(crate) fn loopback_listener() -> io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     Ok((listener, port))

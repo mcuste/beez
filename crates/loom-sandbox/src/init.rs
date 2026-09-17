@@ -151,7 +151,7 @@ fn serve_relay(listener: TcpListener, socket: &Path) -> Server {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::io::{self, Read, Write};
-    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, Shutdown, TcpStream};
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
@@ -161,6 +161,7 @@ mod tests {
     use loom_test_support::TemporaryDirectory;
 
     use super::{Server, parse_relay, relay_argument, serve_relay, wait_for_listener};
+    use crate::proxy::{loopback, loopback_listener};
 
     #[test]
     fn reads_back_every_relay_argument_it_writes() {
@@ -210,11 +211,10 @@ mod tests {
 
     #[test]
     fn stops_waiting_for_a_listener_that_never_starts() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, port) = loopback_listener().unwrap();
         drop(listener);
 
-        let error = wait_for_listener(address, Duration::from_millis(50)).unwrap_err();
+        let error = wait_for_listener(loopback(port), Duration::from_millis(50)).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
@@ -222,8 +222,7 @@ mod tests {
     /// Serves `socket` on an ephemeral loopback port, which it returns with
     /// the server that must stay alive while the test runs.
     fn start_relay(socket: &Path) -> (Server, u16) {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (listener, port) = loopback_listener().unwrap();
 
         (serve_relay(listener, socket), port)
     }

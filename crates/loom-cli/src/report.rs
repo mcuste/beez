@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anstream::AutoStream;
 use anstyle::{AnsiColor, Color, Effects, Style};
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use loom_process::{OutputStream, ProcessOutput};
 use loom_record::{
@@ -46,6 +46,32 @@ pub(crate) enum ColorMode {
     Always,
     /// Never colour.
     Never,
+}
+
+/// How Loom draws a run on the terminal.
+///
+/// The default draws the way a direct request does: streamed, coloured on a
+/// terminal, without timestamps.
+#[derive(Args, Clone, Copy, Debug, Default)]
+pub(crate) struct RenderOptions {
+    /// How to render the output of the tasks.
+    #[arg(long, value_enum, default_value_t)]
+    output: OutputMode,
+    /// When to colour Loom's own output.
+    #[arg(long, value_enum, default_value_t)]
+    color: ColorMode,
+    /// Prefix every line Loom writes with a timestamp.
+    ///
+    /// A value needs an equals sign, so the bare flag cannot take the path of
+    /// the manifest as its value.
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "date-time"
+    )]
+    timestamps: Option<Timestamps>,
 }
 
 /// Colours for task prefixes. Red stays free for failures.
@@ -140,17 +166,15 @@ impl Reporter {
     /// relays its streams unchanged.
     pub(crate) fn new(
         target: &RunTarget<'_>,
-        mode: OutputMode,
-        color: ColorMode,
-        timestamps: Option<Timestamps>,
+        render: RenderOptions,
         settings: LogSettings<'_>,
         working_directory: &Path,
     ) -> Self {
         let labels = target.labels();
-        let layout = resolve_layout(mode, labels.len());
+        let layout = resolve_layout(render.output, labels.len());
         let bars = (layout == Layout::Stream)
             .then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr()));
-        let choice = color_choice(color);
+        let choice = color_choice(render.color);
         let (log, failure) = OpenLog::open(settings, target, working_directory);
         let directory = log.directory().map(Path::to_path_buf);
         let terminal = Arc::new(Terminal {
@@ -161,7 +185,7 @@ impl Reporter {
             }),
             log: Mutex::new(log),
             started: Instant::now(),
-            timestamps,
+            timestamps: render.timestamps,
         });
         // A plain run relays the bytes of its task, so Loom keeps quiet there.
         if layout != Layout::Plain {

@@ -380,15 +380,11 @@ mod tests {
         ExecutableGroup, ExecutablePolicy, FilesystemPolicy, HeadlessHarness, NetworkPolicy,
         SandboxPath, SandboxPolicy,
     };
-    use loom_test_support::TemporaryDirectory;
+    use loom_test_support::{TemporaryDirectory, text};
 
     use super::{
         ResolvedSandbox, canonicalize_lenient, git_helper_directories, shebang_interpreters,
     };
-
-    fn text(path: &Path) -> String {
-        path.to_string_lossy().into_owned()
-    }
 
     fn canonical(path: &Path) -> PathBuf {
         fs::canonicalize(path).unwrap()

@@ -9,12 +9,13 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::thread;
 
-use loom_test_support::{TemporaryDirectory, assert_never_reached, extended_path, unused_origin};
+use loom_test_support::{
+    TemporaryDirectory, assert_never_reached, extended_path, loopback_listener, unused_origin,
+};
 
 mod common;
 
@@ -318,8 +319,7 @@ fn runs_a_program_from_an_enabled_executable_group() {
 
 /// Accepts one connection and answers a fixed HTTP response.
 fn http_origin() -> io::Result<u16> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let port = listener.local_addr()?.port();
+    let (listener, port) = loopback_listener()?;
     thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buffer = [0_u8; 1024];

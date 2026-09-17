@@ -78,10 +78,12 @@ pub fn add(paths: &DaemonPaths, manifest: &Path) -> io::Result<Response> {
     };
     let (registry, states) = store::load_all(paths)?;
     let jobs = job::jobs_of(&watched, &states);
-    let admitted = job::admit(&jobs, |ids| {
-        job::conflicting_id(&registry, &states, &watched.path, ids)
-    });
-    if let Err(error) = admitted {
+    let others = registry
+        .manifests()
+        .iter()
+        .filter(|other| other.path != watched.path)
+        .flat_map(|other| job::ids_of(other, &states));
+    if let Err(error) = job::admit(&jobs, others) {
         return Ok(Response::error(error));
     }
     write_registry(paths, registry, watched)

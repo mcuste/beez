@@ -1,10 +1,16 @@
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 
-/// A loopback listener that never accepts, to check that nothing reaches it.
-pub fn unused_origin() -> io::Result<(u16, TcpListener)> {
+/// A listener on an ephemeral loopback port, with the port it got.
+pub fn loopback_listener() -> io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
+    Ok((listener, port))
+}
+
+/// A loopback listener that never accepts, to check that nothing reaches it.
+pub fn unused_origin() -> io::Result<(u16, TcpListener)> {
+    let (listener, port) = loopback_listener()?;
     listener.set_nonblocking(true)?;
     Ok((port, listener))
 }

@@ -51,6 +51,27 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// A `nightly.yaml` in its own directory. Two of them give their jobs one ID.
+fn nightly_in(
+    directory: &TemporaryDirectory,
+    subdirectory: &str,
+    marker: &Path,
+) -> io::Result<PathBuf> {
+    fs::create_dir(directory.join(subdirectory))?;
+    directory.write(
+        &format!("{subdirectory}/nightly.yaml"),
+        ticking("  cron: \"0 3 * * *\"\n", marker),
+    )
+}
+
+fn assert_refused_as_taken(output: &Output) {
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("already comes from another manifest"),
+        "{output:?}"
+    );
+}
+
 /// Waits for `condition`, and reports what the daemon logged if it never holds.
 fn wait_for(root: &Path, what: &str, condition: impl Fn() -> bool) -> io::Result<()> {
     let started = Instant::now();
@@ -174,6 +195,36 @@ fn refuses_a_manifest_that_names_no_schedule() {
         String::from_utf8_lossy(&output.stderr).contains("no schedule section"),
         "{output:?}"
     );
+}
+
+#[test]
+fn refuses_a_job_id_another_manifest_uses_before_the_daemon_starts() {
+    let directory = TemporaryDirectory::new("daemon-taken-id").unwrap();
+    let root = directory.join("root");
+    let marker = directory.join("marker");
+    let first = nightly_in(&directory, "a", &marker).unwrap();
+    let second = nightly_in(&directory, "b", &marker).unwrap();
+    add(&root, &first).unwrap();
+
+    let output = add(&root, &second).unwrap();
+
+    assert_refused_as_taken(&output);
+}
+
+#[test]
+fn refuses_a_job_id_another_manifest_uses_while_the_daemon_runs() {
+    let directory = TemporaryDirectory::new("daemon-taken-id-running").unwrap();
+    let root = directory.join("root");
+    let marker = directory.join("marker");
+    let first = nightly_in(&directory, "a", &marker).unwrap();
+    let second = nightly_in(&directory, "b", &marker).unwrap();
+    add(&root, &first).unwrap();
+    let daemon = start(&root).unwrap();
+
+    let output = add(&root, &second).unwrap();
+    drop(daemon);
+
+    assert_refused_as_taken(&output);
 }
 
 #[test]

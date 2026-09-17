@@ -19,7 +19,7 @@ use loom_runner::Runner;
 mod report;
 mod schedule;
 
-use report::{ColorMode, OutputMode, Reporter, Timestamps};
+use report::{RenderOptions, Reporter};
 
 #[derive(Debug, Parser)]
 #[command(name = "loom", version)]
@@ -157,24 +157,8 @@ impl RootArgs {
 #[derive(Debug, Args)]
 struct WorkflowFile {
     path: PathBuf,
-    /// How to render the output of the tasks.
-    #[arg(long, value_enum, default_value_t = OutputMode::Stream)]
-    output: OutputMode,
-    /// When to colour Loom's own output.
-    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
-    color: ColorMode,
-    /// Prefix every line Loom writes with a timestamp.
-    ///
-    /// A value needs an equals sign, so the bare flag cannot take the path of
-    /// the manifest as its value.
-    #[arg(
-        long,
-        value_enum,
-        num_args = 0..=1,
-        require_equals = true,
-        default_missing_value = "date-time"
-    )]
-    timestamps: Option<Timestamps>,
+    #[command(flatten)]
+    render: RenderOptions,
     #[command(flatten)]
     log: LogArgs,
 }
@@ -316,13 +300,7 @@ fn run(cli: Cli) -> io::Result<i32> {
 }
 
 fn run_workflow(file: WorkflowFile) -> io::Result<i32> {
-    let WorkflowFile {
-        path,
-        output,
-        color,
-        timestamps,
-        log,
-    } = file;
+    let WorkflowFile { path, render, log } = file;
     let workflow = load(&path)
         .map(loom_manifest::Manifest::into_workflow)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
@@ -331,14 +309,9 @@ fn run_workflow(file: WorkflowFile) -> io::Result<i32> {
         workflow: &workflow,
     };
 
-    run_reported(
-        &target,
-        output,
-        color,
-        timestamps,
-        log.settings(),
-        |runner, reporter| runner.run_workflow(&workflow, &mut |event| reporter.event(event)),
-    )
+    run_reported(&target, render, log.settings(), |runner, reporter| {
+        runner.run_workflow(&workflow, &mut |event| reporter.event(event))
+    })
 }
 
 fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
@@ -380,9 +353,7 @@ fn run_request(
 
     run_reported(
         &target,
-        OutputMode::Stream,
-        ColorMode::Auto,
-        None,
+        RenderOptions::default(),
         log.settings(),
         |runner, reporter| {
             runner.run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event))
@@ -394,14 +365,12 @@ fn run_request(
 /// run's own report before returning its status.
 fn run_reported(
     target: &RunTarget<'_>,
-    output: OutputMode,
-    color: ColorMode,
-    timestamps: Option<Timestamps>,
+    render: RenderOptions,
     log: LogSettings<'_>,
     run: impl FnOnce(&Runner, &mut Reporter) -> io::Result<i32>,
 ) -> io::Result<i32> {
     let working_directory = std::env::current_dir()?;
-    let mut reporter = Reporter::new(target, output, color, timestamps, log, &working_directory);
+    let mut reporter = Reporter::new(target, render, log, &working_directory);
     loom_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
 
     let status = run(&Runner::new(&working_directory), &mut reporter);

@@ -370,7 +370,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use loom_test_support::TemporaryDirectory;
+    use loom_test_support::{TemporaryDirectory, text};
 
     use super::{Bridge, HTTP_PORT, MaskPlan, SOCKS_PORT, bwrap_arguments};
     use crate::resolve::ResolvedSandbox;
@@ -417,10 +417,6 @@ mod tests {
     /// True when `expected` appears as consecutive arguments.
     fn has_run(arguments: &[String], expected: &[&str]) -> bool {
         run_at(arguments, expected).is_some()
-    }
-
-    fn text(path: &Path) -> String {
-        path.to_string_lossy().into_owned()
     }
 
     #[test]

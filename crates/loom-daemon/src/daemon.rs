@@ -6,7 +6,7 @@
 
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -308,7 +308,12 @@ impl Daemon {
             working_directory,
         };
         let jobs = job::jobs_of(&watched, &self.states);
-        let names = match job::admit(&jobs, |ids| self.taken_id(ids, &watched.path)) {
+        let others = self
+            .jobs
+            .iter()
+            .filter(|other| other.manifest != watched.path)
+            .map(|other| other.id.clone());
+        let names = match job::admit(&jobs, others) {
             Ok(ids) => ids.join(", "),
             Err(error) => return Response::error(error),
         };
@@ -325,16 +330,14 @@ impl Daemon {
         Response::done(format!("{watching} as {names}"))
     }
 
-    fn remove(&mut self, manifest: &PathBuf) -> Response {
+    fn remove(&mut self, manifest: &Path) -> Response {
         let response = match apply::unwatch(&mut self.registry, &self.paths, manifest) {
             Ok(response @ Response::Done { .. }) => response,
             Ok(response) => return response,
             Err(error) => return Response::error(message::unwritable_registry(&error)),
         };
         // A run of this manifest keeps going, and reports itself as it ends.
-        self.jobs.retain(|job| &job.manifest != manifest);
-        self.manifests
-            .retain(|entry| &entry.watched.path != manifest);
+        self.retain_manifests(|path| path != manifest);
         self.prune_states();
         report::line("Watching", &format!("dropped {}", manifest.display()));
 
@@ -400,10 +403,8 @@ impl Daemon {
             ),
         }
         let watched: Vec<Watched> = self.registry.manifests().to_vec();
-        let holds = |path: &PathBuf| watched.iter().any(|entry| &entry.path == path);
         // A manifest that left the list keeps its running run, and nothing else.
-        self.jobs.retain(|job| holds(&job.manifest));
-        self.manifests.retain(|entry| holds(&entry.watched.path));
+        self.retain_manifests(|path| watched.iter().any(|entry| entry.path == path));
         for entry in &watched {
             self.reload(entry, now);
         }
@@ -451,6 +452,12 @@ impl Daemon {
                 report::line("Broken", &format!("{}: {error}", job.id));
             }
         }
+    }
+
+    /// Drops the jobs and the watch of every manifest `keep` refuses.
+    fn retain_manifests(&mut self, keep: impl Fn(&Path) -> bool) {
+        self.jobs.retain(|job| keep(&job.manifest));
+        self.manifests.retain(|entry| keep(&entry.watched.path));
     }
 
     fn remember_modified(&mut self, watched: &Watched) {
@@ -669,14 +676,6 @@ impl Daemon {
             .iter_mut()
             .enumerate()
             .find(|(_, job)| job.id == id)
-    }
-
-    /// The first ID that another manifest already uses.
-    fn taken_id(&self, ids: &[String], manifest: &PathBuf) -> Option<String> {
-        self.jobs
-            .iter()
-            .find(|job| &job.manifest != manifest && ids.contains(&job.id))
-            .map(|job| job.id.clone())
     }
 
     fn save_state(&mut self, index: usize) {

@@ -1,21 +1,20 @@
 //! Proxy allowlist tests against a local origin server.
 
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use loom_policy::DomainRule;
 use loom_sandbox::Proxy;
-use loom_test_support::{assert_never_reached, unused_origin};
+use loom_test_support::{assert_never_reached, loopback_listener, unused_origin};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKS_GREETING: [u8; 3] = [5, 1, 0];
 
 /// Accepts one connection and echoes every byte until the peer stops writing.
 fn echo_origin() -> io::Result<(u16, JoinHandle<io::Result<Vec<u8>>>)> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let port = listener.local_addr()?.port();
+    let (listener, port) = loopback_listener()?;
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(TIMEOUT))?;
