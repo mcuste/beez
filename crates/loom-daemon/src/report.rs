@@ -7,9 +7,9 @@
 
 use std::time::SystemTime;
 
-use loom_record::{status_line, utc};
+use loom_record::stamped_status_line;
 
 /// Writes one line of the daemon's own log.
 pub(crate) fn line(verb: &str, message: &str) {
-    eprintln!("{} {}", utc(SystemTime::now()), status_line(verb, message));
+    eprintln!("{}", stamped_status_line(SystemTime::now(), verb, message));
 }

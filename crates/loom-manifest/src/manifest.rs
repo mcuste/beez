@@ -134,12 +134,7 @@ impl ManifestTask {
             }
             _ => return Err("task must define either harness and prompt, or command".into()),
         };
-        let definition = TaskDefinition::new(id, depends_on, request);
-
-        Ok(match sandbox {
-            Some(policy) => definition.sandboxed(policy),
-            None => definition,
-        })
+        Ok(TaskDefinition::new(id, depends_on, request).sandboxed(sandbox))
     }
 }
 

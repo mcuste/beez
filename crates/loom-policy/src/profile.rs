@@ -93,7 +93,7 @@ mod tests {
     /// state path its own configuration directory stays read-only.
     #[test]
     fn builds_a_usable_profile_for_every_harness() {
-        for harness in HeadlessHarness::ALL {
+        for &harness in HeadlessHarness::ALL {
             let sut = HarnessProfile::for_harness(harness);
 
             assert!(

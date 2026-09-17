@@ -239,8 +239,9 @@ fn reports_direct_start_failures_as_terminal_events() {
     let directory = assert_ok!(TemporaryDirectory::new("runner-direct-missing-program"));
     let mut events = Vec::new();
 
-    let error = assert_err!(Runner::here().unwrap().run_request(
+    let error = assert_err!(Runner::here().unwrap().run_request_in(
         ExecutionRequest::Command(ProcessCall::new(directory.path().join("missing-program"))),
+        None,
         &mut |event| {
             record_event(&mut events, event);
             Ok(())
@@ -275,7 +276,9 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
     let error = assert_err!(
         Runner::here()
             .unwrap()
-            .run_request(request, &mut |_| Err(io::Error::other("cannot report")),)
+            .run_request_in(request, None, &mut |_| Err(io::Error::other(
+                "cannot report"
+            )),)
     );
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -660,14 +663,14 @@ fn runs_sandboxed_tasks_inside_the_sandbox() {
             "bash",
             arguments(&["-c", "printf open"]),
         ))
-        .sandboxed(policy.clone()),
+        .sandboxed(Some(policy.clone())),
         assert_ok!(command_task(
             "leak",
             &[],
             "bash",
             arguments(&["-c", &format!("printf leak > {}", outside.display())]),
         ))
-        .sandboxed(policy),
+        .sandboxed(Some(policy)),
     ]));
     let mut events = Vec::new();
 

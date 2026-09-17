@@ -30,6 +30,27 @@ pub(crate) struct Job {
 }
 
 impl Job {
+    /// A job of one watched manifest that has not fired yet.
+    fn new(
+        id: String,
+        watched: &Watched,
+        schedule: Option<JobSchedule>,
+        error: Option<String>,
+        states: &States,
+    ) -> Self {
+        Self {
+            state: states.get(&id),
+            id,
+            manifest: watched.path.clone(),
+            working_directory: watched.working_directory.clone(),
+            schedule,
+            error,
+            next_fire: None,
+            running: false,
+            queued: false,
+        }
+    }
+
     /// True when the job may fire.
     pub(crate) fn is_ready(&self) -> bool {
         self.error.is_none()
@@ -132,17 +153,7 @@ pub(crate) fn jobs_of(watched: &Watched, states: &States) -> Vec<Job> {
                 "every task must set a sandbox, or the schedule must set allow_unsandboxed: true"
                     .to_owned()
             });
-            Job {
-                state: states.get(&id),
-                id,
-                manifest: watched.path.clone(),
-                working_directory: watched.working_directory.clone(),
-                schedule: Some(schedule.clone()),
-                error,
-                next_fire: None,
-                running: false,
-                queued: false,
-            }
+            Job::new(id, watched, Some(schedule.clone()), error, states)
         })
         .collect()
 }
@@ -195,15 +206,11 @@ fn every_task_sandboxed(manifest: &Manifest) -> bool {
 
 /// A job that names its manifest's problem instead of running.
 fn broken(stem: &str, watched: &Watched, states: &States, error: &str) -> Job {
-    Job {
-        id: stem.to_owned(),
-        manifest: watched.path.clone(),
-        working_directory: watched.working_directory.clone(),
-        schedule: None,
-        error: Some(error.to_owned()),
-        next_fire: None,
-        running: false,
-        queued: false,
-        state: states.get(stem),
-    }
+    Job::new(
+        stem.to_owned(),
+        watched,
+        None,
+        Some(error.to_owned()),
+        states,
+    )
 }

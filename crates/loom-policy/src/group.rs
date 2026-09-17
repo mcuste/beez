@@ -1,7 +1,6 @@
 use std::fmt;
-use std::str::FromStr;
 
-use crate::named::{self, Named};
+use crate::named::{self, name_table, parse_by_name};
 use crate::{DomainRule, SandboxPath, parse_valid};
 
 /// Reports an unknown group name.
@@ -97,78 +96,42 @@ pub enum DomainGroup {
     Playwright,
 }
 
+name_table!(pub DomainGroup {
+    Anthropic => "anthropic",
+    OpenAi => "openai",
+    Google => "google",
+    OpenRouter => "openrouter",
+    Bedrock => "bedrock",
+    Vertex => "vertex",
+    AzureOpenAi => "azure-openai",
+    Mistral => "mistral",
+    DeepSeek => "deepseek",
+    Xai => "xai",
+    Groq => "groq",
+    Ollama => "ollama",
+    HuggingFace => "huggingface",
+    ClaudeOptional => "claude-optional",
+    ClaudeTelemetry => "claude-telemetry",
+    Github => "github",
+    Gitlab => "gitlab",
+    Bitbucket => "bitbucket",
+    Npm => "npm",
+    Pypi => "pypi",
+    Crates => "crates",
+    Go => "go",
+    Rubygems => "rubygems",
+    Maven => "maven",
+    Nuget => "nuget",
+    Homebrew => "homebrew",
+    DockerHub => "docker-hub",
+    ContainerRegistry => "container-registry",
+    Hashicorp => "hashicorp",
+    Playwright => "playwright",
+});
+
+parse_by_name!(DomainGroup, GroupError::UnknownDomainGroup);
+
 impl DomainGroup {
-    /// Every domain group, in `FromStr` name order.
-    pub const ALL: [Self; 30] = [
-        Self::Anthropic,
-        Self::OpenAi,
-        Self::Google,
-        Self::OpenRouter,
-        Self::Bedrock,
-        Self::Vertex,
-        Self::AzureOpenAi,
-        Self::Mistral,
-        Self::DeepSeek,
-        Self::Xai,
-        Self::Groq,
-        Self::Ollama,
-        Self::HuggingFace,
-        Self::ClaudeOptional,
-        Self::ClaudeTelemetry,
-        Self::Github,
-        Self::Gitlab,
-        Self::Bitbucket,
-        Self::Npm,
-        Self::Pypi,
-        Self::Crates,
-        Self::Go,
-        Self::Rubygems,
-        Self::Maven,
-        Self::Nuget,
-        Self::Homebrew,
-        Self::DockerHub,
-        Self::ContainerRegistry,
-        Self::Hashicorp,
-        Self::Playwright,
-    ];
-
-    /// The name a manifest uses for the group.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
-            Self::Google => "google",
-            Self::OpenRouter => "openrouter",
-            Self::Bedrock => "bedrock",
-            Self::Vertex => "vertex",
-            Self::AzureOpenAi => "azure-openai",
-            Self::Mistral => "mistral",
-            Self::DeepSeek => "deepseek",
-            Self::Xai => "xai",
-            Self::Groq => "groq",
-            Self::Ollama => "ollama",
-            Self::HuggingFace => "huggingface",
-            Self::ClaudeOptional => "claude-optional",
-            Self::ClaudeTelemetry => "claude-telemetry",
-            Self::Github => "github",
-            Self::Gitlab => "gitlab",
-            Self::Bitbucket => "bitbucket",
-            Self::Npm => "npm",
-            Self::Pypi => "pypi",
-            Self::Crates => "crates",
-            Self::Go => "go",
-            Self::Rubygems => "rubygems",
-            Self::Maven => "maven",
-            Self::Nuget => "nuget",
-            Self::Homebrew => "homebrew",
-            Self::DockerHub => "docker-hub",
-            Self::ContainerRegistry => "container-registry",
-            Self::Hashicorp => "hashicorp",
-            Self::Playwright => "playwright",
-        }
-    }
-
     /// Host rules in the group, in `DomainRule` syntax.
     #[must_use]
     pub fn domains(self) -> &'static [&'static str] {
@@ -264,30 +227,6 @@ impl DomainGroup {
     }
 }
 
-impl Named for DomainGroup {
-    fn all() -> &'static [Self] {
-        &Self::ALL
-    }
-
-    fn named(self) -> &'static str {
-        self.name()
-    }
-}
-
-impl FromStr for DomainGroup {
-    type Err = GroupError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        named::from_name(value).ok_or_else(|| GroupError::UnknownDomainGroup(value.to_owned()))
-    }
-}
-
-impl fmt::Display for DomainGroup {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
-
 /// A named set of programs a task may run.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ExecutableGroup {
@@ -325,50 +264,28 @@ pub enum ExecutableGroup {
     Process,
 }
 
+name_table!(pub ExecutableGroup {
+    Coreutils => "coreutils",
+    Text => "text",
+    Git => "git",
+    Net => "net",
+    Node => "node",
+    Python => "python",
+    Rust => "rust",
+    Go => "go",
+    Jvm => "jvm",
+    Ruby => "ruby",
+    Dotnet => "dotnet",
+    Zig => "zig",
+    Build => "build",
+    Container => "container",
+    Iac => "iac",
+    Process => "process",
+});
+
+parse_by_name!(ExecutableGroup, GroupError::UnknownExecutableGroup);
+
 impl ExecutableGroup {
-    /// Every executable group, in `FromStr` name order.
-    pub const ALL: [Self; 16] = [
-        Self::Coreutils,
-        Self::Text,
-        Self::Git,
-        Self::Net,
-        Self::Node,
-        Self::Python,
-        Self::Rust,
-        Self::Go,
-        Self::Jvm,
-        Self::Ruby,
-        Self::Dotnet,
-        Self::Zig,
-        Self::Build,
-        Self::Container,
-        Self::Iac,
-        Self::Process,
-    ];
-
-    /// The name a manifest uses for the group.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Coreutils => "coreutils",
-            Self::Text => "text",
-            Self::Git => "git",
-            Self::Net => "net",
-            Self::Node => "node",
-            Self::Python => "python",
-            Self::Rust => "rust",
-            Self::Go => "go",
-            Self::Jvm => "jvm",
-            Self::Ruby => "ruby",
-            Self::Dotnet => "dotnet",
-            Self::Zig => "zig",
-            Self::Build => "build",
-            Self::Container => "container",
-            Self::Iac => "iac",
-            Self::Process => "process",
-        }
-    }
-
     /// Program names in the group, looked up on `PATH` at launch.
     #[must_use]
     pub fn programs(self) -> &'static [&'static str] {
@@ -511,70 +428,36 @@ pub(crate) enum PathGroup {
     IacState,
 }
 
+name_table!(pub(crate) PathGroup {
+    Keys => "keys",
+    Cloud => "cloud",
+    Logins => "logins",
+    Tokens => "tokens",
+    History => "history",
+    Secrets => "secrets",
+    Workspace => "workspace",
+    Git => "git",
+    Ci => "ci",
+    Editor => "editor",
+    Toolchain => "toolchain",
+    Harness => "harness",
+    Artifacts => "artifacts",
+    ClaudeState => "claude-state",
+    CodexState => "codex-state",
+    PiState => "pi-state",
+    OmpState => "omp-state",
+    NodeState => "node-state",
+    PythonState => "python-state",
+    RustState => "rust-state",
+    GoState => "go-state",
+    JvmState => "jvm-state",
+    RubyState => "ruby-state",
+    DotnetState => "dotnet-state",
+    ZigState => "zig-state",
+    IacState => "iac-state",
+});
+
 impl PathGroup {
-    /// Every path group.
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 26] = [
-        Self::Keys,
-        Self::Cloud,
-        Self::Logins,
-        Self::Tokens,
-        Self::History,
-        Self::Secrets,
-        Self::Workspace,
-        Self::Git,
-        Self::Ci,
-        Self::Editor,
-        Self::Toolchain,
-        Self::Harness,
-        Self::Artifacts,
-        Self::ClaudeState,
-        Self::CodexState,
-        Self::PiState,
-        Self::OmpState,
-        Self::NodeState,
-        Self::PythonState,
-        Self::RustState,
-        Self::GoState,
-        Self::JvmState,
-        Self::RubyState,
-        Self::DotnetState,
-        Self::ZigState,
-        Self::IacState,
-    ];
-
-    /// The name Loom uses for the group.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Keys => "keys",
-            Self::Cloud => "cloud",
-            Self::Logins => "logins",
-            Self::Tokens => "tokens",
-            Self::History => "history",
-            Self::Secrets => "secrets",
-            Self::Workspace => "workspace",
-            Self::Git => "git",
-            Self::Ci => "ci",
-            Self::Editor => "editor",
-            Self::Toolchain => "toolchain",
-            Self::Harness => "harness",
-            Self::Artifacts => "artifacts",
-            Self::ClaudeState => "claude-state",
-            Self::CodexState => "codex-state",
-            Self::PiState => "pi-state",
-            Self::OmpState => "omp-state",
-            Self::NodeState => "node-state",
-            Self::PythonState => "python-state",
-            Self::RustState => "rust-state",
-            Self::GoState => "go-state",
-            Self::JvmState => "jvm-state",
-            Self::RubyState => "ruby-state",
-            Self::DotnetState => "dotnet-state",
-            Self::ZigState => "zig-state",
-            Self::IacState => "iac-state",
-        }
-    }
-
     /// Paths in the group, in `SandboxPath` syntax.
     pub(crate) fn paths(self) -> &'static [&'static str] {
         match self {
@@ -638,36 +521,6 @@ impl PathGroup {
     }
 }
 
-impl fmt::Display for PathGroup {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
-
-impl Named for ExecutableGroup {
-    fn all() -> &'static [Self] {
-        &Self::ALL
-    }
-
-    fn named(self) -> &'static str {
-        self.name()
-    }
-}
-
-impl FromStr for ExecutableGroup {
-    type Err = GroupError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        named::from_name(value).ok_or_else(|| GroupError::UnknownExecutableGroup(value.to_owned()))
-    }
-}
-
-impl fmt::Display for ExecutableGroup {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{DomainGroup, ExecutableGroup, GroupError, PathGroup};
@@ -675,10 +528,10 @@ mod tests {
 
     #[test]
     fn parses_every_group_name() {
-        for group in DomainGroup::ALL {
+        for &group in DomainGroup::ALL {
             assert_eq!(group.name().parse::<DomainGroup>(), Ok(group));
         }
-        for group in ExecutableGroup::ALL {
+        for &group in ExecutableGroup::ALL {
             assert_eq!(group.name().parse::<ExecutableGroup>(), Ok(group));
         }
     }

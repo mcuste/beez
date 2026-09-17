@@ -17,11 +17,10 @@ use serde::Serialize;
 
 use crate::control::{self, JobReport, Request, Response};
 use crate::job::{self, Job, WatchedManifest};
-use crate::message;
 use crate::paths::DaemonPaths;
-use crate::report;
 use crate::run::{self, JobRun, RunOutcome};
 use crate::store::{self, Registry, States, Watched};
+use crate::{apply, message, report};
 
 /// How many runs the daemon starts at the same time.
 ///
@@ -312,30 +311,25 @@ impl Daemon {
         if let Some(taken) = self.taken_id(&ids, &watched.path) {
             return Response::error(message::taken_id(&taken));
         }
-        let added = self.registry.add(watched.clone());
-        if let Err(error) = self.registry.save(&self.paths.manifests()) {
-            return Response::error(message::unwritable_registry(&error));
-        }
+        let watching = match apply::watch(&mut self.registry, &self.paths, watched.clone()) {
+            Ok(watching) => watching,
+            Err(error) => return Response::error(message::unwritable_registry(&error)),
+        };
         self.reload(&watched, now);
         report::line(
             "Watching",
             &format!("{} as {}", watched.path.display(), ids.join(", ")),
         );
 
-        Response::done(format!(
-            "{} as {}",
-            message::watching(&watched.path, added),
-            ids.join(", ")
-        ))
+        Response::done(format!("{watching} as {}", ids.join(", ")))
     }
 
     fn remove(&mut self, manifest: &PathBuf) -> Response {
-        if !self.registry.remove(manifest) {
-            return Response::error(message::not_watched(manifest));
-        }
-        if let Err(error) = self.registry.save(&self.paths.manifests()) {
-            return Response::error(message::unwritable_registry(&error));
-        }
+        let response = match apply::unwatch(&mut self.registry, &self.paths, manifest) {
+            Ok(response @ Response::Done { .. }) => response,
+            Ok(response) => return response,
+            Err(error) => return Response::error(message::unwritable_registry(&error)),
+        };
         // A run of this manifest keeps going, and reports itself as it ends.
         self.jobs.retain(|job| &job.manifest != manifest);
         self.manifests
@@ -343,7 +337,7 @@ impl Daemon {
         self.prune_states();
         report::line("Watching", &format!("dropped {}", manifest.display()));
 
-        Response::done(message::stopped_watching(manifest))
+        response
     }
 
     fn hold(&mut self, id: &str, paused: bool, now: SystemTime) -> Response {

@@ -94,15 +94,6 @@ impl Runner {
         ProcessRunner::here().map(|processes| Self { processes })
     }
 
-    /// Runs one request without a sandbox.
-    pub fn run_request(
-        &self,
-        request: ExecutionRequest,
-        on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
-    ) -> io::Result<i32> {
-        self.run_request_in(request, None, on_event)
-    }
-
     /// Runs one request, inside a sandbox when a policy is given.
     pub fn run_request_in(
         &self,

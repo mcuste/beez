@@ -132,6 +132,36 @@ fn watches_a_manifest_before_the_daemon_starts() {
 }
 
 #[test]
+fn pauses_and_removes_a_job_before_the_daemon_starts() {
+    let directory = TemporaryDirectory::new("daemon-stopped-commands").unwrap();
+    let root = directory.join("root");
+    let path = manifest(
+        &directory,
+        "nightly",
+        &ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
+    )
+    .unwrap();
+    let path = path.to_string_lossy();
+    add(&root, Path::new(&*path)).unwrap();
+
+    let paused = loom(&root, &["schedule", "pause", "nightly"]).unwrap();
+    let held = loom(&root, &["schedule", "list"]).unwrap();
+    let resumed = loom(&root, &["schedule", "resume", "nightly"]).unwrap();
+    let released = loom(&root, &["schedule", "list"]).unwrap();
+    let removed = loom(&root, &["schedule", "remove", &path]).unwrap();
+    let again = loom(&root, &["schedule", "remove", &path]).unwrap();
+    let listed = loom(&root, &["schedule", "list"]).unwrap();
+
+    assert!(paused.status.success(), "{paused:?}");
+    assert!(stdout(&held).contains("paused"), "{held:?}");
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(stdout(&released).contains("waiting"), "{released:?}");
+    assert!(stdout(&removed).contains("stopped watching"), "{removed:?}");
+    assert!(!again.status.success(), "{again:?}");
+    assert!(!stdout(&listed).contains("nightly"), "{listed:?}");
+}
+
+#[test]
 fn refuses_a_manifest_that_names_no_schedule() {
     let directory = TemporaryDirectory::new("daemon-no-schedule").unwrap();
     let root = directory.join("root");

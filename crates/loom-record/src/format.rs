@@ -1,9 +1,11 @@
 //! The shape of one line of `run.log`, shared with Loom's terminal output.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use loom_process::OutputStream;
+
+use crate::time::utc;
 
 /// Width of the status word column, as wide as the longest word.
 pub const VERB_WIDTH: usize = 8;
@@ -16,6 +18,12 @@ const STDERR_MARK: &str = "\u{250a}";
 #[must_use]
 pub fn status_line(verb: &str, message: &str) -> String {
     format!("{verb:<VERB_WIDTH$}  {message}")
+}
+
+/// One of Loom's own lines with the time in front, as a log writes it.
+#[must_use]
+pub fn stamped_status_line(time: SystemTime, verb: &str, message: &str) -> String {
+    format!("{} {}", utc(time), status_line(verb, message))
 }
 
 /// The mark that stands between a task label and a line of `stream`.

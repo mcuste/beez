@@ -391,11 +391,16 @@ impl Terminal {
         // The warning writes a line of its own, so the log lock goes first.
         drop(log);
         if let Some(error) = failure {
-            let _ = self.line(
-                Target::Err,
-                &styled_status(YELLOW, "Warning", &log_failure(&error)),
-            );
+            self.warn(&error);
         }
+    }
+
+    /// Says why the run log could not be written.
+    fn warn(&self, error: &io::Error) {
+        let _ = self.line(
+            Target::Err,
+            &styled_status(YELLOW, "Warning", &log_failure(error)),
+        );
     }
 
     /// Holds the spinners still, then takes the stream lock, always in this
@@ -435,10 +440,7 @@ fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<io::E
         );
     }
     if let Some(error) = failure {
-        let _ = terminal.line(
-            Target::Err,
-            &styled_status(YELLOW, "Warning", &log_failure(&error)),
-        );
+        terminal.warn(&error);
     }
 }
 

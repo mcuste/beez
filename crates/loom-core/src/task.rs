@@ -117,10 +117,10 @@ impl TaskDefinition {
         }
     }
 
-    /// Runs the task inside a sandbox.
+    /// Runs the task inside a sandbox, when one is given.
     #[must_use]
-    pub fn sandboxed(mut self, sandbox: SandboxPolicy) -> Self {
-        self.sandbox = Some(sandbox);
+    pub fn sandboxed(mut self, sandbox: Option<SandboxPolicy>) -> Self {
+        self.sandbox = sandbox;
         self
     }
 }

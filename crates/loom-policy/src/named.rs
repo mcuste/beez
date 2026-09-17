@@ -22,3 +22,56 @@ pub(crate) fn names<T: Named>() -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+/// Gives an enum its name table: `ALL`, `name`, `Display`, and [`Named`].
+///
+/// The table lists every value once, in the order an error message offers
+/// them. A new value needs one line here and its match arms elsewhere.
+macro_rules! name_table {
+    ($vis:vis $type:ident { $($variant:ident => $name:literal),+ $(,)? }) => {
+        impl $type {
+            /// Every value, in `FromStr` name order.
+            $vis const ALL: &[Self] = &[$(Self::$variant),+];
+
+            /// The name a manifest uses for the value.
+            #[must_use]
+            $vis fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+
+        impl $crate::named::Named for $type {
+            fn all() -> &'static [Self] {
+                Self::ALL
+            }
+
+            fn named(self) -> &'static str {
+                self.name()
+            }
+        }
+
+        impl ::std::fmt::Display for $type {
+            fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                formatter.write_str(self.name())
+            }
+        }
+    };
+}
+
+/// Reads a value of a name table, and reports an unknown name with the given
+/// error variant.
+macro_rules! parse_by_name {
+    ($type:ident, $error:ident :: $unknown:ident) => {
+        impl ::std::str::FromStr for $type {
+            type Err = $error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                $crate::named::from_name(value).ok_or_else(|| $error::$unknown(value.to_owned()))
+            }
+        }
+    };
+}
+
+pub(crate) use {name_table, parse_by_name};

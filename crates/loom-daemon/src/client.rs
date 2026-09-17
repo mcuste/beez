@@ -11,10 +11,9 @@ use loom_manifest::load;
 
 use crate::control::{self, JobReport, Request, Response};
 use crate::daemon::reports;
-use crate::job;
-use crate::message;
 use crate::paths::DaemonPaths;
 use crate::store::{self, Registry, Watched};
+use crate::{apply, job, message};
 
 /// The daemon and its jobs, or the jobs alone when no daemon runs.
 #[derive(Debug)]
@@ -95,26 +94,24 @@ fn write_registry(
     watched: Watched,
 ) -> io::Result<Response> {
     paths.create()?;
-    let path = watched.path.clone();
-    let added = registry.add(watched);
-    registry.save(&paths.manifests())?;
+    let watching = apply::watch(&mut registry, paths, watched)?;
 
     Ok(Response::done(format!(
-        "{}, and the daemon reads it when it starts",
-        message::watching(&path, added)
+        "{watching}, and the daemon reads it when it starts"
     )))
 }
 
 fn remove(paths: &DaemonPaths, manifest: &PathBuf) -> io::Result<Response> {
-    // A manifest that is gone cannot be resolved, so both forms are tried.
-    let path = std::fs::canonicalize(manifest).unwrap_or_else(|_| manifest.clone());
     let mut registry = Registry::load(&paths.manifests())?;
-    if !registry.remove(&path) && !registry.remove(manifest) {
-        return Ok(Response::error(message::not_watched(manifest)));
-    }
-    registry.save(&paths.manifests())?;
+    // A manifest that is gone cannot be resolved, so the path as typed counts too.
+    let canonical = std::fs::canonicalize(manifest).unwrap_or_else(|_| manifest.clone());
+    let path = if registry.watches(&canonical) {
+        canonical
+    } else {
+        manifest.clone()
+    };
 
-    Ok(Response::done(message::stopped_watching(&path)))
+    apply::unwatch(&mut registry, paths, &path)
 }
 
 fn hold(paths: &DaemonPaths, id: &str, paused: bool) -> io::Result<Response> {

@@ -1,7 +1,6 @@
 use std::fmt;
-use std::str::FromStr;
 
-use crate::named::{self, Named};
+use crate::named::{self, name_table, parse_by_name};
 
 /// A headless coding harness Loom can prompt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,45 +15,14 @@ pub enum HeadlessHarness {
     Codex,
 }
 
-impl HeadlessHarness {
-    /// Every supported harness, in `FromStr` name order.
-    pub const ALL: [Self; 4] = [Self::Pi, Self::Omp, Self::Claude, Self::Codex];
+name_table!(pub HeadlessHarness {
+    Pi => "pi",
+    Omp => "omp",
+    Claude => "claude",
+    Codex => "codex",
+});
 
-    /// The name a manifest uses for the harness.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Pi => "pi",
-            Self::Omp => "omp",
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
-    }
-}
-
-impl Named for HeadlessHarness {
-    fn all() -> &'static [Self] {
-        &Self::ALL
-    }
-
-    fn named(self) -> &'static str {
-        self.name()
-    }
-}
-
-impl FromStr for HeadlessHarness {
-    type Err = HeadlessHarnessError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        named::from_name(value).ok_or_else(|| HeadlessHarnessError::Unknown(value.to_owned()))
-    }
-}
-
-impl fmt::Display for HeadlessHarness {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
+parse_by_name!(HeadlessHarness, HeadlessHarnessError::Unknown);
 
 /// Reports an unsupported harness selector.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,7 +86,7 @@ mod tests {
 
     #[test]
     fn parses_the_name_of_every_supported_harness() {
-        for harness in HeadlessHarness::ALL {
+        for &harness in HeadlessHarness::ALL {
             assert_eq!(harness.name().parse(), Ok(harness));
         }
     }

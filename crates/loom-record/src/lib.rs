@@ -11,8 +11,8 @@ mod tally;
 mod time;
 
 pub use format::{
-    VERB_WIDTH, label_width, log_failure, seconds, status_line, status_text, stream_mark,
-    trim_newline,
+    VERB_WIDTH, label_width, log_failure, seconds, stamped_status_line, status_line, status_text,
+    stream_mark, trim_newline,
 };
 pub use log::{LogSettings, RUNS, RunTarget, ignore_everything, is_run_name};
 pub use outcome::TaskOutcome;

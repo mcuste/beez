@@ -15,7 +15,7 @@ use loom_core::{TaskRequest, Workflow};
 use loom_process::OutputStream;
 use serde::Serialize;
 
-use crate::format::{label_width, status_line, stream_mark, trim_newline};
+use crate::format::{label_width, stamped_status_line, stream_mark, trim_newline};
 use crate::outcome::TaskOutcome;
 use crate::time::{compact_utc, utc};
 
@@ -219,9 +219,11 @@ impl RunLog {
 
     /// Records one of Loom's own status lines.
     pub(crate) fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
-        let stamp = utc(SystemTime::now());
-
-        writeln!(self.run, "{stamp} {}", status_line(verb, message))
+        writeln!(
+            self.run,
+            "{}",
+            stamped_status_line(SystemTime::now(), verb, message)
+        )
     }
 
     /// Records one output line of a task.

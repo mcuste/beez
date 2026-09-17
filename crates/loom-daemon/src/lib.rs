@@ -6,6 +6,7 @@
 //! happened, and it reads a manifest again every time the file changes and
 //! every time a job fires.
 
+mod apply;
 mod client;
 mod control;
 mod daemon;
