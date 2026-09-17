@@ -135,10 +135,7 @@ fn normalize(text: &str) -> Result<Vec<String>, ScheduleError> {
         count => return Err(ScheduleError::FieldCount(count)),
     };
     // A workflow run must not start more than once a minute.
-    if !fields
-        .get(SECONDS)
-        .is_some_and(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit()))
-    {
+    if !fields.get(SECONDS).is_some_and(|field| is_number(field)) {
         return Err(ScheduleError::SubMinute);
     }
 
@@ -186,7 +183,7 @@ fn shift_days_of_week(field: &str) -> Result<String, ScheduleError> {
 }
 
 fn shift_day_of_week(day: &str) -> Result<String, ScheduleError> {
-    if day.is_empty() || !day.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !is_number(day) {
         return Ok(day.to_owned());
     }
     let number = day
@@ -198,6 +195,11 @@ fn shift_day_of_week(day: &str) -> Result<String, ScheduleError> {
 
     // Both 0 and 7 are Sunday, which the parser counts as 1.
     Ok((number % 7 + 1).to_string())
+}
+
+/// True for one or more ASCII digits and nothing else.
+fn is_number(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// True when a field names days rather than every day.

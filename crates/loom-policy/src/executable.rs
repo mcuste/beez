@@ -1,14 +1,9 @@
-use crate::{ExecutableGroup, SandboxPath, extend, selected_groups};
+use crate::{ExecutableGroup, GroupSelection, SandboxPath, extend};
 
 /// Which programs sandboxed processes may execute.
-///
-/// `defaults` stays unset until a policy names it, so a task that only adds a
-/// program keeps what the workflow chose.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExecutablePolicy {
-    defaults: Option<bool>,
-    groups: Vec<ExecutableGroup>,
-    disable: Vec<ExecutableGroup>,
+    groups: GroupSelection<ExecutableGroup>,
     allow: Vec<SandboxPath>,
 }
 
@@ -30,9 +25,7 @@ impl ExecutablePolicy {
         allow: Vec<SandboxPath>,
     ) -> Self {
         Self {
-            defaults,
-            groups,
-            disable,
+            groups: GroupSelection::new(defaults, groups, disable),
             allow,
         }
     }
@@ -43,9 +36,7 @@ impl ExecutablePolicy {
     /// value it leaves unset keeps the value here.
     #[must_use]
     pub fn merge(mut self, other: Self) -> Self {
-        self.defaults = other.defaults.or(self.defaults);
-        extend(&mut self.groups, other.groups);
-        extend(&mut self.disable, other.disable);
+        self.groups = self.groups.merge(other.groups);
         extend(&mut self.allow, other.allow);
         self
     }
@@ -56,14 +47,10 @@ impl ExecutablePolicy {
     /// when the same group is also disabled.
     #[must_use]
     pub fn groups(&self) -> Vec<ExecutableGroup> {
-        selected_groups(
-            self.defaults.unwrap_or(true),
-            &DEFAULT_EXECUTABLE_GROUPS,
-            &self.disable,
-            &self.groups,
-        )
-        .into_iter()
-        .collect()
+        self.groups
+            .selected(&DEFAULT_EXECUTABLE_GROUPS)
+            .into_iter()
+            .collect()
     }
 
     /// Program names, files, or directories that may run in addition to the groups.

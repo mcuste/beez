@@ -35,6 +35,10 @@ pub(crate) fn unknown_job(job: &str) -> String {
     format!("no job named {job}")
 }
 
+pub(crate) fn already_running(root: &Path) -> String {
+    format!("a daemon already runs for {}", root.display())
+}
+
 pub(crate) fn unwritable_registry(error: &std::io::Error) -> String {
     format!("cannot write the manifest list: {error}")
 }

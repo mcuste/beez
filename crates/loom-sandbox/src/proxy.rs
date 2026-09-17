@@ -43,10 +43,8 @@ impl Proxy {
             localhost,
             reported: Mutex::new(BTreeSet::new()),
         });
-        let http = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let socks = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let http_port = http.local_addr()?.port();
-        let socks_port = socks.local_addr()?.port();
+        let (http, http_port) = loopback_listener()?;
+        let (socks, socks_port) = loopback_listener()?;
         let http_rules = Arc::clone(&rules);
         let http = Server::spawn(http, move |stream| {
             let _ = http::serve_http(stream, &http_rules);
@@ -74,6 +72,13 @@ impl Proxy {
     pub fn socks_port(&self) -> u16 {
         self.socks_port
     }
+}
+
+/// A listener on an ephemeral loopback port, with the port it got.
+fn loopback_listener() -> io::Result<(TcpListener, u16)> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
 }
 
 /// The allowlist plus the targets already reported as denied.

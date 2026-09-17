@@ -120,12 +120,10 @@ pub(crate) struct Reporter {
     ids: Vec<String>,
     width: usize,
     terminal: Arc<Terminal>,
-    bars: Option<MultiProgress>,
     spinner: ProgressStyle,
     spinners: Vec<Option<ProgressBar>>,
     buffers: Vec<Vec<u8>>,
     tally: RunTally,
-    started: Instant,
 }
 
 impl std::fmt::Debug for Reporter {
@@ -157,7 +155,7 @@ impl Reporter {
         let (log, failure) = OpenLog::open(settings, target, working_directory);
         let directory = log.directory().map(Path::to_path_buf);
         let terminal = Arc::new(Terminal {
-            bars: bars.clone(),
+            bars,
             streams: Mutex::new(Streams {
                 stdout: AutoStream::new(io::stdout(), choice),
                 stderr: AutoStream::new(io::stderr(), choice),
@@ -178,10 +176,8 @@ impl Reporter {
             buffers: vec![Vec::new(); ids.len()],
             ids,
             terminal,
-            bars,
             spinner: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
             tally: RunTally::default(),
-            started: Instant::now(),
         }
     }
 
@@ -237,12 +233,12 @@ impl Reporter {
     /// `exit_status` is the status Loom itself returns. It is absent when the
     /// run ended in an execution error.
     pub(crate) fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
-        if let Some(bars) = &self.bars {
+        if let Some(bars) = &self.terminal.bars {
             let _ = bars.clear();
         }
 
         let style = if self.tally.failed() > 0 { RED } else { GREEN };
-        let message = self.tally.summary(self.started.elapsed());
+        let message = self.tally.summary(self.terminal.started.elapsed());
         self.terminal.log(|log| log.finish(&message, exit_status));
 
         self.show(style, "Summary", &message)
@@ -251,7 +247,7 @@ impl Reporter {
     /// Shows one running task as a spinner row of its own.
     fn start_spinner(&mut self, index: usize) {
         let prefix = self.prefix(index);
-        if let (Some(bars), Some(slot)) = (&self.bars, self.spinners.get_mut(index)) {
+        if let (Some(bars), Some(slot)) = (&self.terminal.bars, self.spinners.get_mut(index)) {
             let bar = bars.add(ProgressBar::new_spinner().with_style(self.spinner.clone()));
             bar.set_prefix(prefix);
             bar.set_message("running");
@@ -313,7 +309,7 @@ impl Reporter {
             && let Some(bar) = slot.take()
         {
             bar.finish_and_clear();
-            if let Some(bars) = &self.bars {
+            if let Some(bars) = &self.terminal.bars {
                 bars.remove(&bar);
             }
         }

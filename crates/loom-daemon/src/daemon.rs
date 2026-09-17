@@ -308,13 +308,10 @@ impl Daemon {
             working_directory,
         };
         let jobs = job::jobs_of(&watched, &self.states);
-        if let Some(error) = job::manifest_error(&jobs) {
-            return Response::error(error);
-        }
-        let ids: Vec<String> = jobs.iter().map(|job| job.id.clone()).collect();
-        if let Some(taken) = self.taken_id(&ids, &watched.path) {
-            return Response::error(message::taken_id(&taken));
-        }
+        let names = match job::admit(&jobs, |ids| self.taken_id(ids, &watched.path)) {
+            Ok(ids) => ids.join(", "),
+            Err(error) => return Response::error(error),
+        };
         let watching = match apply::watch(&mut self.registry, &self.paths, watched.clone()) {
             Ok(watching) => watching,
             Err(error) => return Response::error(message::unwritable_registry(&error)),
@@ -322,10 +319,10 @@ impl Daemon {
         self.install(&watched, jobs, now);
         report::line(
             "Watching",
-            &format!("{} as {}", watched.path.display(), ids.join(", ")),
+            &format!("{} as {names}", watched.path.display()),
         );
 
-        Response::done(format!("{watching} as {}", ids.join(", ")))
+        Response::done(format!("{watching} as {names}"))
     }
 
     fn remove(&mut self, manifest: &PathBuf) -> Response {
@@ -744,7 +741,7 @@ fn bind(paths: &DaemonPaths) -> io::Result<UnixListener> {
             if control::is_running(paths.socket()) {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
-                    format!("a daemon already runs for {}", paths.root().display()),
+                    message::already_running(paths.root()),
                 ));
             }
             // Nothing answers, so the socket belongs to a daemon that died.

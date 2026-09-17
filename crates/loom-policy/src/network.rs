@@ -1,14 +1,12 @@
-use crate::{DomainGroup, DomainRule, HarnessProfile, extend, selected_groups};
+use crate::{DomainGroup, DomainRule, GroupSelection, HarnessProfile, extend};
 
 /// Which remote hosts sandboxed processes may reach.
 ///
-/// `defaults` and `localhost` stay unset until a policy names them, so a task
-/// that only adds a host keeps what the workflow chose.
+/// `localhost` stays unset until a policy names it, so a task that only adds
+/// a host keeps what the workflow chose.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkPolicy {
-    defaults: Option<bool>,
-    groups: Vec<DomainGroup>,
-    disable: Vec<DomainGroup>,
+    groups: GroupSelection<DomainGroup>,
     allow: Vec<DomainRule>,
     localhost: Option<bool>,
 }
@@ -24,9 +22,7 @@ impl NetworkPolicy {
         localhost: Option<bool>,
     ) -> Self {
         Self {
-            defaults,
-            groups,
-            disable,
+            groups: GroupSelection::new(defaults, groups, disable),
             allow,
             localhost,
         }
@@ -38,9 +34,7 @@ impl NetworkPolicy {
     /// value it leaves unset keeps the value here.
     #[must_use]
     pub fn merge(mut self, other: Self) -> Self {
-        self.defaults = other.defaults.or(self.defaults);
-        extend(&mut self.groups, other.groups);
-        extend(&mut self.disable, other.disable);
+        self.groups = self.groups.merge(other.groups);
         extend(&mut self.allow, other.allow);
         self.localhost = other.localhost.or(self.localhost);
         self
@@ -59,12 +53,7 @@ impl NetworkPolicy {
     #[must_use]
     pub fn allowed_domains(&self, profile: Option<&HarnessProfile>) -> Vec<DomainRule> {
         let defaults = profile.map_or(&[][..], HarnessProfile::default_domain_groups);
-        let mut groups = selected_groups(
-            self.defaults.unwrap_or(true),
-            defaults,
-            &self.disable,
-            &self.groups,
-        );
+        let mut groups = self.groups.selected(defaults);
         // A harness reaches no provider at all without its required groups.
         if let Some(profile) = profile {
             groups.extend(profile.required_domain_groups().iter().copied());

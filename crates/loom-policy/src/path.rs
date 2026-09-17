@@ -52,12 +52,8 @@ impl SandboxPath {
         if let Some(rest) = self.0.strip_prefix("~/") {
             return home.join(rest);
         }
-        let path = Path::new(&self.0);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            working_directory.join(path)
-        }
+        // An absolute path replaces the working directory when joined.
+        working_directory.join(&self.0)
     }
 }
 

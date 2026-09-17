@@ -201,9 +201,8 @@ fn locate_program(program: &Path, working_directory: &Path) -> Option<PathBuf> {
         && !matches!(program.components().next(), Some(Component::RootDir))
     {
         find_on_path(program)?
-    } else if program.is_absolute() {
-        program.to_path_buf()
     } else {
+        // An absolute path replaces the working directory when joined.
         working_directory.join(program)
     };
     fs::canonicalize(candidate)

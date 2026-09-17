@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::control::{self, Response};
+use crate::message;
 use crate::paths::DaemonPaths;
 
 /// How long to wait between two looks for the answer of a started daemon.
@@ -20,10 +21,7 @@ const ATTEMPTS: usize = 50;
 /// names must match its options.
 pub fn start(paths: &DaemonPaths, limit: usize, keep_runs: usize) -> io::Result<Response> {
     if control::is_running(paths.socket()) {
-        return Ok(Response::error(format!(
-            "a daemon already runs for {}",
-            paths.root().display()
-        )));
+        return Ok(Response::error(message::already_running(paths.root())));
     }
     paths.create()?;
     let log = std::fs::File::options()

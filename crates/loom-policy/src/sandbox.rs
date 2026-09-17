@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::{ExecutablePolicy, FilesystemPolicy, NetworkPolicy};
 
 /// Restrictions Loom applies to a task's process tree.
@@ -71,31 +69,5 @@ impl SandboxPolicy {
             });
         }
         self
-    }
-}
-
-/// The groups a section grants: its default groups, then its own.
-///
-/// A group the section names always applies, even when it is also disabled.
-pub(crate) fn selected_groups<T: Copy + Ord>(
-    defaults: bool,
-    default_groups: &[T],
-    disable: &[T],
-    groups: &[T],
-) -> BTreeSet<T> {
-    default_groups
-        .iter()
-        .filter(|group| defaults && !disable.contains(group))
-        .chain(groups)
-        .copied()
-        .collect()
-}
-
-/// Adds every value that is not in `target` yet.
-pub(crate) fn extend<T: PartialEq>(target: &mut Vec<T>, values: Vec<T>) {
-    for value in values {
-        if !target.contains(&value) {
-            target.push(value);
-        }
     }
 }

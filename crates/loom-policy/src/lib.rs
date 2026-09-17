@@ -11,6 +11,7 @@ mod parse;
 mod path;
 mod profile;
 mod sandbox;
+mod selection;
 
 pub use domain::{DomainRule, DomainRuleError};
 pub use executable::ExecutablePolicy;
@@ -24,4 +25,4 @@ pub(crate) use parse::parse_valid;
 pub use path::{SandboxPath, SandboxPathError};
 pub use profile::HarnessProfile;
 pub use sandbox::SandboxPolicy;
-pub(crate) use sandbox::{extend, selected_groups};
+pub(crate) use selection::{GroupSelection, extend};

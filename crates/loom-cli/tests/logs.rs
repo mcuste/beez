@@ -255,6 +255,36 @@ fn keeps_the_runs_of_a_repository_together() {
 }
 
 #[test]
+fn names_the_manifest_by_its_absolute_path_in_the_record() {
+    let directory = TemporaryDirectory::new("logs-manifest-path").unwrap();
+    let root = directory.join("artifacts");
+    workflow(
+        &directory,
+        "tasks:\n  - id: only\n    command: [bash, -c, 'true']\n",
+    )
+    .unwrap();
+
+    let output = common::loom()
+        .args(["run", "workflow", "workflow.yaml"])
+        .current_dir(directory.path())
+        .env("LOOM_LOG_DIR", &root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let record = fs::read_to_string(only_run(&root).unwrap().join("run.json")).unwrap();
+    let manifest = record
+        .split("\"manifest\": \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .map(Path::new)
+        .unwrap();
+    assert!(manifest.is_absolute(), "{record}");
+    assert!(manifest.ends_with("workflow.yaml"), "{record}");
+    assert!(manifest.is_file(), "{record}");
+}
+
+#[test]
 fn runs_a_harness_prompt_and_records_it() {
     let directory = TemporaryDirectory::new("logs-harness").unwrap();
     let root = directory.join("artifacts");

@@ -186,7 +186,7 @@ impl RunLog {
             working_directory: working_directory.display().to_string(),
             manifest: target
                 .manifest()
-                .map(|path| absolute(path, working_directory).display().to_string()),
+                .map(|path| working_directory.join(path).display().to_string()),
             started: utc(started),
             finished: String::new(),
             duration_seconds: 0.0,
@@ -438,15 +438,6 @@ fn request_record(request: &TaskRequest) -> RequestRecord {
             program: program.clone(),
             arguments: arguments.clone(),
         },
-    }
-}
-
-/// Resolves `path` against `working_directory`, so a record names one file.
-fn absolute(path: &Path, working_directory: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        working_directory.join(path)
     }
 }
 

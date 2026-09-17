@@ -10,6 +10,7 @@ use loom_manifest::{JobSchedule, Manifest, load};
 use loom_schedule::format_instant;
 
 use crate::control::JobReport;
+use crate::message;
 use crate::store::{JobState, Registry, States, Watched};
 
 /// One job: one schedule of one manifest.
@@ -53,9 +54,12 @@ impl Job {
 
     /// True when the job may fire.
     pub(crate) fn is_ready(&self) -> bool {
-        self.error.is_none()
-            && self.schedule.as_ref().is_some_and(JobSchedule::enabled)
-            && !self.state.paused
+        self.error.is_none() && self.enabled() && !self.state.paused
+    }
+
+    /// True when the manifest keeps the schedule on.
+    fn enabled(&self) -> bool {
+        self.schedule.as_ref().is_some_and(JobSchedule::enabled)
     }
 
     /// The word `loom schedule list` prints for the job.
@@ -66,7 +70,7 @@ impl Job {
             "running"
         } else if self.state.paused {
             "paused"
-        } else if !self.schedule.as_ref().is_some_and(JobSchedule::enabled) {
+        } else if !self.enabled() {
             "disabled"
         } else if self.next_fire.is_none() {
             "done"
@@ -160,17 +164,36 @@ pub(crate) fn jobs_of(watched: &Watched, states: &States) -> Vec<Job> {
 
 /// The job IDs a manifest holds, without keeping the jobs.
 pub(crate) fn ids_of(watched: &Watched, states: &States) -> Vec<String> {
-    ids(jobs_of(watched, states))
+    ids(&jobs_of(watched, states))
 }
 
 /// The IDs of `jobs`, in order.
-pub(crate) fn ids(jobs: Vec<Job>) -> Vec<String> {
-    jobs.into_iter().map(|job| job.id).collect()
+pub(crate) fn ids(jobs: &[Job]) -> Vec<String> {
+    jobs.iter().map(|job| job.id.clone()).collect()
+}
+
+/// Checks the jobs of a manifest a command wants to watch, and names their IDs.
+///
+/// `taken` names the first of the IDs that another watched manifest already
+/// uses. The error is the line the command answers with.
+pub(crate) fn admit(
+    jobs: &[Job],
+    taken: impl FnOnce(&[String]) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    if let Some(error) = manifest_error(jobs) {
+        return Err(error.to_owned());
+    }
+    let ids = ids(jobs);
+    if let Some(taken) = taken(&ids) {
+        return Err(message::taken_id(&taken));
+    }
+
+    Ok(ids)
 }
 
 /// Why a manifest cannot become a job at all: it does not load, or it names
 /// no schedule. A job that loads but cannot run keeps its own error instead.
-pub(crate) fn manifest_error(jobs: &[Job]) -> Option<&str> {
+fn manifest_error(jobs: &[Job]) -> Option<&str> {
     jobs.iter()
         .find(|job| job.schedule.is_none())
         .and_then(|job| job.error.as_deref())
