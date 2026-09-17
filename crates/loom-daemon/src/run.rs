@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use loom_manifest::load;
-use loom_record::{
-    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, log_failure,
-};
+use loom_record::{LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, log_failure};
 use loom_runner::Runner;
 use loom_schedule::format_instant;
 
@@ -84,9 +82,7 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
 
     let mut tally = RunTally::default();
     let outcome = Runner::new(&job.working_directory).run_workflow(&workflow, &mut |event| {
-        if let Some(task) = TaskOutcome::of(event) {
-            tally.add(task);
-        }
+        tally.record(event);
         log.write(|recorder| recorder.event(event))
     });
     let summary = tally.summary(started.elapsed());

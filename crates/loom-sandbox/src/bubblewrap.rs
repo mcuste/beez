@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,11 +42,7 @@ impl Bridge {
             std::env::temp_dir().join(format!("loom-sandbox-{}-{sequence}", std::process::id()));
         fs::create_dir(&path)?;
         let directory = SocketDirectory(path);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-        }
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
         let empty = directory.path().join("empty");
         fs::create_dir(&empty)?;
         let http_socket = directory.path().join("http.sock");

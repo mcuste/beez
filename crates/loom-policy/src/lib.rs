@@ -20,6 +20,7 @@ pub use group::{DomainGroup, ExecutableGroup, GroupError};
 pub use harness::{HarnessOptions, HeadlessHarness, HeadlessHarnessError};
 pub use network::NetworkPolicy;
 pub use parse::parse_all;
+pub(crate) use parse::parse_valid;
 pub use path::{SandboxPath, SandboxPathError};
 pub use profile::HarnessProfile;
 pub use sandbox::SandboxPolicy;

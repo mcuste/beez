@@ -14,8 +14,18 @@ use std::time::SystemTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::paths::DaemonPaths;
+
 /// Layout version of the files.
 const SCHEMA: u32 = 1;
+
+/// Reads both files of one daemon, treating a missing file as an empty one.
+pub(crate) fn load_all(paths: &DaemonPaths) -> io::Result<(Registry, States)> {
+    Ok((
+        Registry::load(&paths.manifests())?,
+        States::load(&paths.state())?,
+    ))
+}
 
 /// The manifests the daemon watches.
 #[derive(Debug, Deserialize, Serialize)]

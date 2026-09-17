@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use loom_runner::RunEvent;
+
 use crate::format::{counts, seconds};
 use crate::outcome::TaskOutcome;
 
@@ -17,6 +19,13 @@ pub struct RunTally {
 }
 
 impl RunTally {
+    /// Counts one event. An event that does not end a task changes nothing.
+    pub fn record(&mut self, event: &RunEvent) {
+        if let Some(outcome) = TaskOutcome::of(event) {
+            self.add(outcome);
+        }
+    }
+
     /// Counts one outcome. An outcome that does not end a task changes nothing.
     pub fn add(&mut self, outcome: TaskOutcome) {
         match outcome {

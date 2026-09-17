@@ -11,8 +11,8 @@ use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use loom_process::{OutputStream, ProcessOutput};
 use loom_record::{
-    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, STDERR_MARK, STDOUT_MARK, TaskOutcome,
-    VERB_WIDTH, log_failure, seconds, trim_newline, utc,
+    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, VERB_WIDTH, label_width,
+    log_failure, seconds, stream_mark, trim_newline, utc,
 };
 use loom_runner::RunEvent;
 
@@ -173,7 +173,7 @@ impl Reporter {
 
         Self {
             layout,
-            width: ids.iter().map(String::len).max().unwrap_or(0),
+            width: label_width(ids.iter().map(String::as_str)),
             spinners: vec![None; ids.len()],
             buffers: vec![Vec::new(); ids.len()],
             ids,
@@ -200,10 +200,7 @@ impl Reporter {
     pub(crate) fn event(&mut self, event: &RunEvent) -> io::Result<()> {
         self.terminal.log(|log| log.event(event));
         let index = event.position();
-        let outcome = TaskOutcome::of(event);
-        if let Some(outcome) = outcome {
-            self.tally.add(outcome);
-        }
+        self.tally.record(event);
 
         match event {
             RunEvent::Output { stream, line, .. } => return self.output(index, *stream, line),
@@ -226,7 +223,9 @@ impl Reporter {
             self.terminal.bytes(Target::Out, &buffer)?;
         }
 
-        let Some((verb, message)) = outcome.map(|outcome| outcome.status(&self.id(index))) else {
+        let Some((verb, message)) =
+            TaskOutcome::of(event).map(|outcome| outcome.status(&self.id(index)))
+        else {
             return Ok(());
         };
         // The event wrote this line to the run log already.
@@ -276,11 +275,11 @@ impl Reporter {
             Layout::Stream => {
                 // Unstyled, so a task keeps the colours it chose.
                 let text = String::from_utf8_lossy(trim_newline(line));
-                let separator = match stream {
-                    OutputStream::Stdout => STDOUT_MARK,
-                    OutputStream::Stderr => STDERR_MARK,
-                };
-                let line = format!("{} {} {text}", self.prefix(index), paint(DIM, separator));
+                let line = format!(
+                    "{} {} {text}",
+                    self.prefix(index),
+                    paint(DIM, stream_mark(stream))
+                );
                 self.terminal.line(Target::Out, &line)
             }
         }

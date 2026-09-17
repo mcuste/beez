@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anstream.workspace = true
+chrono.workspace = true
 loom-core = { path = "../loom-core" }
 loom-process.workspace = true
 loom-runner = { path = "../loom-runner" }

@@ -18,6 +18,18 @@ where
         .collect()
 }
 
+/// Parses every value, and drops the ones Loom cannot read.
+///
+/// Only Loom's own group tables use this, and a test checks that every one
+/// of them parses.
+pub(crate) fn parse_valid<T: FromStr>(values: &[&str]) -> Vec<T> {
+    values
+        .iter()
+        .map(|value| value.parse())
+        .filter_map(Result::ok)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_all;

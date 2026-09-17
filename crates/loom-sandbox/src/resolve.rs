@@ -117,12 +117,6 @@ impl ResolvedSandbox {
         })
     }
 
-    /// Hosts the sandboxed process may reach.
-    #[must_use]
-    pub fn allowed_domains(&self) -> &[DomainRule] {
-        &self.allowed_domains
-    }
-
     /// The canonical path of the program to run.
     #[must_use]
     pub fn program(&self) -> &Path {
@@ -142,19 +136,18 @@ impl ResolvedSandbox {
     /// one in its place, so both backends stop these directories from being
     /// renamed or removed. Parents come before their own children.
     pub(crate) fn protected_ancestors(&self) -> Vec<PathBuf> {
-        let mut ancestors = self
-            .write_deny
-            .iter()
-            .flat_map(|denied| denied.ancestors().skip(1))
-            .filter(|ancestor| self.inside_write_allow(ancestor))
-            .map(Path::to_path_buf)
-            .collect::<Vec<_>>();
-        ancestors.sort();
-        ancestors.dedup();
-        ancestors
+        dedup(
+            self.write_deny
+                .iter()
+                .flat_map(|denied| denied.ancestors().skip(1))
+                .filter(|ancestor| self.inside_write_allow(ancestor))
+                .map(Path::to_path_buf)
+                .collect(),
+        )
     }
 }
 
+/// Sorted, with each path once.
 fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
@@ -557,7 +550,7 @@ mod tests {
         let sut = resolve(&policy(&[], &[&text(&work)], &[], None), &work, &home);
 
         assert!(sut.environment.is_empty());
-        assert!(sut.allowed_domains().is_empty());
+        assert!(sut.allowed_domains.is_empty());
     }
 
     #[test]

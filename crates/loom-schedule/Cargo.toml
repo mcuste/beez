@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+chrono.workspace = true
 cron = "0.17.0"
 
 [lints]

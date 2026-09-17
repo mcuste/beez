@@ -432,6 +432,7 @@ name = "loom-record"
 version = "0.1.0"
 dependencies = [
  "anstream",
+ "chrono",
  "loom-core",
  "loom-process",
  "loom-runner",

@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::named::{self, Named};
-use crate::{DomainRule, SandboxPath};
+use crate::{DomainRule, SandboxPath, parse_valid};
 
 /// Reports an unknown group name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -260,11 +260,7 @@ impl DomainGroup {
     /// Host rules in the group. A rule that fails to parse is dropped.
     #[must_use]
     pub fn rules(self) -> Vec<DomainRule> {
-        self.domains()
-            .iter()
-            .map(|domain| domain.parse())
-            .filter_map(Result::ok)
-            .collect()
+        parse_valid(self.domains())
     }
 }
 
@@ -423,12 +419,6 @@ impl ExecutableGroup {
             ],
             Self::Process => &["ps", "kill", "pkill", "pgrep", "lsof", "top"],
         }
-    }
-
-    /// Directories the group's programs need to write, in `SandboxPath` syntax.
-    #[must_use]
-    pub fn state_paths(self) -> &'static [&'static str] {
-        self.state_group().map_or(&[], PathGroup::paths)
     }
 
     /// Directories the group's programs need to write. A path that fails to
@@ -644,11 +634,7 @@ impl PathGroup {
 
     /// Paths in the group. A path that fails to parse is dropped.
     pub(crate) fn sandbox_paths(self) -> Vec<SandboxPath> {
-        self.paths()
-            .iter()
-            .map(|path| path.parse())
-            .filter_map(Result::ok)
-            .collect()
+        parse_valid(self.paths())
     }
 }
 
@@ -685,7 +671,7 @@ impl fmt::Display for ExecutableGroup {
 #[cfg(test)]
 mod tests {
     use super::{DomainGroup, ExecutableGroup, GroupError, PathGroup};
-    use crate::{DomainRule, SandboxPath};
+    use crate::DomainRule;
 
     #[test]
     fn parses_every_group_name() {
@@ -713,16 +699,6 @@ mod tests {
         for group in DomainGroup::ALL {
             for domain in group.domains() {
                 assert!(domain.parse::<DomainRule>().is_ok(), "{group}: {domain}");
-            }
-        }
-    }
-
-    /// A caller drops a state path that fails to parse, which makes it read-only.
-    #[test]
-    fn every_group_state_path_is_a_valid_sandbox_path() {
-        for group in ExecutableGroup::ALL {
-            for path in group.state_paths() {
-                assert!(path.parse::<SandboxPath>().is_ok(), "{group}: {path}");
             }
         }
     }

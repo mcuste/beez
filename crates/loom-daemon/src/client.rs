@@ -14,7 +14,7 @@ use crate::daemon::reports;
 use crate::job;
 use crate::message;
 use crate::paths::DaemonPaths;
-use crate::store::{Registry, States, Watched};
+use crate::store::{self, Registry, Watched};
 
 /// The daemon and its jobs, or the jobs alone when no daemon runs.
 #[derive(Debug)]
@@ -67,16 +67,7 @@ pub fn add(paths: &DaemonPaths, manifest: &Path) -> io::Result<Response> {
     if let Err(problem) = check(&path) {
         return Ok(Response::error(problem));
     }
-    let watched = Watched {
-        path: path.clone(),
-        working_directory: working_directory.clone(),
-    };
-    let states = States::load(&paths.state())?;
-    let registry = Registry::load(&paths.manifests())?;
-    let ids = job::ids_of(&watched, &states);
-    if let Some(taken) = job::conflicting_id(&registry, &states, &path, &ids) {
-        return Ok(Response::error(message::taken_id(&taken)));
-    }
+    // A running daemon checks the job IDs against the jobs it holds.
     if control::is_running(paths.socket()) {
         return control::send(
             paths.socket(),
@@ -85,6 +76,15 @@ pub fn add(paths: &DaemonPaths, manifest: &Path) -> io::Result<Response> {
                 working_directory,
             },
         );
+    }
+    let watched = Watched {
+        path,
+        working_directory,
+    };
+    let (registry, states) = store::load_all(paths)?;
+    let ids = job::ids_of(&watched, &states);
+    if let Some(taken) = job::conflicting_id(&registry, &states, &watched.path, &ids) {
+        return Ok(Response::error(message::taken_id(&taken)));
     }
     write_registry(paths, registry, watched)
 }
@@ -118,10 +118,11 @@ fn remove(paths: &DaemonPaths, manifest: &PathBuf) -> io::Result<Response> {
 }
 
 fn hold(paths: &DaemonPaths, id: &str, paused: bool) -> io::Result<Response> {
-    if !reports(paths)?.iter().any(|report| report.id == id) {
+    let (registry, mut states) = store::load_all(paths)?;
+    let (_, jobs) = job::build(&registry, &states);
+    if !jobs.iter().any(|job| job.id == id) {
         return Ok(Response::error(message::unknown_job(id)));
     }
-    let mut states = States::load(&paths.state())?;
     let mut state = states.get(id);
     state.paused = paused;
     states.set(id, state);

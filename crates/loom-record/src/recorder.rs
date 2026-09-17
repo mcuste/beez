@@ -15,7 +15,6 @@ use crate::outcome::TaskOutcome;
 #[derive(Debug)]
 pub struct RunRecorder {
     log: RunLog,
-    labels: Vec<String>,
 }
 
 impl RunRecorder {
@@ -35,7 +34,7 @@ impl RunRecorder {
             return Ok(());
         };
         self.log.outcome(index, outcome);
-        let (verb, message) = outcome.status(&self.label(index));
+        let (verb, message) = outcome.status(&self.log.label(index));
 
         self.log.status(verb, &message)
     }
@@ -53,13 +52,6 @@ impl RunRecorder {
         self.status("Summary", summary)?;
 
         self.log.finish(exit_status)
-    }
-
-    fn label(&self, index: usize) -> String {
-        self.labels
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| index.to_string())
     }
 }
 
@@ -84,13 +76,7 @@ impl OpenLog {
             return (Self(None), None);
         }
         match RunLog::create(settings.directory, target, working_directory) {
-            Ok(log) => {
-                let recorder = RunRecorder {
-                    log,
-                    labels: target.labels(),
-                };
-                (Self(Some(recorder)), None)
-            }
+            Ok(log) => (Self(Some(RunRecorder { log })), None),
             Err(error) => (Self(None), Some(error)),
         }
     }

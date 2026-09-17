@@ -15,7 +15,7 @@ use loom_core::{TaskRequest, Workflow};
 use loom_process::OutputStream;
 use serde::Serialize;
 
-use crate::format::{STDERR_MARK, STDOUT_MARK, status_line, trim_newline};
+use crate::format::{label_width, status_line, stream_mark, trim_newline};
 use crate::outcome::TaskOutcome;
 use crate::time::{compact_utc, utc};
 
@@ -98,7 +98,6 @@ impl std::fmt::Debug for RunLog {
 }
 
 struct TaskLog {
-    id: String,
     stdout: File,
     stderr: File,
     record: TaskRecord,
@@ -198,7 +197,7 @@ impl RunLog {
         Ok(Self {
             run: File::create(directory.join(RUN_LOG))?,
             directory,
-            width: tasks.iter().map(|task| task.id.len()).max().unwrap_or(0),
+            width: label_width(tasks.iter().map(|task| task.record.id.as_str())),
             tasks,
             record,
             started,
@@ -209,6 +208,13 @@ impl RunLog {
     #[must_use]
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// The label of the task at `index`, or the index for a task it does not know.
+    pub(crate) fn label(&self, index: usize) -> String {
+        self.tasks
+            .get(index)
+            .map_or_else(|| index.to_string(), |task| task.record.id.clone())
     }
 
     /// Records one of Loom's own status lines.
@@ -233,15 +239,20 @@ impl RunLog {
         let Some(task) = self.tasks.get_mut(index) else {
             return Ok(());
         };
-        let (file, mark) = match stream {
-            OutputStream::Stdout => (&mut task.stdout, STDOUT_MARK),
-            OutputStream::Stderr => (&mut task.stderr, STDERR_MARK),
+        let file = match stream {
+            OutputStream::Stdout => &mut task.stdout,
+            OutputStream::Stderr => &mut task.stderr,
         };
 
         file.write_all(line)?;
         let text = strip_bytes(trim_newline(line)).into_vec();
         let text = String::from_utf8_lossy(&text);
-        writeln!(self.run, "{stamp} {:<width$} {mark} {text}", task.id)
+        writeln!(
+            self.run,
+            "{stamp} {:<width$} {} {text}",
+            task.record.id,
+            stream_mark(stream)
+        )
     }
 
     /// Records what happened to one task.
@@ -346,66 +357,67 @@ fn link_latest(_root: &Path, _id: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Opens the two stream files of every task and builds its record.
 fn open_tasks(directory: &Path, target: &RunTarget<'_>) -> io::Result<Vec<TaskLog>> {
-    let details = task_details(target);
-
-    target
-        .labels()
+    task_records(target)
         .into_iter()
-        .enumerate()
-        .map(|(index, id)| {
-            let stdout = format!("{TASKS}/{id}.stdout");
-            let stderr = format!("{TASKS}/{id}.stderr");
-            let (depends_on, request, sandbox) = details.get(index).cloned().unwrap_or_default();
+        .map(|record| {
             Ok(TaskLog {
-                stdout: File::create(directory.join(&stdout))?,
-                stderr: File::create(directory.join(&stderr))?,
-                record: TaskRecord {
-                    id: id.clone(),
-                    depends_on,
-                    request,
-                    sandbox,
-                    state: "pending",
-                    exit_status: None,
-                    duration_seconds: None,
-                    error: None,
-                    stdout,
-                    stderr,
-                },
-                id,
+                stdout: File::create(directory.join(&record.stdout))?,
+                stderr: File::create(directory.join(&record.stderr))?,
+                record,
             })
         })
         .collect()
 }
 
-/// One task's dependencies, request and sandbox, in declaration order.
-type TaskDetails = (Vec<String>, Option<RequestRecord>, bool);
+/// The record of every task before it runs, in declaration order.
+///
+/// A direct request needs no description, because the recorded arguments
+/// already hold it.
+fn task_records(target: &RunTarget<'_>) -> Vec<TaskRecord> {
+    match target {
+        RunTarget::Workflow { workflow, .. } => workflow
+            .tasks()
+            .iter()
+            .map(|task| {
+                let depends_on = task
+                    .dependencies()
+                    .iter()
+                    .filter_map(|index| workflow.task(*index))
+                    .map(|dependency| dependency.id().as_str().to_owned())
+                    .collect();
+                task_record(
+                    task.id().as_str().to_owned(),
+                    depends_on,
+                    Some(request_record(task.request())),
+                    task.sandbox().is_some(),
+                )
+            })
+            .collect(),
+        RunTarget::Request { name } => {
+            vec![task_record((*name).to_owned(), Vec::new(), None, false)]
+        }
+    }
+}
 
-/// Describes every task of a workflow. A direct request needs no description,
-/// because the recorded arguments already hold it.
-fn task_details(target: &RunTarget<'_>) -> Vec<TaskDetails> {
-    let RunTarget::Workflow { workflow, .. } = target else {
-        return Vec::new();
-    };
-
-    workflow
-        .tasks()
-        .iter()
-        .map(|task| {
-            let depends_on = task
-                .dependencies()
-                .iter()
-                .filter_map(|index| workflow.task(*index))
-                .map(|dependency| dependency.id().as_str().to_owned())
-                .collect();
-            (
-                depends_on,
-                Some(request_record(task.request())),
-                task.sandbox().is_some(),
-            )
-        })
-        .collect()
+fn task_record(
+    id: String,
+    depends_on: Vec<String>,
+    request: Option<RequestRecord>,
+    sandbox: bool,
+) -> TaskRecord {
+    TaskRecord {
+        stdout: format!("{TASKS}/{id}.stdout"),
+        stderr: format!("{TASKS}/{id}.stderr"),
+        id,
+        depends_on,
+        request,
+        sandbox,
+        state: "pending",
+        exit_status: None,
+        duration_seconds: None,
+        error: None,
+    }
 }
 
 fn request_record(request: &TaskRequest) -> RequestRecord {

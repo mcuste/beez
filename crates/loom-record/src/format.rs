@@ -3,18 +3,33 @@
 use std::io;
 use std::time::Duration;
 
+use loom_process::OutputStream;
+
 /// Width of the status word column, as wide as the longest word.
 pub const VERB_WIDTH: usize = 8;
 
 /// Solid marks a task's standard output, dashed its standard error.
-pub const STDOUT_MARK: &str = "\u{2502}";
-/// Dashed marks a task's standard error.
-pub const STDERR_MARK: &str = "\u{250a}";
+const STDOUT_MARK: &str = "\u{2502}";
+const STDERR_MARK: &str = "\u{250a}";
 
 /// One of Loom's own lines: the status word in its own column, then the message.
 #[must_use]
 pub fn status_line(verb: &str, message: &str) -> String {
     format!("{verb:<VERB_WIDTH$}  {message}")
+}
+
+/// The mark that stands between a task label and a line of `stream`.
+#[must_use]
+pub fn stream_mark(stream: OutputStream) -> &'static str {
+    match stream {
+        OutputStream::Stdout => STDOUT_MARK,
+        OutputStream::Stderr => STDERR_MARK,
+    }
+}
+
+/// Width of the task label column, as wide as the longest label.
+pub fn label_width<'label>(labels: impl IntoIterator<Item = &'label str>) -> usize {
+    labels.into_iter().map(str::len).max().unwrap_or(0)
 }
 
 /// Removes one trailing line ending, so a line can go in a column.
@@ -61,7 +76,7 @@ pub(crate) fn counts(passed: usize, failed: usize, blocked: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{counts, status_text};
+    use super::{counts, label_width, status_text};
 
     #[test]
     fn names_only_the_counts_a_run_reached() {
@@ -74,5 +89,11 @@ mod tests {
         assert_eq!(status_text(Some(0)), "ok");
         assert_eq!(status_text(Some(23)), "exit 23");
         assert_eq!(status_text(None), "signalled");
+    }
+
+    #[test]
+    fn sizes_the_label_column_to_the_longest_label() {
+        assert_eq!(label_width(["build", "test"]), 5);
+        assert_eq!(label_width([]), 0);
     }
 }

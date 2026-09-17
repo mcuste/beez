@@ -21,7 +21,7 @@ use crate::message;
 use crate::paths::DaemonPaths;
 use crate::report;
 use crate::run::{self, JobRun, RunOutcome};
-use crate::store::{Registry, States, Watched};
+use crate::store::{self, Registry, States, Watched};
 
 /// How many runs the daemon starts at the same time.
 ///
@@ -121,8 +121,7 @@ pub fn run(paths: &DaemonPaths, limit: usize, keep: usize) -> io::Result<()> {
 
 /// Reports every job of a Loom root without a running daemon.
 pub(crate) fn reports(paths: &DaemonPaths) -> io::Result<Vec<JobReport>> {
-    let registry = Registry::load(&paths.manifests())?;
-    let states = States::load(&paths.state())?;
+    let (registry, states) = store::load_all(paths)?;
     let (_, mut jobs) = job::build(&registry, &states);
     let now = SystemTime::now();
     for job in &mut jobs {
@@ -158,8 +157,7 @@ impl Daemon {
         keep: usize,
         started: SystemTime,
     ) -> io::Result<Self> {
-        let registry = Registry::load(&paths.manifests())?;
-        let states = States::load(&paths.state())?;
+        let (registry, states) = store::load_all(paths)?;
         let (manifests, jobs) = job::build(&registry, &states);
         let (sender, receiver) = mpsc::channel();
         let mut daemon = Self {
@@ -269,8 +267,15 @@ impl Daemon {
             report::line("Daemon", "exiting now, leaving its runs behind");
             return;
         }
+        self.begin_stopping();
+    }
+
+    /// Stops firing, and says how many runs the daemon waits for.
+    fn begin_stopping(&mut self) -> String {
         self.stopping = true;
-        report::line("Daemon", &waiting_message(self.running));
+        let waiting = waiting_message(self.running);
+        report::line("Daemon", &waiting);
+        waiting
     }
 
     fn command(&mut self, request: Request) -> Response {
@@ -294,11 +299,7 @@ impl Daemon {
                 let count = self.reload_all(now);
                 Response::done(format!("read {count} manifests again"))
             }
-            Request::Stop => {
-                self.stopping = true;
-                report::line("Daemon", &waiting_message(self.running));
-                Response::done(waiting_message(self.running))
-            }
+            Request::Stop => Response::done(self.begin_stopping()),
         }
     }
 

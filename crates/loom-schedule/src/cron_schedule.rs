@@ -71,18 +71,6 @@ impl CronSchedule {
         })
     }
 
-    /// The expression as it was written.
-    #[must_use]
-    pub fn expression(&self) -> &str {
-        &self.text
-    }
-
-    /// The offset the expression is read in.
-    #[must_use]
-    pub fn offset(&self) -> UtcOffset {
-        self.offset
-    }
-
     /// The first time the expression matches after `time`.
     ///
     /// Returns nothing when no match is left, such as for an expression that

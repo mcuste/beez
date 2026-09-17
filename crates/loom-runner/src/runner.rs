@@ -1,5 +1,5 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -77,7 +77,7 @@ impl RunEvent {
 /// Runs direct requests and validated workflows in one working directory.
 #[derive(Clone, Debug)]
 pub struct Runner {
-    working_directory: PathBuf,
+    processes: ProcessRunner,
 }
 
 impl Runner {
@@ -85,13 +85,13 @@ impl Runner {
     #[must_use]
     pub fn new(working_directory: impl Into<PathBuf>) -> Self {
         Self {
-            working_directory: working_directory.into(),
+            processes: ProcessRunner::new(working_directory),
         }
     }
 
     /// Runs tasks in this process's own working directory.
     pub fn here() -> io::Result<Self> {
-        Ok(Self::new(std::env::current_dir()?))
+        ProcessRunner::here().map(|processes| Self { processes })
     }
 
     /// Runs one request without a sandbox.
@@ -112,14 +112,15 @@ impl Runner {
     ) -> io::Result<i32> {
         on_event(&RunEvent::Started { task: None })?;
         let mut outcomes = run_requests_concurrently(
-            &self.working_directory,
+            &self.processes,
             vec![(None, request, sandbox.cloned())],
             on_event,
         )?;
         let Some((_, outcome)) = outcomes.pop() else {
             return Err(io::Error::other("request produced no result"));
         };
-        outcome.map(|status| status.unwrap_or(1))
+        let status = task_status(&outcome);
+        outcome.map(|_| status)
     }
 
     /// Runs ready workflow tasks concurrently until completion.
@@ -151,7 +152,7 @@ impl Runner {
                     )
                 })
                 .collect();
-            let outcomes = run_requests_concurrently(&self.working_directory, jobs, on_event)?;
+            let outcomes = run_requests_concurrently(&self.processes, jobs, on_event)?;
 
             record_outcomes(&mut execution, outcomes, &mut exit_status)?;
         }
@@ -204,16 +205,20 @@ enum Message {
 /// `None` inside `Ok` means the process died from a signal.
 type Outcome = io::Result<Option<i32>>;
 
+/// The status a request counts as. A signal or an execution error counts as 1.
+fn task_status(outcome: &Outcome) -> i32 {
+    outcome.as_ref().map_or(1, |status| status.unwrap_or(1))
+}
+
 /// Runs requests concurrently, reporting each line and each result as it arrives.
 ///
 /// Outcomes come back in completion order, not in the order of `jobs`.
 fn run_requests_concurrently(
-    working_directory: &Path,
+    runner: &ProcessRunner,
     jobs: Vec<Job>,
     on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
 ) -> io::Result<Vec<(Option<TaskIndex>, Outcome)>> {
     let (sender, receiver) = mpsc::channel::<Message>();
-    let runner = ProcessRunner::new(working_directory);
 
     std::thread::scope(|scope| {
         let handles = jobs
@@ -221,7 +226,6 @@ fn run_requests_concurrently(
             .map(|(task, request, sandbox)| {
                 // A Sender is not Sync, so the two reader threads share it under a lock.
                 let sender = Mutex::new(sender.clone());
-                let runner = &runner;
                 scope.spawn(move || {
                     let started = Instant::now();
                     let sink = |stream, line: &[u8]| {
@@ -290,8 +294,7 @@ fn record_outcomes(
         let Some(index) = task else {
             continue;
         };
-        // A task that could not run at all counts as a failed one.
-        let status = outcome.as_ref().map_or(1, |status| status.unwrap_or(1));
+        let status = task_status(&outcome);
         if !execution.complete(index, status == 0) {
             return Err(io::Error::other("workflow task is not running"));
         }
