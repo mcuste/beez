@@ -28,9 +28,7 @@ fn working_directory(name: &str) -> io::Result<(TemporaryDirectory, PathBuf)> {
 
 /// Runs `manifest` with `work` as the working directory of its tasks.
 fn run_workflow(directory: &TemporaryDirectory, work: &Path, manifest: &str) -> io::Result<Output> {
-    let path = directory.join("workflow.yaml");
-    fs::write(&path, manifest)?;
-
+    let path = directory.write("workflow.yaml", manifest)?;
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(&path)
@@ -418,12 +416,12 @@ fn applies_the_harness_environment_inside_the_sandbox() {
     let work = directory.join("work");
     fs::create_dir(&work).unwrap();
     write_harness_stub(&directory).unwrap();
-    let manifest = directory.join("workflow.yaml");
-    fs::write(
-        &manifest,
-        "tasks:\n  - id: environment\n    harness: claude\n    prompt: check\n    sandbox: true\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: environment\n    harness: claude\n    prompt: check\n    sandbox: true\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])

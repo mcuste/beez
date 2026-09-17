@@ -343,7 +343,7 @@ impl Daemon {
 
     fn hold(&mut self, id: &str, paused: bool, now: SystemTime) -> Response {
         let Some((index, job)) = self.job_mut(id) else {
-            return unknown_job(id);
+            return Response::unknown_job(id);
         };
         job.state.paused = paused;
         self.save_state(index);
@@ -356,7 +356,7 @@ impl Daemon {
 
     fn trigger(&mut self, id: &str, now: SystemTime) -> Response {
         let Some((index, job)) = self.job(id) else {
-            return unknown_job(id);
+            return Response::unknown_job(id);
         };
         if let Some(error) = &job.error {
             return Response::error(format!("{id} cannot run: {error}"));
@@ -769,8 +769,4 @@ fn waiting_message(running: usize) -> String {
         1 => "stopping after 1 running run ends".to_owned(),
         count => format!("stopping after {count} running runs end"),
     }
-}
-
-fn unknown_job(id: &str) -> Response {
-    Response::error(message::unknown_job(id))
 }

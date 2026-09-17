@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::message;
+
 /// What a command asks the daemon to do.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -90,6 +92,11 @@ impl Response {
         Self::Error {
             message: message.into(),
         }
+    }
+
+    /// The command named a job the daemon does not hold.
+    pub(crate) fn unknown_job(job: &str) -> Self {
+        Self::error(message::unknown_job(job))
     }
 }
 

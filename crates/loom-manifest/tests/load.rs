@@ -1,8 +1,6 @@
 //! Manifest loading integration tests.
 
 use std::fs;
-use std::io;
-use std::path::PathBuf;
 
 use loom_core::TaskRequest;
 use loom_manifest::{ManifestError, Overlap, load};
@@ -15,12 +13,12 @@ use loom_test_support::TemporaryDirectory;
 #[test]
 fn loads_yaml_tasks_and_resolves_dependencies() {
     let directory = TemporaryDirectory::new("manifest-yaml-workflow").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: pi\n    prompt: inspect the repository\n  - id: summarize\n    depends_on: [inspect]\n    harness: omp\n    prompt: summarize the findings\n  - id: test\n    depends_on: [inspect, summarize]\n    command: [cargo, test, --workspace]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: pi\n    prompt: inspect the repository\n  - id: summarize\n    depends_on: [inspect]\n    harness: omp\n    prompt: summarize the findings\n  - id: test\n    depends_on: [inspect, summarize]\n    command: [cargo, test, --workspace]\n",
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let tasks = workflow.tasks();
@@ -72,12 +70,12 @@ fn loads_yaml_tasks_and_resolves_dependencies() {
 #[test]
 fn loads_json_command_task() {
     let directory = TemporaryDirectory::new("manifest-json-workflow").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "json",
-        r#"{"tasks":[{"id":"lint","command":["cargo","clippy","--workspace"]}]}"#,
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.json",
+            r#"{"tasks":[{"id":"lint","command":["cargo","clippy","--workspace"]}]}"#,
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
@@ -93,12 +91,12 @@ fn loads_json_command_task() {
 #[test]
 fn loads_harness_model_and_effort() {
     let directory = TemporaryDirectory::new("manifest-harness-options").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: pi\n    prompt: inspect the repository\n    model: opus\n    effort: high\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: pi\n    prompt: inspect the repository\n    model: opus\n    effort: high\n",
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
@@ -116,12 +114,12 @@ fn loads_harness_model_and_effort() {
 #[test]
 fn rejects_a_model_on_command_tasks() {
     let directory = TemporaryDirectory::new("manifest-command-model").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: test\n    command: [cargo, test]\n    model: opus\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    command: [cargo, test]\n    model: opus\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -132,12 +130,12 @@ fn rejects_a_model_on_command_tasks() {
 #[test]
 fn rejects_an_effort_on_command_tasks() {
     let directory = TemporaryDirectory::new("manifest-command-effort").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: test\n    command: [cargo, test]\n    effort: high\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    command: [cargo, test]\n    effort: high\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -148,12 +146,12 @@ fn rejects_an_effort_on_command_tasks() {
 #[test]
 fn loads_claude_and_codex_harness_tasks() {
     let directory = TemporaryDirectory::new("manifest-claude-codex").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: claude\n    prompt: inspect the repository\n  - id: review\n    depends_on: [inspect]\n    harness: codex\n    prompt: review the findings\n    effort: high\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: claude\n    prompt: inspect the repository\n  - id: review\n    depends_on: [inspect]\n    harness: codex\n    prompt: review the findings\n    effort: high\n",
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let inspect = workflow.tasks().first().unwrap();
@@ -180,12 +178,12 @@ fn loads_claude_and_codex_harness_tasks() {
 #[test]
 fn reports_the_rejected_harness_name() {
     let directory = TemporaryDirectory::new("manifest-unsupported-harness").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: cursor\n    prompt: inspect the repository\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: cursor\n    prompt: inspect the repository\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -196,12 +194,12 @@ fn reports_the_rejected_harness_name() {
 #[test]
 fn rejects_a_harness_without_a_prompt() {
     let directory = TemporaryDirectory::new("manifest-harness-without-prompt").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: claude\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: claude\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -213,12 +211,12 @@ fn rejects_a_harness_without_a_prompt() {
 #[test]
 fn rejects_a_prompt_without_a_harness() {
     let directory = TemporaryDirectory::new("manifest-prompt-without-harness").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    prompt: inspect the repository\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    prompt: inspect the repository\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -230,12 +228,12 @@ fn rejects_a_prompt_without_a_harness() {
 #[test]
 fn loads_json_harness_model_and_effort() {
     let directory = TemporaryDirectory::new("manifest-json-harness-options").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "json",
-        r#"{"tasks":[{"id":"inspect","harness":"pi","prompt":"inspect","model":"opus","effort":"high"}]}"#,
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.json",
+            r#"{"tasks":[{"id":"inspect","harness":"pi","prompt":"inspect","model":"opus","effort":"high"}]}"#,
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
@@ -253,7 +251,7 @@ fn loads_json_harness_model_and_effort() {
 #[test]
 fn rejects_malformed_yaml() {
     let directory = TemporaryDirectory::new("manifest-malformed-yaml").unwrap();
-    let manifest = write_manifest(&directory, "yaml", "tasks: [").unwrap();
+    let manifest = directory.write("workflow.yaml", "tasks: [").unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -261,7 +259,7 @@ fn rejects_malformed_yaml() {
 #[test]
 fn rejects_malformed_json() {
     let directory = TemporaryDirectory::new("manifest-malformed-json").unwrap();
-    let manifest = write_manifest(&directory, "json", r#"{"tasks":[}"#).unwrap();
+    let manifest = directory.write("workflow.json", r#"{"tasks":[}"#).unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -269,12 +267,12 @@ fn rejects_malformed_json() {
 #[test]
 fn rejects_unknown_task_fields() {
     let directory = TemporaryDirectory::new("manifest-unknown-field").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    command: [echo, inspect]\n    unexpected: value\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    command: [echo, inspect]\n    unexpected: value\n",
+        )
+        .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -282,7 +280,9 @@ fn rejects_unknown_task_fields() {
 #[test]
 fn rejects_tasks_without_a_request() {
     let directory = TemporaryDirectory::new("manifest-missing-request").unwrap();
-    let manifest = write_manifest(&directory, "yaml", "tasks:\n  - id: inspect\n").unwrap();
+    let manifest = directory
+        .write("workflow.yaml", "tasks:\n  - id: inspect\n")
+        .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -290,12 +290,12 @@ fn rejects_tasks_without_a_request() {
 #[test]
 fn rejects_tasks_with_conflicting_requests() {
     let directory = TemporaryDirectory::new("manifest-conflicting-request").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    harness: pi\n    prompt: inspect the repository\n    command: [echo, inspect]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: pi\n    prompt: inspect the repository\n    command: [echo, inspect]\n",
+        )
+        .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -303,12 +303,12 @@ fn rejects_tasks_with_conflicting_requests() {
 #[test]
 fn rejects_commands_without_a_program() {
     let directory = TemporaryDirectory::new("manifest-empty-command").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    command: []\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    command: []\n",
+        )
+        .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -316,12 +316,12 @@ fn rejects_commands_without_a_program() {
 #[test]
 fn rejects_invalid_task_ids() {
     let directory = TemporaryDirectory::new("manifest-invalid-id").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect-repository\n    command: [echo, inspect]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect-repository\n    command: [echo, inspect]\n",
+        )
+        .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -329,7 +329,7 @@ fn rejects_invalid_task_ids() {
 #[test]
 fn rejects_a_workflow_without_tasks() {
     let directory = TemporaryDirectory::new("manifest-without-tasks").unwrap();
-    let manifest = write_manifest(&directory, "yaml", "tasks: []\n").unwrap();
+    let manifest = directory.write("workflow.yaml", "tasks: []\n").unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -340,12 +340,12 @@ fn rejects_a_workflow_without_tasks() {
 #[test]
 fn rejects_unknown_dependencies() {
     let directory = TemporaryDirectory::new("manifest-unknown-dependency").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: test\n    depends_on: [prepare]\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    depends_on: [prepare]\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Invalid(_))));
 }
@@ -353,12 +353,12 @@ fn rejects_unknown_dependencies() {
 #[test]
 fn reports_duplicate_task_ids_from_the_workflow() {
     let directory = TemporaryDirectory::new("manifest-duplicate-task").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: build\n    command: [echo, first]\n  - id: build\n    command: [echo, second]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: build\n    command: [echo, first]\n  - id: build\n    command: [echo, second]\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -369,12 +369,12 @@ fn reports_duplicate_task_ids_from_the_workflow() {
 #[test]
 fn reports_three_task_dependency_cycles_from_the_workflow() {
     let directory = TemporaryDirectory::new("manifest-dependency-cycle").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: prepare\n    depends_on: [build]\n    command: [echo, prepare]\n  - id: build\n    depends_on: [test]\n    command: [echo, build]\n  - id: test\n    depends_on: [prepare]\n    command: [echo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: prepare\n    depends_on: [build]\n    command: [echo, prepare]\n  - id: build\n    depends_on: [test]\n    command: [echo, build]\n  - id: test\n    depends_on: [prepare]\n    command: [echo, test]\n",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -386,12 +386,12 @@ fn reports_three_task_dependency_cycles_from_the_workflow() {
 #[test]
 fn rejects_unsupported_file_extensions() {
     let directory = TemporaryDirectory::new("manifest-unsupported-extension").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "toml",
-        "tasks = [{ id = \"inspect\", command = [\"echo\", \"inspect\"] }]",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.toml",
+            "tasks = [{ id = \"inspect\", command = [\"echo\", \"inspect\"] }]",
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -402,37 +402,26 @@ fn rejects_unsupported_file_extensions() {
 #[test]
 fn reports_unreadable_manifest_files() {
     let directory = TemporaryDirectory::new("manifest-missing-file").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: inspect\n    command: [echo, inspect]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    command: [echo, inspect]\n",
+        )
+        .unwrap();
     fs::remove_file(&manifest).unwrap();
 
     assert!(matches!(load(&manifest), Err(ManifestError::Io(_))));
 }
 
-fn write_manifest(
-    directory: &TemporaryDirectory,
-    extension: &str,
-    source: &str,
-) -> io::Result<PathBuf> {
-    let path = directory.join(&format!("workflow.{extension}"));
-    fs::write(&path, source)?;
-
-    Ok(path)
-}
-
 #[test]
 fn applies_a_workflow_sandbox_to_every_task_unless_a_task_opts_out() {
     let directory = TemporaryDirectory::new("manifest-workflow-sandbox").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "sandbox:\n  network:\n    groups: [github]\n    allow: [\"registry.internal:443\"]\ntasks:\n  - id: inspect\n    harness: claude\n    prompt: inspect the repository\n  - id: test\n    command: [cargo, test]\n    sandbox: false\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "sandbox:\n  network:\n    groups: [github]\n    allow: [\"registry.internal:443\"]\ntasks:\n  - id: inspect\n    harness: claude\n    prompt: inspect the repository\n  - id: test\n    command: [cargo, test]\n    sandbox: false\n",
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let inspect = workflow.tasks().first().unwrap();
@@ -456,12 +445,12 @@ fn applies_a_workflow_sandbox_to_every_task_unless_a_task_opts_out() {
 #[test]
 fn sandboxes_every_task_a_manifest_does_not_opt_out() {
     let directory = TemporaryDirectory::new("manifest-sandbox-default").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: build\n    command: [cargo, build]\n  - id: publish\n    command: [./publish.sh]\n    sandbox: false\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: build\n    command: [cargo, build]\n  - id: publish\n    command: [./publish.sh]\n    sandbox: false\n",
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
 
@@ -475,12 +464,12 @@ fn sandboxes_every_task_a_manifest_does_not_opt_out() {
 #[test]
 fn enables_the_default_sandbox_with_a_boolean() {
     let directory = TemporaryDirectory::new("manifest-sandbox-true").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox: true\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox: true\n",
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
@@ -491,10 +480,7 @@ fn enables_the_default_sandbox_with_a_boolean() {
 #[test]
 fn adds_task_sandbox_sections_to_the_workflow_sections() {
     let directory = TemporaryDirectory::new("manifest-task-sandbox-adds").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        concat!(
+    let manifest = directory.write("workflow.yaml", concat!(
             "sandbox:\n",
             "  network:\n    groups: [github]\n",
             "  filesystem:\n    write_allow: [/data]\n",
@@ -532,12 +518,12 @@ fn adds_task_sandbox_sections_to_the_workflow_sections() {
 #[test]
 fn loads_a_json_sandbox() {
     let directory = TemporaryDirectory::new("manifest-json-sandbox").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "json",
-        r#"{"tasks":[{"id":"lint","command":["cargo","clippy"],"sandbox":{"filesystem":{"defaults":false,"read_deny":["~/.secrets"],"write_allow":["."]}}}]}"#,
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.json",
+            r#"{"tasks":[{"id":"lint","command":["cargo","clippy"],"sandbox":{"filesystem":{"defaults":false,"read_deny":["~/.secrets"],"write_allow":["."]}}}]}"#,
+        )
+        .unwrap();
 
     let workflow = load(&manifest).unwrap().into_workflow();
     let task = workflow.tasks().first().unwrap();
@@ -560,24 +546,24 @@ fn rejects_unknown_sandbox_groups_and_fields() {
     let directory = TemporaryDirectory::new("manifest-sandbox-invalid").unwrap();
     let unknown_field_directory = TemporaryDirectory::new("manifest-sandbox-unknown").unwrap();
     let bad_rule_directory = TemporaryDirectory::new("manifest-sandbox-rule").unwrap();
-    let unknown_group = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      network:\n        groups: [nowhere]\n",
-    )
-    .unwrap();
-    let unknown_field = write_manifest(
-        &unknown_field_directory,
-        "json",
-        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"domains":[]}}}]}"#,
-    )
-    .unwrap();
-    let bad_rule = write_manifest(
-        &bad_rule_directory,
-        "json",
-        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"allow":["a.*.com"]}}}]}"#,
-    )
-    .unwrap();
+    let unknown_group = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      network:\n        groups: [nowhere]\n",
+        )
+        .unwrap();
+    let unknown_field = unknown_field_directory
+        .write(
+            "workflow.json",
+            r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"domains":[]}}}]}"#,
+        )
+        .unwrap();
+    let bad_rule = bad_rule_directory
+        .write(
+            "workflow.json",
+            r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"allow":["a.*.com"]}}}]}"#,
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&unknown_group),
@@ -596,12 +582,12 @@ fn rejects_unknown_sandbox_groups_and_fields() {
 #[test]
 fn loads_one_cron_schedule_with_its_defaults() {
     let directory = TemporaryDirectory::new("manifest-one-schedule").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     let manifest = load(&manifest).unwrap();
     let schedule = manifest.schedules().first().unwrap();
@@ -617,12 +603,12 @@ fn loads_one_cron_schedule_with_its_defaults() {
 #[test]
 fn loads_a_schedule_with_an_offset_and_policies() {
     let directory = TemporaryDirectory::new("manifest-schedule-policies").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "schedule:\n  cron: \"0 3 * * *\"\n  offset: \"+02:00\"\n  on_overlap: queue\n  catch_up: true\n  enabled: false\ntasks:\n  - id: test\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "schedule:\n  cron: \"0 3 * * *\"\n  offset: \"+02:00\"\n  on_overlap: queue\n  catch_up: true\n  enabled: false\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     let manifest = load(&manifest).unwrap();
     let schedule = manifest.schedules().first().unwrap();
@@ -636,12 +622,12 @@ fn loads_a_schedule_with_an_offset_and_policies() {
 #[test]
 fn loads_a_one_time_schedule() {
     let directory = TemporaryDirectory::new("manifest-once-schedule").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "schedule:\n  at: \"2026-09-10T03:00:00Z\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "schedule:\n  at: \"2026-09-10T03:00:00Z\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     let manifest = load(&manifest).unwrap();
     let schedule = manifest.schedules().first().unwrap();
@@ -653,12 +639,12 @@ fn loads_a_one_time_schedule() {
 #[test]
 fn loads_a_list_of_named_schedules() {
     let directory = TemporaryDirectory::new("manifest-many-schedules").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "schedule:\n  - name: weekday\n    cron: \"0 3 * * 1-5\"\n  - name: weekend\n    cron: \"0 5 * * 6,0\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "schedule:\n  - name: weekday\n    cron: \"0 3 * * 1-5\"\n  - name: weekend\n    cron: \"0 5 * * 6,0\"\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     let manifest = load(&manifest).unwrap();
     let names: Vec<Option<&str>> = manifest
@@ -673,12 +659,12 @@ fn loads_a_list_of_named_schedules() {
 #[test]
 fn loads_a_manifest_without_a_schedule() {
     let directory = TemporaryDirectory::new("manifest-no-schedule").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "yaml",
-        "tasks:\n  - id: test\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     assert!(load(&manifest).unwrap().schedules().is_empty());
 }
@@ -687,18 +673,18 @@ fn loads_a_manifest_without_a_schedule() {
 fn rejects_a_schedule_that_names_neither_or_both_of_cron_and_at() {
     let neither_directory = TemporaryDirectory::new("manifest-schedule-neither").unwrap();
     let both_directory = TemporaryDirectory::new("manifest-schedule-both").unwrap();
-    let neither = write_manifest(
-        &neither_directory,
-        "json",
-        r#"{"schedule":{"catch_up":true},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
-    let both = write_manifest(
-        &both_directory,
-        "json",
-        r#"{"schedule":{"cron":"0 3 * * *","at":"2026-09-10T03:00:00Z"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
+    let neither = neither_directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":{"catch_up":true},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
+    let both = both_directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":{"cron":"0 3 * * *","at":"2026-09-10T03:00:00Z"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&neither),
@@ -713,12 +699,12 @@ fn rejects_a_schedule_that_names_neither_or_both_of_cron_and_at() {
 #[test]
 fn rejects_an_offset_on_a_one_time_schedule() {
     let directory = TemporaryDirectory::new("manifest-once-offset").unwrap();
-    let manifest = write_manifest(
-        &directory,
-        "json",
-        r#"{"schedule":{"at":"2026-09-10T03:00:00Z","offset":"+02:00"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":{"at":"2026-09-10T03:00:00Z","offset":"+02:00"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&manifest),
@@ -730,18 +716,18 @@ fn rejects_an_offset_on_a_one_time_schedule() {
 fn rejects_a_cron_expression_the_scheduler_cannot_use() {
     let sub_minute_directory = TemporaryDirectory::new("manifest-sub-minute-cron").unwrap();
     let short_directory = TemporaryDirectory::new("manifest-short-cron").unwrap();
-    let sub_minute = write_manifest(
-        &sub_minute_directory,
-        "json",
-        r#"{"schedule":{"cron":"* * * * * *"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
-    let short = write_manifest(
-        &short_directory,
-        "json",
-        r#"{"schedule":{"cron":"0 3 * *"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
+    let sub_minute = sub_minute_directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":{"cron":"* * * * * *"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
+    let short = short_directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":{"cron":"0 3 * *"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&sub_minute),
@@ -757,18 +743,18 @@ fn rejects_a_cron_expression_the_scheduler_cannot_use() {
 fn rejects_a_list_of_schedules_that_does_not_name_each_one() {
     let unnamed_directory = TemporaryDirectory::new("manifest-unnamed-schedules").unwrap();
     let repeated_directory = TemporaryDirectory::new("manifest-repeated-schedules").unwrap();
-    let unnamed = write_manifest(
-        &unnamed_directory,
-        "json",
-        r#"{"schedule":[{"cron":"0 3 * * *"},{"name":"late","cron":"0 5 * * *"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
-    let repeated = write_manifest(
-        &repeated_directory,
-        "json",
-        r#"{"schedule":[{"name":"nightly","cron":"0 3 * * *"},{"name":"nightly","cron":"0 5 * * *"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
-    )
-    .unwrap();
+    let unnamed = unnamed_directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":[{"cron":"0 3 * * *"},{"name":"late","cron":"0 5 * * *"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
+    let repeated = repeated_directory
+        .write(
+            "workflow.json",
+            r#"{"schedule":[{"name":"nightly","cron":"0 3 * * *"},{"name":"nightly","cron":"0 5 * * *"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        )
+        .unwrap();
 
     assert!(matches!(
         load(&unnamed),

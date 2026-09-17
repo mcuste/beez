@@ -40,6 +40,13 @@ impl TemporaryDirectory {
     pub fn join(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
+
+    /// Writes `contents` to `name` inside the directory and returns its path.
+    pub fn write(&self, name: &str, contents: impl AsRef<[u8]>) -> io::Result<PathBuf> {
+        let path = self.0.join(name);
+        fs::write(&path, contents)?;
+        Ok(path)
+    }
 }
 
 impl Drop for TemporaryDirectory {

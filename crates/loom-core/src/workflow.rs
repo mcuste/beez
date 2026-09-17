@@ -178,7 +178,7 @@ impl WorkflowExecution<'_> {
 
     /// True when the task has not started and every dependency succeeded.
     fn is_ready(&self, index: TaskIndex) -> bool {
-        let Some(task) = self.workflow.tasks.get(index.position()) else {
+        let Some(task) = self.workflow.task(index) else {
             return false;
         };
         self.statuses.get(index.position()) == Some(&TaskStatus::Pending)

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use loom_schedule::{CronSchedule, Schedule, UtcOffset, parse_instant};
 use serde::Deserialize;
 
@@ -154,14 +156,11 @@ pub(crate) fn resolve(setting: Option<ScheduleSetting>) -> Result<Vec<JobSchedul
 }
 
 fn repeated_name(schedules: &[JobSchedule]) -> Option<&str> {
-    schedules.iter().enumerate().find_map(|(index, schedule)| {
-        let name = schedule.name()?;
-        schedules
-            .iter()
-            .skip(index + 1)
-            .any(|other| other.name() == Some(name))
-            .then_some(name)
-    })
+    let mut seen = BTreeSet::new();
+    schedules
+        .iter()
+        .filter_map(JobSchedule::name)
+        .find(|name| !seen.insert(*name))
 }
 
 fn default_true() -> bool {

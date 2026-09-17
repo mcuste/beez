@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use loom_manifest::load;
-use loom_record::{LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, log_failure};
+use loom_record::{LogSettings, OpenLog, RunRecorder, RunTally, RunTarget};
 use loom_runner::Runner;
 use loom_schedule::format_instant;
 
@@ -58,8 +58,8 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
         directory: Some(&job.log_directory),
     };
     let (mut log, failure) = OpenLog::open(settings, &target, &job.working_directory);
-    if let Some(error) = failure {
-        report::line("Warning", &format!("{}: {}", job.id, log_failure(&error)));
+    if let Some(failure) = failure {
+        warn(&job.id, &failure);
     }
     let directory = log
         .directory()
@@ -83,7 +83,8 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
     let mut tally = RunTally::default();
     let outcome = Runner::new(&job.working_directory).run_workflow(&workflow, &mut |event| {
         tally.record(event);
-        log.write(|recorder| recorder.event(event))
+        record(&mut log, |recorder| recorder.event(event), &job.id);
+        Ok(())
     });
     let summary = tally.summary(started.elapsed());
     let status = outcome.as_ref().ok().copied();
@@ -107,9 +108,13 @@ fn record(
     action: impl FnOnce(&mut RunRecorder) -> std::io::Result<()>,
     job: &str,
 ) {
-    if let Err(error) = log.write(action) {
-        report::line("Warning", &format!("{job}: {}", log_failure(&error)));
+    if let Some(failure) = log.write(action) {
+        warn(job, &failure);
     }
+}
+
+fn warn(job: &str, failure: &str) {
+    report::line("Warning", &format!("{job}: {failure}"));
 }
 
 fn failure(error: &str) -> RunOutcome {

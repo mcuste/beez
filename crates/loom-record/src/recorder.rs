@@ -8,6 +8,7 @@ use std::path::Path;
 
 use loom_runner::RunEvent;
 
+use crate::format::log_failure;
 use crate::log::{LogSettings, RunLog, RunTarget};
 use crate::outcome::TaskOutcome;
 
@@ -34,7 +35,7 @@ impl RunRecorder {
             return Ok(());
         };
         self.log.outcome(index, outcome);
-        let (verb, message) = outcome.status(&self.log.label(index));
+        let (verb, message) = outcome.status(&self.log.labels().get(index));
 
         self.log.status(verb, &message)
     }
@@ -63,21 +64,22 @@ impl RunRecorder {
 pub struct OpenLog(Option<RunRecorder>);
 
 impl OpenLog {
-    /// Opens the artifacts of one run, with the error when they cannot open.
+    /// Opens the artifacts of one run, with the warning to show when they
+    /// cannot open.
     ///
-    /// The run goes on either way, so the caller reports the error and keeps
+    /// The run goes on either way, so the caller shows the warning and keeps
     /// going.
     pub fn open(
         settings: LogSettings<'_>,
         target: &RunTarget<'_>,
         working_directory: &Path,
-    ) -> (Self, Option<io::Error>) {
+    ) -> (Self, Option<String>) {
         if !settings.enabled {
             return (Self(None), None);
         }
         match RunLog::create(settings.directory, target, working_directory) {
             Ok(log) => (Self(Some(RunRecorder { log })), None),
-            Err(error) => (Self(None), Some(error)),
+            Err(error) => (Self(None), Some(log_failure(&error))),
         }
     }
 
@@ -87,20 +89,16 @@ impl OpenLog {
         self.0.as_ref().map(RunRecorder::directory)
     }
 
-    /// Writes to the log, and closes it after a failure, so the caller reports
-    /// the failure once. A closed log ignores every later write.
+    /// Writes to the log, and closes it after a failure, so the caller shows
+    /// the warning it returns once. A closed log ignores every later write.
     pub fn write(
         &mut self,
         action: impl FnOnce(&mut RunRecorder) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let Some(recorder) = self.0.as_mut() else {
-            return Ok(());
-        };
-        let result = action(recorder);
-        if result.is_err() {
-            self.0 = None;
-        }
+    ) -> Option<String> {
+        let recorder = self.0.as_mut()?;
+        let failure = action(recorder).err()?;
+        self.0 = None;
 
-        result
+        Some(log_failure(&failure))
     }
 }

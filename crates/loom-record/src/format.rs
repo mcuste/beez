@@ -35,9 +35,50 @@ pub fn stream_mark(stream: OutputStream) -> &'static str {
     }
 }
 
-/// Width of the task label column, as wide as the longest label.
-pub fn label_width<'label>(labels: impl IntoIterator<Item = &'label str>) -> usize {
-    labels.into_iter().map(str::len).max().unwrap_or(0)
+/// The task labels of one run, in declaration order.
+///
+/// The run log and the terminal both put a label in front of a task's lines,
+/// so both take the label and the column width from here.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Labels {
+    labels: Vec<String>,
+    width: usize,
+}
+
+impl Labels {
+    /// Labels in declaration order.
+    #[must_use]
+    pub fn new(labels: Vec<String>) -> Self {
+        let width = labels.iter().map(String::len).max().unwrap_or(0);
+        Self { labels, width }
+    }
+
+    /// How many tasks the run has.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    /// True for a run without tasks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    /// Width of the label column, as wide as the longest label.
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// The label of the task at `index`, or the index for a task it does not know.
+    #[must_use]
+    pub fn get(&self, index: usize) -> String {
+        self.labels
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| index.to_string())
+    }
 }
 
 /// Removes one trailing line ending, so a line can go in a column.
@@ -65,7 +106,7 @@ pub fn status_text(exit_status: Option<i32>) -> String {
 
 /// What Loom reports when it cannot write the artifacts of a run.
 #[must_use]
-pub fn log_failure(error: &io::Error) -> String {
+pub(crate) fn log_failure(error: &io::Error) -> String {
     format!("run log: {error}")
 }
 
@@ -84,7 +125,7 @@ pub(crate) fn counts(passed: usize, failed: usize, blocked: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{counts, label_width, status_text};
+    use super::{Labels, counts, status_text};
 
     #[test]
     fn names_only_the_counts_a_run_reached() {
@@ -101,7 +142,17 @@ mod tests {
 
     #[test]
     fn sizes_the_label_column_to_the_longest_label() {
-        assert_eq!(label_width(["build", "test"]), 5);
-        assert_eq!(label_width([]), 0);
+        let sut = Labels::new(vec!["build".to_owned(), "test".to_owned()]);
+
+        assert_eq!(sut.width(), 5);
+        assert_eq!(Labels::default().width(), 0);
+    }
+
+    #[test]
+    fn names_a_task_it_does_not_know_by_its_index() {
+        let sut = Labels::new(vec!["build".to_owned()]);
+
+        assert_eq!(sut.get(0), "build");
+        assert_eq!(sut.get(3), "3");
     }
 }

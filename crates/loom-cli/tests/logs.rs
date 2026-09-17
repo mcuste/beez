@@ -11,12 +11,6 @@ use loom_test_support::TemporaryDirectory;
 
 mod common;
 
-fn workflow(directory: &TemporaryDirectory, tasks: &str) -> io::Result<PathBuf> {
-    let path = directory.join("workflow.yaml");
-    fs::write(&path, tasks)?;
-    Ok(path)
-}
-
 /// Runs `manifest` with `root` as the artifact directory.
 fn run_workflow(manifest: &Path, root: &Path, arguments: &[&str]) -> io::Result<Output> {
     common::loom()
@@ -48,11 +42,12 @@ fn only_run(root: &Path) -> io::Result<PathBuf> {
 fn keeps_the_whole_run_in_one_log_and_the_streams_of_each_task_apart() {
     let directory = TemporaryDirectory::new("logs-run").unwrap();
     let root = directory.join("artifacts");
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out; echo first-err >&2']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out; echo first-err >&2']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
+        )
+        .unwrap();
 
     let output = run_workflow(&manifest, &root, &[]).unwrap();
 
@@ -95,11 +90,12 @@ fn keeps_the_whole_run_in_one_log_and_the_streams_of_each_task_apart() {
 fn records_the_outcome_of_every_task_of_a_failed_run() {
     let directory = TemporaryDirectory::new("logs-record").unwrap();
     let root = directory.join("artifacts");
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: works\n    command: [bash, -c, 'true']\n  - id: fails\n    command: [bash, -c, 'exit 23']\n  - id: later\n    depends_on: [fails]\n    harness: claude\n    prompt: review\n    model: opus\n    effort: high\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: works\n    command: [bash, -c, 'true']\n  - id: fails\n    command: [bash, -c, 'exit 23']\n  - id: later\n    depends_on: [fails]\n    harness: claude\n    prompt: review\n    model: opus\n    effort: high\n",
+        )
+        .unwrap();
 
     let output = run_workflow(&manifest, &root, &[]).unwrap();
 
@@ -131,11 +127,12 @@ fn records_the_outcome_of_every_task_of_a_failed_run() {
 fn keeps_the_colours_of_a_task_out_of_the_run_log() {
     let directory = TemporaryDirectory::new("logs-colour").unwrap();
     let root = directory.join("artifacts");
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'printf \"\\033[31mred\\033[0m\\n\"']\n  - id: second\n    command: [bash, -c, 'true']\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'printf \"\\033[31mred\\033[0m\\n\"']\n  - id: second\n    command: [bash, -c, 'true']\n",
+        )
+        .unwrap();
 
     let output = run_workflow(&manifest, &root, &[]).unwrap();
 
@@ -155,11 +152,12 @@ fn keeps_the_colours_of_a_task_out_of_the_run_log() {
 fn points_the_latest_link_at_the_newest_run() {
     let directory = TemporaryDirectory::new("logs-latest").unwrap();
     let root = directory.join("artifacts");
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: only\n    command: [bash, -c, 'printf solo']\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: only\n    command: [bash, -c, 'printf solo']\n",
+        )
+        .unwrap();
 
     assert!(
         run_workflow(&manifest, &root, &[])
@@ -190,11 +188,12 @@ fn points_the_latest_link_at_the_newest_run() {
 fn keeps_a_single_task_run_free_of_loom_lines_and_still_records_it() {
     let directory = TemporaryDirectory::new("logs-single").unwrap();
     let root = directory.join("artifacts");
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: only\n    command: [bash, -c, 'echo out; echo err >&2']\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: only\n    command: [bash, -c, 'echo out; echo err >&2']\n",
+        )
+        .unwrap();
 
     let output = run_workflow(&manifest, &root, &[]).unwrap();
 
@@ -212,11 +211,12 @@ fn keeps_a_single_task_run_free_of_loom_lines_and_still_records_it() {
 fn writes_nothing_when_the_run_asks_for_no_artifacts() {
     let directory = TemporaryDirectory::new("logs-none").unwrap();
     let root = directory.join("artifacts");
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo one']\n  - id: second\n    command: [bash, -c, 'echo two']\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo one']\n  - id: second\n    command: [bash, -c, 'echo two']\n",
+        )
+        .unwrap();
 
     let output = run_workflow(&manifest, &root, &["--no-log"]).unwrap();
 
@@ -232,11 +232,12 @@ fn keeps_the_runs_of_a_repository_together() {
     fs::create_dir(directory.join(".git")).unwrap();
     let deep = directory.join("crates/loom-cli");
     fs::create_dir_all(&deep).unwrap();
-    let manifest = workflow(
-        &directory,
-        "tasks:\n  - id: only\n    command: [bash, -c, 'true']\n",
-    )
-    .unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: only\n    command: [bash, -c, 'true']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -258,11 +259,12 @@ fn keeps_the_runs_of_a_repository_together() {
 fn names_the_manifest_by_its_absolute_path_in_the_record() {
     let directory = TemporaryDirectory::new("logs-manifest-path").unwrap();
     let root = directory.join("artifacts");
-    workflow(
-        &directory,
-        "tasks:\n  - id: only\n    command: [bash, -c, 'true']\n",
-    )
-    .unwrap();
+    directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: only\n    command: [bash, -c, 'true']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "workflow.yaml"])

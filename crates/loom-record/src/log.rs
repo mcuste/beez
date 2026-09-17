@@ -15,7 +15,7 @@ use loom_core::{TaskRequest, Workflow};
 use loom_process::OutputStream;
 use serde::Serialize;
 
-use crate::format::{label_width, stamped_status_line, stream_mark, trim_newline};
+use crate::format::{Labels, stamped_status_line, stream_mark, trim_newline};
 use crate::outcome::TaskOutcome;
 use crate::time::{compact_utc, utc};
 
@@ -50,15 +50,15 @@ pub enum RunTarget<'run> {
 impl RunTarget<'_> {
     /// Task labels in declaration order.
     #[must_use]
-    pub fn labels(&self) -> Vec<String> {
-        match self {
+    pub fn labels(&self) -> Labels {
+        Labels::new(match self {
             Self::Workflow { workflow, .. } => workflow
                 .tasks()
                 .iter()
                 .map(|task| task.id().as_str().to_owned())
                 .collect(),
             Self::Request { name } => vec![(*name).to_owned()],
-        }
+        })
     }
 
     fn manifest(&self) -> Option<&Path> {
@@ -82,7 +82,7 @@ pub struct LogSettings<'run> {
 pub(crate) struct RunLog {
     directory: PathBuf,
     run: File,
-    width: usize,
+    labels: Labels,
     tasks: Vec<TaskLog>,
     record: RunRecord,
     started: SystemTime,
@@ -197,7 +197,7 @@ impl RunLog {
         Ok(Self {
             run: File::create(directory.join(RUN_LOG))?,
             directory,
-            width: label_width(tasks.iter().map(|task| task.record.id.as_str())),
+            labels: target.labels(),
             tasks,
             record,
             started,
@@ -210,11 +210,9 @@ impl RunLog {
         &self.directory
     }
 
-    /// The label of the task at `index`, or the index for a task it does not know.
-    pub(crate) fn label(&self, index: usize) -> String {
-        self.tasks
-            .get(index)
-            .map_or_else(|| index.to_string(), |task| task.record.id.clone())
+    /// The labels of the run's tasks.
+    pub(crate) fn labels(&self) -> &Labels {
+        &self.labels
     }
 
     /// Records one of Loom's own status lines.
@@ -236,7 +234,7 @@ impl RunLog {
         stream: OutputStream,
         line: &[u8],
     ) -> io::Result<()> {
-        let width = self.width;
+        let width = self.labels.width();
         let stamp = utc(SystemTime::now());
         let Some(task) = self.tasks.get_mut(index) else {
             return Ok(());

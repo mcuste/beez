@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use loom_daemon::{DaemonPaths, Request, Response};
@@ -326,23 +326,19 @@ fn run_workflow(file: WorkflowFile) -> io::Result<i32> {
     let workflow = load(&path)
         .map(loom_manifest::Manifest::into_workflow)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let working_directory = std::env::current_dir()?;
     let target = RunTarget::Workflow {
         path: &path,
         workflow: &workflow,
     };
-    let mut reporter = reporter(
+
+    run_reported(
         &target,
         output,
         color,
         timestamps,
         log.settings(),
-        &working_directory,
-    );
-
-    let status =
-        Runner::new(&working_directory).run_workflow(&workflow, &mut |event| reporter.event(event));
-    finish(&mut reporter, status)
+        |runner, reporter| runner.run_workflow(&workflow, &mut |event| reporter.event(event)),
+    )
 }
 
 fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
@@ -380,21 +376,37 @@ fn run_request(
     log: &LogArgs,
 ) -> io::Result<i32> {
     let policy = sandbox.policy()?;
-    let working_directory = std::env::current_dir()?;
     let target = RunTarget::Request { name };
-    let mut reporter = reporter(
+
+    run_reported(
         &target,
         OutputMode::Stream,
         ColorMode::Auto,
         None,
         log.settings(),
-        &working_directory,
-    );
+        |runner, reporter| {
+            runner.run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event))
+        },
+    )
+}
 
-    let status =
-        Runner::new(&working_directory)
-            .run_request_in(request, policy.as_ref(), &mut |event| reporter.event(event));
-    finish(&mut reporter, status)
+/// Runs `run` in the working directory, reports its events, and closes the
+/// run's own report before returning its status.
+fn run_reported(
+    target: &RunTarget<'_>,
+    output: OutputMode,
+    color: ColorMode,
+    timestamps: Option<Timestamps>,
+    log: LogSettings<'_>,
+    run: impl FnOnce(&Runner, &mut Reporter) -> io::Result<i32>,
+) -> io::Result<i32> {
+    let working_directory = std::env::current_dir()?;
+    let mut reporter = Reporter::new(target, output, color, timestamps, log, &working_directory);
+    loom_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
+
+    let status = run(&Runner::new(&working_directory), &mut reporter);
+    reporter.finish(status.as_ref().ok().copied())?;
+    status
 }
 
 fn daemon(command: DaemonCommand) -> io::Result<i32> {
@@ -461,26 +473,6 @@ fn answer(response: Response) -> i32 {
             2
         }
     }
-}
-
-/// Builds a reporter and routes sandbox diagnostics through it.
-fn reporter(
-    target: &RunTarget<'_>,
-    output: OutputMode,
-    color: ColorMode,
-    timestamps: Option<Timestamps>,
-    log: LogSettings<'_>,
-    working_directory: &Path,
-) -> Reporter {
-    let reporter = Reporter::new(target, output, color, timestamps, log, working_directory);
-    loom_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
-    reporter
-}
-
-/// Closes the run's own report, then returns its status.
-fn finish(reporter: &mut Reporter, status: io::Result<i32>) -> io::Result<i32> {
-    reporter.finish(status.as_ref().ok().copied())?;
-    status
 }
 
 #[cfg(target_os = "linux")]

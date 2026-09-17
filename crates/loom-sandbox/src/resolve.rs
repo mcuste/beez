@@ -205,9 +205,7 @@ fn locate_program(program: &Path, working_directory: &Path) -> Option<PathBuf> {
         // An absolute path replaces the working directory when joined.
         working_directory.join(program)
     };
-    fs::canonicalize(candidate)
-        .ok()
-        .filter(|path| is_executable_file(path))
+    canonical_executable(&candidate)
 }
 
 pub(crate) fn find_on_path(name: &Path) -> Option<PathBuf> {
@@ -216,6 +214,13 @@ pub(crate) fn find_on_path(name: &Path) -> Option<PathBuf> {
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| directory.join(name))
         .find(|candidate| is_executable_file(candidate))
+}
+
+/// The canonical path of `path`, when it is a file that may execute.
+fn canonical_executable(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path)
+        .ok()
+        .filter(|path| is_executable_file(path))
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -308,16 +313,13 @@ fn dynamic_loaders() -> Vec<PathBuf> {
 /// The canonical file behind a program name, plus the real tool behind a macOS shim.
 fn program_locations(name: &Path) -> Vec<PathBuf> {
     let mut locations = Vec::new();
-    if let Some(found) = find_on_path(name).and_then(|path| fs::canonicalize(path).ok()) {
-        locations.push(found);
-    }
+    locations.extend(find_on_path(name).and_then(|path| canonical_executable(&path)));
     #[cfg(target_os = "macos")]
     locations.extend(
         MACOS_TOOLCHAIN_DIRECTORIES
             .iter()
             .map(|directory| Path::new(directory).join("bin").join(name))
-            .filter(|candidate| is_executable_file(candidate))
-            .filter_map(|candidate| fs::canonicalize(candidate).ok()),
+            .filter_map(|candidate| canonical_executable(&candidate)),
     );
     locations
 }

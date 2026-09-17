@@ -11,8 +11,8 @@ use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use loom_process::{OutputStream, ProcessOutput};
 use loom_record::{
-    LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, VERB_WIDTH, label_width,
-    log_failure, seconds, stream_mark, trim_newline, utc,
+    Labels, LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, VERB_WIDTH,
+    seconds, stream_mark, trim_newline, utc,
 };
 use loom_runner::RunEvent;
 
@@ -117,8 +117,7 @@ struct Terminal {
 /// Renders lifecycle and output events of one run.
 pub(crate) struct Reporter {
     layout: Layout,
-    ids: Vec<String>,
-    width: usize,
+    labels: Labels,
     terminal: Arc<Terminal>,
     spinner: ProgressStyle,
     spinners: Vec<Option<ProgressBar>>,
@@ -131,7 +130,7 @@ impl std::fmt::Debug for Reporter {
         formatter
             .debug_struct("Reporter")
             .field("layout", &self.layout)
-            .field("ids", &self.ids)
+            .field("labels", &self.labels)
             .finish_non_exhaustive()
     }
 }
@@ -147,8 +146,8 @@ impl Reporter {
         settings: LogSettings<'_>,
         working_directory: &Path,
     ) -> Self {
-        let ids = target.labels();
-        let layout = resolve_layout(mode, ids.len());
+        let labels = target.labels();
+        let layout = resolve_layout(mode, labels.len());
         let bars = (layout == Layout::Stream)
             .then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr()));
         let choice = color_choice(color);
@@ -171,10 +170,9 @@ impl Reporter {
 
         Self {
             layout,
-            width: label_width(ids.iter().map(String::as_str)),
-            spinners: vec![None; ids.len()],
-            buffers: vec![Vec::new(); ids.len()],
-            ids,
+            spinners: vec![None; labels.len()],
+            buffers: vec![Vec::new(); labels.len()],
+            labels,
             terminal,
             spinner: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
             tally: RunTally::default(),
@@ -220,7 +218,7 @@ impl Reporter {
         }
 
         let Some((verb, message)) =
-            TaskOutcome::of(event).map(|outcome| outcome.status(&self.id(index)))
+            TaskOutcome::of(event).map(|outcome| outcome.status(&self.labels.get(index)))
         else {
             return Ok(());
         };
@@ -315,20 +313,13 @@ impl Reporter {
         }
     }
 
-    fn id(&self, index: usize) -> String {
-        self.ids
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| index.to_string())
-    }
-
     fn prefix(&self, index: usize) -> String {
-        let width = self.width;
+        let width = self.labels.width();
         let color = *PALETTE
             .get(index % PALETTE.len())
             .unwrap_or(&AnsiColor::Cyan);
         let style = Style::new().fg_color(Some(Color::Ansi(color))).bold();
-        paint(style, &format!("{:<width$}", self.id(index)))
+        paint(style, &format!("{:<width$}", self.labels.get(index)))
     }
 }
 
@@ -383,20 +374,17 @@ impl Terminal {
         let Ok(mut log) = self.log.lock() else {
             return;
         };
-        let failure = log.write(action).err();
+        let failure = log.write(action);
         // The warning writes a line of its own, so the log lock goes first.
         drop(log);
-        if let Some(error) = failure {
-            self.warn(&error);
+        if let Some(failure) = failure {
+            self.warn(&failure);
         }
     }
 
     /// Says why the run log could not be written.
-    fn warn(&self, error: &io::Error) {
-        let _ = self.line(
-            Target::Err,
-            &styled_status(YELLOW, "Warning", &log_failure(error)),
-        );
+    fn warn(&self, failure: &str) {
+        let _ = self.line(Target::Err, &styled_status(YELLOW, "Warning", failure));
     }
 
     /// Holds the spinners still, then takes the stream lock, always in this
@@ -428,15 +416,15 @@ impl Streams {
 }
 
 /// Names the directory of the run log, or why there is none.
-fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<io::Error>) {
+fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<String>) {
     if let Some(directory) = directory {
         let _ = terminal.line(
             Target::Err,
             &styled_status(CYAN, "Logging", &display(directory)),
         );
     }
-    if let Some(error) = failure {
-        terminal.warn(&error);
+    if let Some(failure) = failure {
+        terminal.warn(&failure);
     }
 }
 

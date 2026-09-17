@@ -118,12 +118,12 @@ fn rejects_a_prompt_that_starts_with_a_hyphen_without_a_separator() {
 fn runs_a_workflow_codex_task_with_a_model_and_effort() {
     let directory = TemporaryDirectory::new("cli-workflow-codex-options").unwrap();
     fake_harness(&directory, "codex", 0).unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: inspect\n    harness: codex\n    prompt: inspect the repository\n    model: gpt-5\n    effort: high\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: codex\n    prompt: inspect the repository\n    model: gpt-5\n    effort: high\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -144,12 +144,12 @@ fn runs_a_workflow_codex_task_with_a_model_and_effort() {
 fn runs_a_workflow_harness_task_with_a_model_and_effort() {
     let directory = TemporaryDirectory::new("cli-workflow-harness-options").unwrap();
     fake_harness(&directory, "omp", 0).unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: inspect\n    harness: omp\n    prompt: inspect the repository\n    model: opus\n    effort: high\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: omp\n    prompt: inspect the repository\n    model: opus\n    effort: high\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -185,12 +185,12 @@ fn rejects_an_unsupported_harness() {
 #[test]
 fn rejects_an_unsupported_workflow_harness() {
     let directory = TemporaryDirectory::new("cli-unsupported-workflow-harness").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: inspect\n    harness: cursor\n    prompt: inspect the repository\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    harness: cursor\n    prompt: inspect the repository\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -256,15 +256,12 @@ fn runs_a_command_with_literal_arguments() {
 fn runs_a_yaml_workflow_in_dependency_order() {
     let directory = TemporaryDirectory::new("cli-yaml-workflow").unwrap();
     let state = directory.join("state");
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        format!(
+    let workflow = directory
+        .write("workflow.yaml", format!(
             "tasks:\n  - id: prepare\n    command: [bash, -c, 'printf ready > {state}']\n  - id: test\n    depends_on: [prepare]\n    command: [bash, -c, 'test \"$(cat {state})\" = ready && printf done']\n",
             state = state.display()
-        ),
-    )
-    .unwrap();
+        ))
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
@@ -284,12 +281,12 @@ fn runs_a_yaml_workflow_in_dependency_order() {
 #[test]
 fn prefixes_every_line_of_every_task_that_runs_together() {
     let directory = TemporaryDirectory::new("cli-concurrent-output").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'printf first-out; printf first-err >&2']\n  - id: second\n    command: [bash, -c, 'printf second-out; printf second-err >&2']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'printf first-out; printf first-err >&2']\n  - id: second\n    command: [bash, -c, 'printf second-out; printf second-err >&2']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
@@ -318,15 +315,12 @@ fn prefixes_every_line_of_every_task_that_runs_together() {
 fn returns_a_failed_workflow_status_and_blocks_dependents() {
     let directory = TemporaryDirectory::new("cli-failed-workflow").unwrap();
     let marker = directory.join("blocked");
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        format!(
+    let workflow = directory
+        .write("workflow.yaml", format!(
             "tasks:\n  - id: fail\n    command: [bash, -c, 'printf failed-out; printf failed-err >&2; exit 23']\n  - id: blocked\n    depends_on: [fail]\n    command: [bash, -c, 'touch {marker}']\n",
             marker = marker.display()
-        ),
-    )
-    .unwrap();
+        ))
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
@@ -353,12 +347,12 @@ fn returns_a_failed_workflow_status_and_blocks_dependents() {
 #[test]
 fn runs_a_json_workflow() {
     let directory = TemporaryDirectory::new("cli-json-workflow").unwrap();
-    let workflow = directory.join("workflow.json");
-    fs::write(
-        &workflow,
-        r#"{"tasks":[{"id":"test","command":["bash","-c","printf json"]}]}"#,
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.json",
+            r#"{"tasks":[{"id":"test","command":["bash","-c","printf json"]}]}"#,
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -375,12 +369,12 @@ fn runs_a_json_workflow() {
 #[test]
 fn reports_invalid_workflow_manifests() {
     let directory = TemporaryDirectory::new("cli-invalid-workflow").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: test\n    depends_on: [prepare]\n    command: [cargo, test]\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: test\n    depends_on: [prepare]\n    command: [cargo, test]\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -400,8 +394,7 @@ fn reports_invalid_workflow_manifests() {
 #[test]
 fn rejects_a_workflow_without_tasks() {
     let directory = TemporaryDirectory::new("cli-empty-workflow").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(&workflow, "tasks: []\n").unwrap();
+    let workflow = directory.write("workflow.yaml", "tasks: []\n").unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -418,12 +411,12 @@ fn rejects_a_workflow_without_tasks() {
 #[test]
 fn groups_each_task_behind_a_status_line() {
     let directory = TemporaryDirectory::new("cli-grouped-output").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out; echo first-err >&2']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out; echo first-err >&2']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
@@ -450,12 +443,12 @@ fn groups_each_task_behind_a_status_line() {
 #[test]
 fn prefixes_every_line_with_its_task_in_stream_mode() {
     let directory = TemporaryDirectory::new("cli-stream-output").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo one; echo two >&2']\n  - id: longer_id\n    depends_on: [first]\n    command: [bash, -c, 'echo three']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo one; echo two >&2']\n  - id: longer_id\n    depends_on: [first]\n    command: [bash, -c, 'echo three']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--output", "stream", "--color", "never"])
@@ -485,12 +478,12 @@ fn prefixes_every_line_with_its_task_in_stream_mode() {
 #[test]
 fn reports_a_blocked_task_and_counts_it_in_the_summary() {
     let directory = TemporaryDirectory::new("cli-blocked-summary").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: fail\n    command: [bash, -c, 'exit 23']\n  - id: later\n    depends_on: [fail]\n    command: [bash, -c, 'true']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: fail\n    command: [bash, -c, 'exit 23']\n  - id: later\n    depends_on: [fail]\n    command: [bash, -c, 'true']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -513,12 +506,12 @@ fn reports_a_blocked_task_and_counts_it_in_the_summary() {
 #[test]
 fn relays_a_single_task_workflow_without_decoration() {
     let directory = TemporaryDirectory::new("cli-single-task").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: only\n    command: [bash, -c, 'printf solo']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: only\n    command: [bash, -c, 'printf solo']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow"])
@@ -535,12 +528,12 @@ fn relays_a_single_task_workflow_without_decoration() {
 #[test]
 fn closes_each_grouped_task_with_its_status_line() {
     let directory = TemporaryDirectory::new("cli-grouped-order").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo first-out']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo second-out']\n",
+        )
+        .unwrap();
     let merged = directory.join("merged.log");
     let stdout = fs::File::create(&merged).unwrap();
     let stderr = stdout.try_clone().unwrap();
@@ -592,12 +585,12 @@ fn closes_each_grouped_task_with_its_status_line() {
 #[test]
 fn keeps_a_grouped_block_off_the_status_line() {
     let directory = TemporaryDirectory::new("cli-grouped-newline").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, \"echo one; echo; printf no-newline\"]\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'true']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, \"echo one; echo; printf no-newline\"]\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'true']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
@@ -617,12 +610,12 @@ fn keeps_a_grouped_block_off_the_status_line() {
 #[test]
 fn stamps_a_grouped_line_when_it_arrives() {
     let directory = TemporaryDirectory::new("cli-timestamps").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo early; sleep 1; echo late']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'true']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo early; sleep 1; echo late']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'true']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args([
@@ -657,12 +650,12 @@ fn stamps_a_grouped_line_when_it_arrives() {
 #[test]
 fn stamps_every_line_with_a_utc_date_and_time() {
     let directory = TemporaryDirectory::new("cli-datetime").unwrap();
-    let workflow = directory.join("workflow.yaml");
-    fs::write(
-        &workflow,
-        "tasks:\n  - id: first\n    command: [bash, -c, 'echo one']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo two']\n",
-    )
-    .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: first\n    command: [bash, -c, 'echo one']\n  - id: second\n    depends_on: [first]\n    command: [bash, -c, 'echo two']\n",
+        )
+        .unwrap();
 
     let output = common::loom()
         .args(["run", "workflow", "--timestamps", "--color", "never"])

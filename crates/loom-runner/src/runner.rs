@@ -70,8 +70,13 @@ impl RunEvent {
     /// A direct request has one task of its own, at position zero.
     #[must_use]
     pub fn position(&self) -> usize {
-        self.task().map_or(0, TaskIndex::position)
+        position(self.task())
     }
+}
+
+/// The position of a workflow task, or zero for a direct request.
+fn position(task: Option<TaskIndex>) -> usize {
+    task.map_or(0, TaskIndex::position)
 }
 
 /// Runs direct requests and validated workflows in one working directory.
@@ -278,7 +283,7 @@ fn record_outcomes(
     mut outcomes: Vec<(Option<TaskIndex>, Outcome)>,
     exit_status: &mut i32,
 ) -> io::Result<()> {
-    outcomes.sort_by_key(|(task, _)| task.map_or(0, TaskIndex::position));
+    outcomes.sort_by_key(|(task, _)| position(*task));
     let mut execution_error = None;
 
     for (task, outcome) in outcomes {

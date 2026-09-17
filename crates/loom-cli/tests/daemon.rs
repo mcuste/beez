@@ -19,13 +19,6 @@ const STEP: Duration = Duration::from_millis(50);
 /// How far ahead a test puts a fire, so a busy machine still reaches it in time.
 const LEAD: Duration = Duration::from_secs(3);
 
-fn manifest(directory: &TemporaryDirectory, name: &str, source: &str) -> io::Result<PathBuf> {
-    let path = directory.join(&format!("{name}.yaml"));
-    fs::write(&path, source)?;
-
-    Ok(path)
-}
-
 /// A workflow of one task that writes a file, with the given schedule.
 ///
 /// The task opts out of the sandbox, so these tests need no sandbox on the host.
@@ -117,12 +110,12 @@ fn runs(root: &Path) -> usize {
 fn watches_a_manifest_before_the_daemon_starts() {
     let directory = TemporaryDirectory::new("daemon-add").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "nightly.yaml",
+            ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
+        )
+        .unwrap();
 
     let output = add(&root, &path).unwrap();
     let listed = loom(&root, &["schedule", "list"]).unwrap();
@@ -137,12 +130,12 @@ fn watches_a_manifest_before_the_daemon_starts() {
 fn pauses_and_removes_a_job_before_the_daemon_starts() {
     let directory = TemporaryDirectory::new("daemon-stopped-commands").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "nightly.yaml",
+            ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
+        )
+        .unwrap();
     let path = path.to_string_lossy();
     add(&root, Path::new(&*path)).unwrap();
 
@@ -167,12 +160,12 @@ fn pauses_and_removes_a_job_before_the_daemon_starts() {
 fn refuses_a_manifest_that_names_no_schedule() {
     let directory = TemporaryDirectory::new("daemon-no-schedule").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "plain",
-        "tasks:\n  - id: mark\n    command: [bash, -c, \"true\"]\n",
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "plain.yaml",
+            "tasks:\n  - id: mark\n    command: [bash, -c, \"true\"]\n",
+        )
+        .unwrap();
 
     let output = add(&root, &path).unwrap();
 
@@ -187,12 +180,12 @@ fn refuses_a_manifest_that_names_no_schedule() {
 fn refuses_a_job_whose_tasks_no_sandbox_limits() {
     let directory = TemporaryDirectory::new("daemon-unsandboxed").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "open",
-        "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: mark\n    sandbox: false\n    command: [bash, -c, \"true\"]\n",
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "open.yaml",
+            "schedule:\n  cron: \"0 3 * * *\"\ntasks:\n  - id: mark\n    sandbox: false\n    command: [bash, -c, \"true\"]\n",
+        )
+        .unwrap();
     add(&root, &path).unwrap();
 
     let listed = loom(&root, &["schedule", "list"]).unwrap();
@@ -206,12 +199,9 @@ fn runs_a_job_on_request_and_writes_the_same_artifacts_as_a_run() {
     let directory = TemporaryDirectory::new("daemon-trigger").unwrap();
     let root = directory.join("root");
     let marker = directory.join("marker");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &marker),
-    )
-    .unwrap();
+    let path = directory
+        .write("nightly.yaml", ticking("  cron: \"0 3 * * *\"\n", &marker))
+        .unwrap();
     add(&root, &path).unwrap();
     let daemon = start(&root).unwrap();
 
@@ -248,12 +238,9 @@ fn fires_a_one_time_schedule_once() {
     let daemon = start(&root).unwrap();
     // The daemon runs already, so the whole lead time is its to wait.
     let at = loom_schedule::format_instant(std::time::SystemTime::now() + LEAD);
-    let path = manifest(
-        &directory,
-        "once",
-        &ticking(&format!("  at: \"{at}\"\n"), &marker),
-    )
-    .unwrap();
+    let path = directory
+        .write("once.yaml", ticking(&format!("  at: \"{at}\"\n"), &marker))
+        .unwrap();
     add(&root, &path).unwrap();
 
     wait_for(&root, "fired the one-time schedule", || marker.exists()).unwrap();
@@ -277,18 +264,18 @@ fn runs_a_fire_it_missed_only_when_the_schedule_asks_for_it() {
     let marker = directory.join("marker");
     // The fire is already past, so it is missed as soon as the daemon starts.
     let at = loom_schedule::format_instant(std::time::SystemTime::now() - Duration::from_secs(60));
-    let missed = manifest(
-        &directory,
-        "missed",
-        &ticking(&format!("  at: \"{at}\"\n"), &marker),
-    )
-    .unwrap();
-    let caught = manifest(
-        &directory,
-        "caught",
-        &ticking(&format!("  at: \"{at}\"\n  catch_up: true\n"), &marker),
-    )
-    .unwrap();
+    let missed = directory
+        .write(
+            "missed.yaml",
+            ticking(&format!("  at: \"{at}\"\n"), &marker),
+        )
+        .unwrap();
+    let caught = directory
+        .write(
+            "caught.yaml",
+            ticking(&format!("  at: \"{at}\"\n  catch_up: true\n"), &marker),
+        )
+        .unwrap();
     for path in [&missed, &caught] {
         add(&root, path).unwrap();
     }
@@ -313,12 +300,9 @@ fn reads_a_manifest_again_after_it_changes() {
     let directory = TemporaryDirectory::new("daemon-reload").unwrap();
     let root = directory.join("root");
     let marker = directory.join("marker");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &marker),
-    )
-    .unwrap();
+    let path = directory
+        .write("nightly.yaml", ticking("  cron: \"0 3 * * *\"\n", &marker))
+        .unwrap();
     add(&root, &path).unwrap();
     let daemon = start(&root).unwrap();
 
@@ -344,7 +328,7 @@ fn keeps_the_history_of_a_job_whose_manifest_stops_loading() {
         "schedule:\n  - name: weekday\n    cron: \"0 3 * * *\"\n    allow_unsandboxed: true\ntasks:\n  - id: mark\n    sandbox: false\n    command: [bash, -c, \"echo fired >> {}\"]\n",
         marker.display()
     );
-    let path = manifest(&directory, "nightly", &source).unwrap();
+    let path = directory.write("nightly.yaml", &source).unwrap();
     add(&root, &path).unwrap();
     let daemon = start(&root).unwrap();
     loom(&root, &["schedule", "trigger", "nightly:weekday"]).unwrap();
@@ -376,12 +360,12 @@ fn keeps_the_history_of_a_job_whose_manifest_stops_loading() {
 fn reads_the_list_of_watched_manifests_again_on_request() {
     let directory = TemporaryDirectory::new("daemon-reload-list").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "nightly.yaml",
+            ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
+        )
+        .unwrap();
     let daemon = start(&root).unwrap();
     let before = loom(&root, &["schedule", "list"]).unwrap();
 
@@ -412,12 +396,12 @@ fn reads_the_list_of_watched_manifests_again_on_request() {
 fn holds_a_paused_job_back_and_lets_it_go_again() {
     let directory = TemporaryDirectory::new("daemon-pause").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "nightly.yaml",
+            ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
+        )
+        .unwrap();
     add(&root, &path).unwrap();
     let daemon = start(&root).unwrap();
 
@@ -439,12 +423,12 @@ fn holds_a_paused_job_back_and_lets_it_go_again() {
 fn removes_the_oldest_runs_when_the_root_holds_too_many() {
     let directory = TemporaryDirectory::new("daemon-sweep").unwrap();
     let root = directory.join("root");
-    let path = manifest(
-        &directory,
-        "nightly",
-        &ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
-    )
-    .unwrap();
+    let path = directory
+        .write(
+            "nightly.yaml",
+            ticking("  cron: \"0 3 * * *\"\n", &directory.join("marker")),
+        )
+        .unwrap();
     add(&root, &path).unwrap();
     // Runs of an earlier daemon, named after the times they started.
     for name in ["20260908T030000000Z-1", "20260909T030000000Z-2"] {

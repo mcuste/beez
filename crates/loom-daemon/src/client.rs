@@ -117,7 +117,7 @@ fn hold(paths: &DaemonPaths, id: &str, paused: bool) -> io::Result<Response> {
     let (registry, mut states) = store::load_all(paths)?;
     let (_, jobs) = job::build(&registry, &states);
     if !jobs.iter().any(|job| job.id == id) {
-        return Ok(Response::error(message::unknown_job(id)));
+        return Ok(Response::unknown_job(id));
     }
     let mut state = states.get(id);
     state.paused = paused;
