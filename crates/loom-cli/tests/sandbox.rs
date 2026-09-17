@@ -11,10 +11,12 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::thread;
 
-use loom_test_support::{TemporaryDirectory, extended_path};
+use loom_test_support::{TemporaryDirectory, assert_never_reached, extended_path, unused_origin};
+
+mod common;
 
 /// A temporary directory with an empty working directory inside it.
 fn working_directory(name: &str) -> io::Result<(TemporaryDirectory, PathBuf)> {
@@ -29,7 +31,7 @@ fn run_workflow(directory: &TemporaryDirectory, work: &Path, manifest: &str) -> 
     let path = directory.join("workflow.yaml");
     fs::write(&path, manifest)?;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(&path)
         .current_dir(work)
@@ -72,7 +74,7 @@ fn run_command(
     work: &Path,
     arguments: &[&str],
 ) -> io::Result<Output> {
-    Command::new(env!("CARGO_BIN_EXE_loom"))
+    common::loom()
         .args(["run", "command"])
         .args(arguments)
         .current_dir(work)
@@ -332,22 +334,6 @@ fn http_origin() -> io::Result<u16> {
     Ok(port)
 }
 
-/// A listener that never accepts, to check nothing reaches it.
-fn unused_origin() -> io::Result<(u16, TcpListener)> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let port = listener.local_addr()?.port();
-    listener.set_nonblocking(true)?;
-    Ok((port, listener))
-}
-
-fn assert_never_reached(origin: &TcpListener) {
-    let refused = origin.accept().err();
-    assert!(
-        refused.is_some_and(|error| error.kind() == io::ErrorKind::WouldBlock),
-        "the sandbox reached the origin"
-    );
-}
-
 /// A policy that allows `localhost` and, with `localhost`, local addresses.
 fn network(localhost: bool) -> String {
     format!(
@@ -439,7 +425,7 @@ fn applies_the_harness_environment_inside_the_sandbox() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(&manifest)
         .current_dir(&work)

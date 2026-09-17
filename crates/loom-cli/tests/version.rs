@@ -1,10 +1,10 @@
 //! Tests the compiled Loom CLI.
 
-use std::process::Command;
+mod common;
 
 #[test]
 fn reports_release_version() {
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .arg("--version")
         .output()
         .expect("Loom binary starts");

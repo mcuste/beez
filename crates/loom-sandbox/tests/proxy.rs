@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use loom_policy::DomainRule;
 use loom_sandbox::Proxy;
+use loom_test_support::{assert_never_reached, unused_origin};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKS_GREETING: [u8; 3] = [5, 1, 0];
@@ -34,21 +35,6 @@ fn echo_origin() -> io::Result<(u16, JoinHandle<io::Result<Vec<u8>>>)> {
 }
 
 /// A listener that never accepts, to check the proxy does not connect to it.
-fn unused_origin() -> io::Result<(u16, TcpListener)> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let port = listener.local_addr()?.port();
-    listener.set_nonblocking(true)?;
-    Ok((port, listener))
-}
-
-fn assert_never_reached(origin: &TcpListener) {
-    let refused = origin.accept().err();
-    assert!(
-        refused.is_some_and(|error| error.kind() == io::ErrorKind::WouldBlock),
-        "the proxy connected to the origin"
-    );
-}
-
 /// A proxy that allows `texts`, and local addresses when `localhost` is set.
 fn proxy(texts: &[&str], localhost: bool) -> io::Result<Proxy> {
     let rules = texts

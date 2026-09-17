@@ -34,13 +34,10 @@ pub enum HeadlessHarnessError {
 impl fmt::Display for HeadlessHarnessError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown(value) => {
-                write!(
-                    formatter,
-                    "unsupported headless harness {value:?}; expected one of {}",
-                    named::names::<HeadlessHarness>()
-                )
-            }
+            Self::Unknown(value) => formatter.write_str(&named::unknown::<HeadlessHarness>(
+                "headless harness",
+                value,
+            )),
         }
     }
 }
@@ -118,7 +115,7 @@ mod tests {
         assert_eq!(error, HeadlessHarnessError::Unknown("cursor".into()));
         assert_eq!(
             error.to_string(),
-            "unsupported headless harness \"cursor\"; expected one of pi, omp, claude, codex"
+            "unknown headless harness \"cursor\"; expected one of pi, omp, claude, codex"
         );
     }
 }

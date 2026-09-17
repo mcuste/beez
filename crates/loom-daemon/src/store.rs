@@ -169,7 +169,7 @@ fn load_json<T: DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
 }
 
 /// Writes a file in one step, so a stopped daemon never leaves half a file.
-fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let temporary = path.with_extension("writing");
     let mut file = File::create(&temporary)?;
     serde_json::to_writer_pretty(&mut file, value).map_err(io::Error::other)?;

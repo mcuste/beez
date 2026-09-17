@@ -5,11 +5,13 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use loom_test_support::TemporaryDirectory;
+
+mod common;
 
 /// Longest a test waits for the daemon to reach a state.
 const LIMIT: Duration = Duration::from_secs(20);
@@ -35,7 +37,7 @@ fn ticking(schedule: &str, marker: &Path) -> String {
 }
 
 fn loom(root: &Path, arguments: &[&str]) -> io::Result<Output> {
-    Command::new(env!("CARGO_BIN_EXE_loom"))
+    common::loom()
         .args(arguments)
         .arg("--root")
         .arg(root)
@@ -44,7 +46,7 @@ fn loom(root: &Path, arguments: &[&str]) -> io::Result<Output> {
 
 /// Watches one manifest, whether or not a daemon runs.
 fn add(root: &Path, path: &Path) -> io::Result<Output> {
-    Command::new(env!("CARGO_BIN_EXE_loom"))
+    common::loom()
         .args(["schedule", "add"])
         .arg(path)
         .arg("--root")
@@ -449,7 +451,7 @@ fn removes_the_oldest_runs_when_the_root_holds_too_many() {
         fs::create_dir_all(root.join("runs").join(name)).unwrap();
     }
 
-    let daemon = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let daemon = common::loom()
         .args(["daemon", "start", "--keep-runs", "1", "--root"])
         .arg(&root)
         .output()

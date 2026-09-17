@@ -15,16 +15,12 @@ pub enum GroupError {
 impl fmt::Display for GroupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownDomainGroup(name) => write!(
-                formatter,
-                "unknown domain group {name:?}; expected one of {}",
-                named::names::<DomainGroup>()
-            ),
-            Self::UnknownExecutableGroup(name) => write!(
-                formatter,
-                "unknown executable group {name:?}; expected one of {}",
-                named::names::<ExecutableGroup>()
-            ),
+            Self::UnknownDomainGroup(name) => {
+                formatter.write_str(&named::unknown::<DomainGroup>("domain group", name))
+            }
+            Self::UnknownExecutableGroup(name) => {
+                formatter.write_str(&named::unknown::<ExecutableGroup>("executable group", name))
+            }
         }
     }
 }

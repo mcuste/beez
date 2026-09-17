@@ -7,8 +7,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use loom_manifest::load;
-
 use crate::control::{self, JobReport, Request, Response};
 use crate::daemon::reports;
 use crate::paths::DaemonPaths;
@@ -63,10 +61,8 @@ pub fn add(paths: &DaemonPaths, manifest: &Path) -> io::Result<Response> {
         )));
     };
     let working_directory = parent.to_path_buf();
-    if let Err(problem) = check(&path) {
-        return Ok(Response::error(problem));
-    }
-    // A running daemon checks the job IDs against the jobs it holds.
+    // A running daemon reads the manifest itself and checks the job IDs
+    // against the jobs it holds.
     if control::is_running(paths.socket()) {
         return control::send(
             paths.socket(),
@@ -81,7 +77,11 @@ pub fn add(paths: &DaemonPaths, manifest: &Path) -> io::Result<Response> {
         working_directory,
     };
     let (registry, states) = store::load_all(paths)?;
-    let ids = job::ids_of(&watched, &states);
+    let jobs = job::jobs_of(&watched, &states);
+    if let Some(error) = job::manifest_error(&jobs) {
+        return Ok(Response::error(error));
+    }
+    let ids = job::ids(jobs);
     if let Some(taken) = job::conflicting_id(&registry, &states, &watched.path, &ids) {
         return Ok(Response::error(message::taken_id(&taken)));
     }
@@ -127,19 +127,6 @@ fn hold(paths: &DaemonPaths, id: &str, paused: bool) -> io::Result<Response> {
     states.save(&paths.state())?;
 
     Ok(Response::done(message::held(id, paused)))
-}
-
-/// Reports why a manifest cannot become a job.
-fn check(path: &Path) -> Result<(), String> {
-    let manifest = load(path).map_err(|error| error.to_string())?;
-    if manifest.schedules().is_empty() {
-        return Err(format!(
-            "{} has no schedule section, so nothing says when it runs",
-            path.display()
-        ));
-    }
-
-    Ok(())
 }
 
 fn needs_daemon() -> Response {

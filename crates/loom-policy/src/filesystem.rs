@@ -98,11 +98,12 @@ impl FilesystemPolicy {
     }
 
     fn with_defaults(&self, groups: &[PathGroup], own: &[SandboxPath]) -> Vec<SandboxPath> {
-        let defaults = groups
+        let groups = if self.defaults() { groups } else { &[] };
+        groups
             .iter()
-            .filter(|_| self.defaults())
-            .flat_map(|group| group.sandbox_paths());
-        defaults.chain(own.iter().cloned()).collect()
+            .flat_map(|group| group.sandbox_paths())
+            .chain(own.iter().cloned())
+            .collect()
     }
 }
 

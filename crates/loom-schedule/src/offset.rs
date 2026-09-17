@@ -22,12 +22,6 @@ impl UtcOffset {
     /// UTC itself.
     pub const UTC: Self = Self(0);
 
-    /// Seconds east of UTC.
-    #[must_use]
-    pub fn seconds(self) -> i32 {
-        self.0
-    }
-
     pub(crate) fn fixed(self) -> Option<FixedOffset> {
         FixedOffset::east_opt(self.0)
     }
@@ -98,9 +92,9 @@ mod tests {
 
     #[test]
     fn reads_offsets_east_and_west() {
-        assert_eq!(parse("+02:00").unwrap().seconds(), 7_200);
-        assert_eq!(parse("-05:30").unwrap().seconds(), -19_800);
-        assert_eq!(parse("+02").unwrap().seconds(), 7_200);
+        assert_eq!(parse("+02:00"), Ok(UtcOffset(7_200)));
+        assert_eq!(parse("-05:30"), Ok(UtcOffset(-19_800)));
+        assert_eq!(parse("+02"), Ok(UtcOffset(7_200)));
     }
 
     #[test]

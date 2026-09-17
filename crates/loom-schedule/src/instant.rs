@@ -1,6 +1,6 @@
 //! One instant, as a UTC date and time.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
@@ -10,35 +10,23 @@ use crate::error::ScheduleError;
 ///
 /// A value that names an offset keeps the instant it means, so
 /// `2026-09-10T05:00:00+02:00` is the same instant as `2026-09-10T03:00:00Z`.
+/// An instant before 1970 is rejected, because no schedule needs one.
 pub fn parse_instant(value: &str) -> Result<SystemTime, ScheduleError> {
     let invalid = || ScheduleError::Instant(value.to_owned());
     let parsed = DateTime::parse_from_rfc3339(value).map_err(|_| invalid())?;
+    if parsed.timestamp() < 0 {
+        return Err(invalid());
+    }
 
-    from_utc(parsed.to_utc()).ok_or_else(invalid)
+    Ok(SystemTime::from(parsed))
 }
 
 /// Writes one instant as a UTC date and time, to the second.
 #[must_use]
 pub fn format_instant(time: SystemTime) -> String {
-    match to_utc(time) {
-        Some(time) => time.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        None => "unknown".to_owned(),
-    }
-}
-
-/// Returns nothing for an instant before 1970, which no schedule needs.
-pub(crate) fn to_utc(time: SystemTime) -> Option<DateTime<Utc>> {
-    let since_epoch = time.duration_since(UNIX_EPOCH).ok()?;
-    let seconds = i64::try_from(since_epoch.as_secs()).ok()?;
-
-    DateTime::from_timestamp(seconds, since_epoch.subsec_nanos())
-}
-
-/// Returns nothing for an instant before 1970, which no schedule needs.
-pub(crate) fn from_utc(time: DateTime<Utc>) -> Option<SystemTime> {
-    let seconds = u64::try_from(time.timestamp()).ok()?;
-
-    Some(UNIX_EPOCH + Duration::new(seconds, time.timestamp_subsec_nanos()))
+    DateTime::<Utc>::from(time)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 #[cfg(test)]

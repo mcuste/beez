@@ -5,9 +5,11 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use loom_test_support::TemporaryDirectory;
+
+mod common;
 
 fn workflow(directory: &TemporaryDirectory, tasks: &str) -> io::Result<PathBuf> {
     let path = directory.join("workflow.yaml");
@@ -17,7 +19,7 @@ fn workflow(directory: &TemporaryDirectory, tasks: &str) -> io::Result<PathBuf> 
 
 /// Runs `manifest` with `root` as the artifact directory.
 fn run_workflow(manifest: &Path, root: &Path, arguments: &[&str]) -> io::Result<Output> {
-    Command::new(env!("CARGO_BIN_EXE_loom"))
+    common::loom()
         .args(["run", "workflow", "--color", "never"])
         .args(arguments)
         .arg(manifest)
@@ -236,7 +238,7 @@ fn keeps_the_runs_of_a_repository_together() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(&manifest)
         .current_dir(&deep)
@@ -258,7 +260,7 @@ fn runs_a_harness_prompt_and_records_it() {
     let root = directory.join("artifacts");
     loom_test_support::fake_harness(&directory, "pi", 0).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "pi", "inspect the repository"])
         .env("PATH", loom_test_support::extended_path(directory.path()))
         .env("LOOM_LOG_DIR", &root)

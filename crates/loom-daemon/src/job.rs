@@ -160,10 +160,20 @@ pub(crate) fn jobs_of(watched: &Watched, states: &States) -> Vec<Job> {
 
 /// The job IDs a manifest holds, without keeping the jobs.
 pub(crate) fn ids_of(watched: &Watched, states: &States) -> Vec<String> {
-    jobs_of(watched, states)
-        .into_iter()
-        .map(|job| job.id)
-        .collect()
+    ids(jobs_of(watched, states))
+}
+
+/// The IDs of `jobs`, in order.
+pub(crate) fn ids(jobs: Vec<Job>) -> Vec<String> {
+    jobs.into_iter().map(|job| job.id).collect()
+}
+
+/// Why a manifest cannot become a job at all: it does not load, or it names
+/// no schedule. A job that loads but cannot run keeps its own error instead.
+pub(crate) fn manifest_error(jobs: &[Job]) -> Option<&str> {
+    jobs.iter()
+        .find(|job| job.schedule.is_none())
+        .and_then(|job| job.error.as_deref())
 }
 
 /// The first job ID of `ids` that another watched manifest already uses.

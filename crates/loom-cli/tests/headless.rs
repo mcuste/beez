@@ -4,9 +4,11 @@
 
 use std::error::Error;
 use std::fs;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use loom_test_support::{TemporaryDirectory, extended_path, fake_harness};
+
+mod common;
 
 /// `loom-process` unit tests cover each harness's arguments; this pins the result relay.
 #[test]
@@ -24,7 +26,7 @@ fn passes_the_model_and_effort_to_claude() {
     let directory = TemporaryDirectory::new("cli-claude-options").unwrap();
     fake_harness(&directory, "claude", 0).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args([
             "run",
             "claude",
@@ -51,7 +53,7 @@ fn passes_the_effort_to_codex_as_a_config_override() {
     let directory = TemporaryDirectory::new("cli-codex-options").unwrap();
     fake_harness(&directory, "codex", 0).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args([
             "run",
             "codex",
@@ -96,7 +98,7 @@ fn rejects_a_prompt_that_starts_with_a_hyphen_without_a_separator() {
     let directory = TemporaryDirectory::new("cli-unquoted-hyphen").unwrap();
     fake_harness(&directory, "pi", 0).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "pi", "--print me"])
         .env("PATH", directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -123,7 +125,7 @@ fn runs_a_workflow_codex_task_with_a_model_and_effort() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("PATH", extended_path(directory.path()))
@@ -149,7 +151,7 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("PATH", extended_path(directory.path()))
@@ -166,7 +168,7 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
 
 #[test]
 fn rejects_an_unsupported_harness() {
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "cursor", "inspect the repository"])
         .output()
         .unwrap();
@@ -190,7 +192,7 @@ fn rejects_an_unsupported_workflow_harness() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -201,7 +203,7 @@ fn rejects_an_unsupported_workflow_harness() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"unsupported headless harness \"cursor\"; expected one of pi, omp, claude, codex\n"
+        b"unknown headless harness \"cursor\"; expected one of pi, omp, claude, codex\n"
     );
 }
 
@@ -209,7 +211,7 @@ fn rejects_an_unsupported_workflow_harness() {
 fn reports_when_a_harness_cannot_start() {
     let directory = TemporaryDirectory::new("cli-missing-harness").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "pi", "inspect the repository"])
         .env("PATH", directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -223,7 +225,7 @@ fn reports_when_a_harness_cannot_start() {
 
 #[test]
 fn runs_a_command_with_literal_arguments() {
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args([
             "run",
             "command",
@@ -264,7 +266,7 @@ fn runs_a_yaml_workflow_in_dependency_order() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -289,7 +291,7 @@ fn prefixes_every_line_of_every_task_that_runs_together() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -326,7 +328,7 @@ fn returns_a_failed_workflow_status_and_blocks_dependents() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -358,7 +360,7 @@ fn runs_a_json_workflow() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -380,7 +382,7 @@ fn reports_invalid_workflow_manifests() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -401,7 +403,7 @@ fn rejects_a_workflow_without_tasks() {
     let workflow = directory.join("workflow.yaml");
     fs::write(&workflow, "tasks: []\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -423,7 +425,7 @@ fn groups_each_task_behind_a_status_line() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -455,7 +457,7 @@ fn prefixes_every_line_with_its_task_in_stream_mode() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--output", "stream", "--color", "never"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -490,7 +492,7 @@ fn reports_a_blocked_task_and_counts_it_in_the_summary() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -518,7 +520,7 @@ fn relays_a_single_task_workflow_without_decoration() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -545,7 +547,7 @@ fn closes_each_grouped_task_with_its_status_line() {
 
     // Both streams share one file description, so the file keeps the order
     // Loom wrote them, the way a terminal shows it.
-    let status = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let status = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -597,7 +599,7 @@ fn keeps_a_grouped_block_off_the_status_line() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -622,7 +624,7 @@ fn stamps_a_grouped_line_when_it_arrives() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args([
             "run",
             "workflow",
@@ -662,7 +664,7 @@ fn stamps_every_line_with_a_utc_date_and_time() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "workflow", "--timestamps", "--color", "never"])
         .arg(workflow)
         .env("LOOM_LOG_DIR", directory.join("logs"))
@@ -692,7 +694,7 @@ fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>>
     let directory = TemporaryDirectory::new(&format!("cli-{name}"))?;
     fake_harness(&directory, name, 17)?;
 
-    Command::new(env!("CARGO_BIN_EXE_loom"))
+    common::loom()
         .args(["run", name])
         .args(arguments)
         .env("PATH", extended_path(directory.path()))
@@ -703,7 +705,7 @@ fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>>
 
 #[test]
 fn rejects_an_invalid_sandbox_domain_rule() {
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+    let output = common::loom()
         .args(["run", "command", "--allow-domain", "a.*.com", "true"])
         .output()
         .unwrap();
@@ -714,10 +716,7 @@ fn rejects_an_invalid_sandbox_domain_rule() {
 
 #[test]
 fn hides_the_sandbox_helper_commands() {
-    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
-        .arg("--help")
-        .output()
-        .unwrap();
+    let output = common::loom().arg("--help").output().unwrap();
 
     let help = std::str::from_utf8(&output.stdout).unwrap();
     assert!(help.contains("run"));

@@ -9,8 +9,9 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::ScheduleError;
-use crate::instant::{from_utc, to_utc};
 use crate::offset::UtcOffset;
 
 /// Field position of the seconds, which Loom holds to one fixed value.
@@ -78,7 +79,7 @@ impl CronSchedule {
     #[must_use]
     pub fn next_after(&self, time: SystemTime) -> Option<SystemTime> {
         let offset = self.offset.fixed()?;
-        let start = to_utc(time)?.with_timezone(&offset);
+        let start = DateTime::<Utc>::from(time).with_timezone(&offset);
         let primary = self.primary.after(&start).next();
         let alternate = self
             .alternate
@@ -90,7 +91,7 @@ impl CronSchedule {
             (None, None) => return None,
         };
 
-        from_utc(next.to_utc())
+        Some(SystemTime::from(next))
     }
 }
 

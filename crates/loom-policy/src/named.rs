@@ -14,13 +14,15 @@ pub(crate) fn from_name<T: Named>(name: &str) -> Option<T> {
     T::all().iter().copied().find(|value| value.named() == name)
 }
 
-/// Every name, for an error that offers the choices.
-pub(crate) fn names<T: Named>() -> String {
-    T::all()
+/// The error text for a name no value of `T` carries, with every choice.
+pub(crate) fn unknown<T: Named>(kind: &str, name: &str) -> String {
+    let names = T::all()
         .iter()
         .map(|value| value.named())
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+
+    format!("unknown {kind} {name:?}; expected one of {names}")
 }
 
 /// Gives an enum its name table: `ALL`, `name`, `Display`, and [`Named`].

@@ -307,7 +307,11 @@ impl Daemon {
             path: manifest,
             working_directory,
         };
-        let ids = job::ids_of(&watched, &self.states);
+        let jobs = job::jobs_of(&watched, &self.states);
+        if let Some(error) = job::manifest_error(&jobs) {
+            return Response::error(error);
+        }
+        let ids: Vec<String> = jobs.iter().map(|job| job.id.clone()).collect();
         if let Some(taken) = self.taken_id(&ids, &watched.path) {
             return Response::error(message::taken_id(&taken));
         }
@@ -315,7 +319,7 @@ impl Daemon {
             Ok(watching) => watching,
             Err(error) => return Response::error(message::unwritable_registry(&error)),
         };
-        self.reload(&watched, now);
+        self.install(&watched, jobs, now);
         report::line(
             "Watching",
             &format!("{} as {}", watched.path.display(), ids.join(", ")),
@@ -341,12 +345,10 @@ impl Daemon {
     }
 
     fn hold(&mut self, id: &str, paused: bool, now: SystemTime) -> Response {
-        let Some(index) = self.index_of(id) else {
+        let Some((index, job)) = self.job_mut(id) else {
             return unknown_job(id);
         };
-        if let Some(job) = self.jobs.get_mut(index) {
-            job.state.paused = paused;
-        }
+        job.state.paused = paused;
         self.save_state(index);
         self.plan_job(index, now, false);
         let held = message::held(id, paused);
@@ -356,10 +358,7 @@ impl Daemon {
     }
 
     fn trigger(&mut self, id: &str, now: SystemTime) -> Response {
-        let Some(index) = self.index_of(id) else {
-            return unknown_job(id);
-        };
-        let Some(job) = self.jobs.get(index) else {
+        let Some((index, job)) = self.job(id) else {
             return unknown_job(id);
         };
         if let Some(error) = &job.error {
@@ -415,9 +414,14 @@ impl Daemon {
         watched.len()
     }
 
-    /// Replaces the jobs of one manifest, keeping what is going on.
+    /// Reads one manifest again and replaces its jobs.
     fn reload(&mut self, watched: &Watched, now: SystemTime) {
         let fresh = job::jobs_of(watched, &self.states);
+        self.install(watched, fresh, now);
+    }
+
+    /// Replaces the jobs of one manifest with `fresh`, keeping what is going on.
+    fn install(&mut self, watched: &Watched, fresh: Vec<Job>, now: SystemTime) {
         let mut carried = Vec::with_capacity(fresh.len());
         for mut job in fresh {
             if let Some(old) = self.jobs.iter().find(|old| old.id == job.id) {
@@ -593,12 +597,10 @@ impl Daemon {
             ),
         }
         // A manifest that stopped being watched while it ran has no job left.
-        if let Some(index) = self.index_of(id) {
-            if let Some(job) = self.jobs.get_mut(index) {
-                job.running = false;
-                job.state.last_run.clone_from(&outcome.directory);
-                job.state.last_status = outcome.status;
-            }
+        if let Some((index, job)) = self.job_mut(id) {
+            job.running = false;
+            job.state.last_run.clone_from(&outcome.directory);
+            job.state.last_status = outcome.status;
             self.save_state(index);
         }
         self.sweep();
@@ -660,8 +662,16 @@ impl Daemon {
         }
     }
 
-    fn index_of(&self, id: &str) -> Option<usize> {
-        self.jobs.iter().position(|job| job.id == id)
+    /// The job with `id` and its position, when the daemon holds it.
+    fn job(&self, id: &str) -> Option<(usize, &Job)> {
+        self.jobs.iter().enumerate().find(|(_, job)| job.id == id)
+    }
+
+    fn job_mut(&mut self, id: &str) -> Option<(usize, &mut Job)> {
+        self.jobs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, job)| job.id == id)
     }
 
     /// The first ID that another manifest already uses.
@@ -752,9 +762,8 @@ fn write_record(paths: &DaemonPaths, started: SystemTime) -> io::Result<()> {
         socket: paths.socket().to_path_buf(),
         started: format_instant(started),
     };
-    let source = serde_json::to_string_pretty(&record).map_err(io::Error::other)?;
 
-    std::fs::write(paths.record(), source + "\n")
+    store::save_json(&paths.record(), &record)
 }
 
 fn waiting_message(running: usize) -> String {
