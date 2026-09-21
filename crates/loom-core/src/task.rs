@@ -12,6 +12,20 @@ pub enum TaskIdError {
     InvalidCharacter(char),
 }
 
+impl fmt::Display for TaskIdError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("task ID must not be empty"),
+            Self::InvalidCharacter(character) => {
+                write!(
+                    formatter,
+                    "task ID contains invalid character {character:?}"
+                )
+            }
+        }
+    }
+}
+
 impl std::error::Error for TaskIdError {}
 
 /// A task ID of ASCII letters, digits, or underscores.
@@ -26,10 +40,10 @@ impl TaskId {
     }
 }
 
-impl TryFrom<String> for TaskId {
-    type Error = TaskIdError;
+impl FromStr for TaskId {
+    type Err = TaskIdError;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         if value.is_empty() {
             return Err(TaskIdError::Empty);
         }
@@ -39,15 +53,7 @@ impl TryFrom<String> for TaskId {
         {
             return Err(TaskIdError::InvalidCharacter(character));
         }
-        Ok(Self(value))
-    }
-}
-
-impl FromStr for TaskId {
-    type Err = TaskIdError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::try_from(value.to_owned())
+        Ok(Self(value.to_owned()))
     }
 }
 
@@ -169,20 +175,6 @@ impl Task {
     #[must_use]
     pub fn sandbox(&self) -> Option<&SandboxPolicy> {
         self.sandbox.as_ref()
-    }
-}
-
-impl fmt::Display for TaskIdError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("task ID must not be empty"),
-            Self::InvalidCharacter(character) => {
-                write!(
-                    formatter,
-                    "task ID contains invalid character {character:?}"
-                )
-            }
-        }
     }
 }
 

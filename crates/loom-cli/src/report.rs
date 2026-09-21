@@ -1,7 +1,7 @@
 //! Renders run events for a terminal or a log.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -350,11 +350,7 @@ impl Reporter {
 impl Terminal {
     fn line(&self, target: Target, text: &str) -> io::Result<()> {
         let stamp = self.stamp();
-        self.write(|streams| {
-            let stream = streams.pick(target);
-            writeln!(stream, "{stamp}{text}")?;
-            stream.flush()
-        })
+        self.write_to(target, |stream| writeln!(stream, "{stamp}{text}"))
     }
 
     /// What goes in front of one line, empty when timestamps are off.
@@ -371,9 +367,18 @@ impl Terminal {
 
     /// Writes bytes with no change.
     fn bytes(&self, target: Target, bytes: &[u8]) -> io::Result<()> {
+        self.write_to(target, |stream| stream.write_all(bytes))
+    }
+
+    /// Writes to one stream and flushes it.
+    fn write_to(
+        &self,
+        target: Target,
+        action: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+    ) -> io::Result<()> {
         self.write(|streams| {
             let stream = streams.pick(target);
-            stream.write_all(bytes)?;
+            action(stream)?;
             stream.flush()
         })
     }
@@ -454,17 +459,12 @@ fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<Strin
 
 /// A run directory as it is written in a status line.
 fn display(directory: &Path) -> String {
-    let relative = std::env::current_dir()
+    std::env::current_dir()
         .ok()
-        .and_then(|working_directory| {
-            directory
-                .strip_prefix(working_directory)
-                .ok()
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| directory.to_path_buf());
-
-    relative.display().to_string()
+        .and_then(|working_directory| directory.strip_prefix(working_directory).ok())
+        .unwrap_or(directory)
+        .display()
+        .to_string()
 }
 
 fn is_blank(line: &[u8]) -> bool {

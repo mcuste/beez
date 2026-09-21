@@ -56,21 +56,26 @@ fn row(job: &JobReport) -> [String; 5] {
     [
         job.id.clone(),
         job.condition.clone(),
-        job.schedule.clone().unwrap_or_else(|| "-".to_owned()),
-        job.next_fire.clone().unwrap_or_else(|| "-".to_owned()),
+        or_dash(job.schedule.as_deref()),
+        or_dash(job.next_fire.as_deref()),
         last_run(job),
     ]
 }
 
 fn last_run(job: &JobReport) -> String {
     let Some(directory) = &job.last_run else {
-        return "-".to_owned();
+        return or_dash(None);
     };
     match job.last_status {
         // No status means the run never reached its end, so there is none to name.
         None => format!("{directory} (unfinished)"),
         status => format!("{directory} ({})", status_text(status)),
     }
+}
+
+/// The value of a column, or a dash when the job has none.
+fn or_dash(value: Option<&str>) -> String {
+    value.unwrap_or("-").to_owned()
 }
 
 /// As wide as the longest value of each column, the heading included.

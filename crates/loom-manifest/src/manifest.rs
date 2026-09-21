@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use loom_core::{TaskDefinition, TaskId, TaskRequest, Workflow};
-use loom_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
+use loom_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy, parse_all};
 use serde::Deserialize;
 
 use crate::message;
@@ -111,11 +111,7 @@ impl ManifestTask {
     fn into_definition(self, workflow: Option<&SandboxPolicy>) -> Result<TaskDefinition, String> {
         let sandbox = crate::sandbox::resolve(workflow, self.sandbox)?;
         let id = self.id.parse::<TaskId>().map_err(message)?;
-        let depends_on = self
-            .depends_on
-            .into_iter()
-            .map(|dependency| dependency.parse::<TaskId>().map_err(message))
-            .collect::<Result<Vec<_>, _>>()?;
+        let depends_on = parse_all::<TaskId>(&self.depends_on)?;
         let options = HarnessOptions::new(self.model, self.effort);
         let request = match (self.harness, self.prompt, self.command) {
             (Some(harness), Some(prompt), None) => {
