@@ -19,6 +19,13 @@ pub enum ManifestError {
     UnsupportedFormat(PathBuf),
     /// The manifest does not match Loom's workflow schema.
     Invalid(String),
+    /// A prompt file a task names could not be read.
+    PromptFile {
+        /// The path as the manifest resolves it.
+        path: PathBuf,
+        /// Why the read failed.
+        error: std::io::Error,
+    },
 }
 
 /// A loaded workflow manifest: its tasks, and when it runs.
@@ -70,6 +77,7 @@ struct ManifestTask {
     depends_on: Vec<String>,
     harness: Option<String>,
     prompt: Option<String>,
+    prompt_file: Option<PathBuf>,
     model: Option<String>,
     effort: Option<String>,
     command: Option<Vec<String>>,
@@ -87,6 +95,13 @@ impl fmt::Display for ManifestError {
                 path.display()
             ),
             Self::Invalid(error) => formatter.write_str(error),
+            Self::PromptFile { path, error } => {
+                write!(
+                    formatter,
+                    "cannot read prompt file {}: {error}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -100,13 +115,30 @@ impl ManifestError {
 impl std::error::Error for ManifestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io(error) | Self::PromptFile { error, .. } => Some(error),
             Self::UnsupportedFormat(_) | Self::Invalid(_) => None,
         }
     }
 }
 
 impl ManifestTask {
+    /// Moves the contents of `prompt_file`, relative to `directory`, into `prompt`.
+    fn read_prompt_file(&mut self, directory: &Path) -> Result<(), ManifestError> {
+        let Some(file) = self.prompt_file.take() else {
+            return Ok(());
+        };
+        if self.prompt.is_some() {
+            return Err(ManifestError::Invalid(
+                "task must define either prompt or prompt_file, not both".into(),
+            ));
+        }
+        let path = directory.join(file);
+        let prompt =
+            fs::read_to_string(&path).map_err(|error| ManifestError::PromptFile { path, error })?;
+        self.prompt = Some(prompt);
+        Ok(())
+    }
+
     /// Builds the task, with the sandbox resolved from the workflow and the task.
     fn into_definition(self, workflow: Option<&SandboxPolicy>) -> Result<TaskDefinition, String> {
         let sandbox = crate::sandbox::resolve(workflow, self.sandbox)?;
@@ -128,7 +160,11 @@ impl ManifestTask {
                 };
                 TaskRequest::command(program, command.collect())
             }
-            _ => return Err("task must define either harness and prompt, or command".into()),
+            _ => {
+                return Err(
+                    "task must define either harness with prompt or prompt_file, or command".into(),
+                );
+            }
         };
         Ok(TaskDefinition::new(id, depends_on, request).sandboxed(sandbox))
     }
@@ -148,12 +184,16 @@ pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
         .map(SandboxPolicy::try_from)
         .transpose()
         .map_err(ManifestError::Invalid)?;
+    let directory = path.parent().unwrap_or_else(|| Path::new(""));
     let definitions = document
         .tasks
         .into_iter()
-        .map(|task| task.into_definition(sandbox.as_ref()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ManifestError::Invalid)?;
+        .map(|mut task| {
+            task.read_prompt_file(directory)?;
+            task.into_definition(sandbox.as_ref())
+                .map_err(ManifestError::Invalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let workflow = Workflow::try_from(definitions).map_err(ManifestError::invalid)?;
 
     Ok(Manifest {

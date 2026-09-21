@@ -204,7 +204,7 @@ fn rejects_a_harness_without_a_prompt() {
     assert!(matches!(
         load(&manifest),
         Err(ManifestError::Invalid(error))
-            if error == "task must define either harness and prompt, or command"
+            if error == "task must define either harness with prompt or prompt_file, or command"
     ));
 }
 
@@ -221,7 +221,96 @@ fn rejects_a_prompt_without_a_harness() {
     assert!(matches!(
         load(&manifest),
         Err(ManifestError::Invalid(error))
-            if error == "task must define either harness and prompt, or command"
+            if error == "task must define either harness with prompt or prompt_file, or command"
+    ));
+}
+
+#[test]
+fn loads_a_prompt_file_relative_to_the_manifest() {
+    let directory = TemporaryDirectory::new("manifest-prompt-file").unwrap();
+    fs::create_dir_all(directory.join("prompts")).unwrap();
+    fs::create_dir_all(directory.join("nested")).unwrap();
+    directory
+        .write(
+            "prompts/review.md",
+            "review the findings:\n{{ tasks.inspect.stdout }}\n",
+        )
+        .unwrap();
+    let manifest = directory
+        .write(
+            "nested/workflow.yaml",
+            "tasks:\n  - id: inspect\n    command: [git, status]\n  - id: review\n    depends_on: [inspect]\n    harness: claude\n    prompt_file: ../prompts/review.md\n",
+        )
+        .unwrap();
+
+    let workflow = load(&manifest).unwrap().into_workflow();
+
+    assert_eq!(
+        workflow.tasks().get(1).unwrap().request(),
+        &TaskRequest::harness(
+            HeadlessHarness::Claude,
+            "review the findings:\n{{ tasks.inspect.stdout }}\n".into(),
+            HarnessOptions::default()
+        )
+    );
+}
+
+#[test]
+fn rejects_a_prompt_together_with_a_prompt_file() {
+    let directory = TemporaryDirectory::new("manifest-prompt-and-prompt-file").unwrap();
+    directory.write("review.md", "review").unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: review\n    harness: claude\n    prompt: review\n    prompt_file: review.md\n",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error))
+            if error == "task must define either prompt or prompt_file, not both"
+    ));
+}
+
+#[test]
+fn reports_an_unreadable_prompt_file() {
+    let directory = TemporaryDirectory::new("manifest-missing-prompt-file").unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: review\n    harness: claude\n    prompt_file: missing.md\n",
+        )
+        .unwrap();
+
+    let error = load(&manifest).unwrap_err();
+
+    assert!(
+        matches!(&error, ManifestError::PromptFile { path, .. } if path == &directory.join("missing.md"))
+    );
+    assert!(
+        error.to_string().starts_with(&format!(
+            "cannot read prompt file {}: ",
+            directory.join("missing.md").display()
+        )),
+        "{error}"
+    );
+}
+
+#[test]
+fn reports_an_output_reference_without_a_dependency() {
+    let directory = TemporaryDirectory::new("manifest-output-without-dependency").unwrap();
+    let manifest = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    command: [git, status]\n  - id: review\n    harness: claude\n    prompt: review {{ tasks.inspect.stdout }}\n",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        load(&manifest),
+        Err(ManifestError::Invalid(error))
+            if error == "task review reads the output of task inspect, so it must depend on it"
     ));
 }
 

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::task::{Task, TaskDefinition, TaskId, TaskIndex};
+use crate::template::{Template, TemplateError};
 
 /// Reports invalid workflow dependencies.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +22,29 @@ pub enum WorkflowError {
     SelfDependency(TaskId),
     /// A dependency cycle, with the first ID repeated last.
     Cycle(Vec<TaskId>),
+    /// A placeholder in a prompt or an argument names no task output.
+    InvalidTemplate {
+        /// The task whose text holds the placeholder.
+        task: TaskId,
+        /// What is wrong with the placeholder.
+        error: TemplateError,
+    },
+    /// A task reads its own output.
+    SelfOutput(TaskId),
+    /// A task reads the output of a task that does not exist.
+    OutputOfUnknownTask {
+        /// The task that reads the output.
+        task: TaskId,
+        /// The task the placeholder names.
+        source: TaskId,
+    },
+    /// A task reads the output of a task it does not depend on.
+    OutputWithoutDependency {
+        /// The task that reads the output.
+        task: TaskId,
+        /// The task the placeholder names.
+        source: TaskId,
+    },
 }
 
 impl fmt::Display for WorkflowError {
@@ -42,6 +66,20 @@ impl fmt::Display for WorkflowError {
                     .collect::<Vec<_>>()
                     .join(" -> ");
                 write!(formatter, "workflow dependency cycle: {cycle}")
+            }
+            Self::InvalidTemplate { task, error } => write!(formatter, "task {task}: {error}"),
+            Self::SelfOutput(task) => write!(formatter, "task {task} reads its own output"),
+            Self::OutputOfUnknownTask { task, source } => {
+                write!(
+                    formatter,
+                    "task {task} reads the output of unknown task {source}"
+                )
+            }
+            Self::OutputWithoutDependency { task, source } => {
+                write!(
+                    formatter,
+                    "task {task} reads the output of task {source}, so it must depend on it"
+                )
             }
         }
     }
@@ -84,6 +122,15 @@ impl Workflow {
     pub fn task(&self, index: TaskIndex) -> Option<&Task> {
         self.tasks.get(index.position())
     }
+
+    /// Returns the position of the task with `id`.
+    #[must_use]
+    pub fn index_of(&self, id: &TaskId) -> Option<TaskIndex> {
+        self.tasks
+            .iter()
+            .position(|task| task.id == *id)
+            .map(TaskIndex)
+    }
 }
 
 impl TryFrom<Vec<TaskDefinition>> for Workflow {
@@ -99,13 +146,22 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
         if let Err(cycle) = validate_acyclic(&dependencies) {
             return Err(WorkflowError::Cycle(task_ids(&definitions, &cycle)));
         }
+        let reads = definitions
+            .iter()
+            .zip(&dependencies)
+            .map(|(definition, dependencies)| {
+                resolve_output_sources(definition, dependencies, &indexes)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let tasks = definitions
             .into_iter()
             .zip(dependencies)
-            .map(|(definition, dependencies)| Task {
+            .zip(reads)
+            .map(|((definition, dependencies), reads)| Task {
                 id: definition.id,
                 dependencies,
+                reads,
                 request: definition.request,
                 sandbox: definition.sandbox,
             })
@@ -242,6 +298,47 @@ fn resolve_all_dependencies(
         .collect()
 }
 
+/// The distinct tasks whose output the request reads.
+///
+/// A transitive dependency has also finished when the task starts, but
+/// requiring a direct one keeps the data flow visible in `depends_on`.
+fn resolve_output_sources(
+    definition: &TaskDefinition,
+    dependencies: &[TaskIndex],
+    indexes: &HashMap<&TaskId, TaskIndex>,
+) -> Result<Vec<TaskIndex>, WorkflowError> {
+    let task = || definition.id.clone();
+    let mut sources = Vec::new();
+    for text in definition.request.texts() {
+        let template = Template::parse(text).map_err(|error| WorkflowError::InvalidTemplate {
+            task: task(),
+            error,
+        })?;
+        for reference in template.references() {
+            let source = reference.task();
+            if *source == definition.id {
+                return Err(WorkflowError::SelfOutput(task()));
+            }
+            let Some(index) = indexes.get(source) else {
+                return Err(WorkflowError::OutputOfUnknownTask {
+                    task: task(),
+                    source: source.clone(),
+                });
+            };
+            if !dependencies.contains(index) {
+                return Err(WorkflowError::OutputWithoutDependency {
+                    task: task(),
+                    source: source.clone(),
+                });
+            }
+            if !sources.contains(index) {
+                sources.push(*index);
+            }
+        }
+    }
+    Ok(sources)
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Visit {
     Unseen,
@@ -315,18 +412,40 @@ fn task_ids(definitions: &[TaskDefinition], positions: &[TaskIndex]) -> Vec<Task
 
 #[cfg(test)]
 mod tests {
+    use loom_policy::{HarnessOptions, HeadlessHarness};
+
     use crate::task::{TaskDefinition, TaskIndex, TaskRequest};
 
     use super::{Workflow, WorkflowError, WorkflowExecution};
 
-    fn task(id: &str, depends_on: &[&str]) -> TaskDefinition {
+    fn definition(id: &str, depends_on: &[&str], request: TaskRequest) -> TaskDefinition {
         TaskDefinition::new(
             id.parse().unwrap(),
             depends_on
                 .iter()
                 .map(|dependency| dependency.parse().unwrap())
                 .collect(),
+            request,
+        )
+    }
+
+    fn task(id: &str, depends_on: &[&str]) -> TaskDefinition {
+        definition(
+            id,
+            depends_on,
             TaskRequest::command("true".into(), Vec::new()),
+        )
+    }
+
+    fn prompt_task(id: &str, depends_on: &[&str], prompt: &str) -> TaskDefinition {
+        definition(
+            id,
+            depends_on,
+            TaskRequest::harness(
+                HeadlessHarness::Claude,
+                prompt.to_owned(),
+                HarnessOptions::default(),
+            ),
         )
     }
 
@@ -552,6 +671,103 @@ mod tests {
         assert_eq!(
             error,
             WorkflowError::SelfDependency("build".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn accepts_output_references_to_direct_dependencies() {
+        let workflow = Workflow::try_from(vec![
+            task("inspect", &[]),
+            prompt_task(
+                "review",
+                &["inspect"],
+                "review {{ tasks.inspect.stdout }} and {{ tasks.inspect.stderr }}",
+            ),
+            definition(
+                "test",
+                &["review"],
+                TaskRequest::command("echo".into(), vec!["{{ tasks.review.stdout }}".into()]),
+            ),
+        ])
+        .unwrap();
+
+        let reads = workflow
+            .tasks()
+            .iter()
+            .map(|task| task.reads().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(reads, [vec![], vec![TaskIndex(0)], vec![TaskIndex(1)]]);
+    }
+
+    #[test]
+    fn rejects_a_placeholder_that_names_no_task_output() {
+        let error = Workflow::try_from(vec![
+            task("inspect", &[]),
+            prompt_task("review", &["inspect"], "{{ tasks.inspect.status }}"),
+        ])
+        .unwrap_err();
+
+        assert!(matches!(error, WorkflowError::InvalidTemplate { .. }));
+        assert_eq!(
+            error.to_string(),
+            "task review: {{ tasks.inspect.status }} is not a task output; write {{ tasks.<id>.stdout }} or {{ tasks.<id>.stderr }}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_task_that_reads_its_own_output() {
+        let error = Workflow::try_from(vec![prompt_task(
+            "review",
+            &[],
+            "{{ tasks.review.stdout }}",
+        )])
+        .unwrap_err();
+
+        assert_eq!(error, WorkflowError::SelfOutput("review".parse().unwrap()));
+        assert_eq!(error.to_string(), "task review reads its own output");
+    }
+
+    #[test]
+    fn rejects_reading_the_output_of_an_unknown_task() {
+        let error = Workflow::try_from(vec![prompt_task(
+            "review",
+            &[],
+            "{{ tasks.inspect.stdout }}",
+        )])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            WorkflowError::OutputOfUnknownTask {
+                task: "review".parse().unwrap(),
+                source: "inspect".parse().unwrap(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "task review reads the output of unknown task inspect"
+        );
+    }
+
+    #[test]
+    fn rejects_reading_the_output_of_a_task_that_is_not_a_dependency() {
+        let error = Workflow::try_from(vec![
+            task("inspect", &[]),
+            task("build", &["inspect"]),
+            prompt_task("review", &["build"], "{{ tasks.inspect.stdout }}"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            WorkflowError::OutputWithoutDependency {
+                task: "review".parse().unwrap(),
+                source: "inspect".parse().unwrap(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "task review reads the output of task inspect, so it must depend on it"
         );
     }
 

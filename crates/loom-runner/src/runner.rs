@@ -1,10 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use loom_core::{TaskIndex, TaskRequest, Workflow, WorkflowExecution};
+use loom_core::{TaskIndex, TaskOutput, TaskRequest, Template, Workflow, WorkflowExecution};
 use loom_policy::SandboxPolicy;
 use loom_process::{
     ExecutionRequest, HarnessCall, OutputStream, ProcessCall, ProcessOutput, ProcessRunner,
@@ -126,6 +127,12 @@ impl Runner {
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
         let mut execution = workflow.execution();
+        let read_tasks = workflow
+            .tasks()
+            .iter()
+            .flat_map(|task| task.reads().iter().copied())
+            .collect::<HashSet<_>>();
+        let mut outputs = HashMap::new();
         let mut exit_status = 0;
         while execution.has_pending() {
             let tasks = start_ready_tasks(&mut execution, on_event)?;
@@ -141,19 +148,50 @@ impl Runner {
             let jobs = tasks
                 .into_iter()
                 .map(|task| {
-                    (
-                        Some(task.index),
-                        execution_request(task.request),
-                        task.sandbox,
-                    )
+                    let request = render_request(workflow, task.request, &outputs)?;
+                    Ok((Some(task.index), execution_request(request), task.sandbox))
                 })
-                .collect();
+                .collect::<io::Result<Vec<_>>>()?;
             let outcomes = run_requests_concurrently(&self.processes, jobs, on_event)?;
 
-            record_outcomes(&mut execution, outcomes, &mut exit_status)?;
+            record_outcomes(
+                &mut execution,
+                outcomes,
+                &read_tasks,
+                &mut outputs,
+                &mut exit_status,
+            )?;
         }
         Ok(exit_status)
     }
+}
+
+/// Fills the output placeholders of a request from the finished tasks.
+fn render_request(
+    workflow: &Workflow,
+    request: TaskRequest,
+    outputs: &HashMap<TaskIndex, ProcessOutput>,
+) -> io::Result<TaskRequest> {
+    request.try_map_texts(|text| {
+        let template = Template::parse(text).map_err(io::Error::other)?;
+        template
+            .render(|reference| {
+                let output = outputs.get(&workflow.index_of(reference.task())?)?;
+                Some(output_text(output, reference.output()))
+            })
+            .map_err(|reference| io::Error::other(format!("{reference} has no output yet")))
+    })
+}
+
+/// One captured stream as text, without the newlines that end it.
+fn output_text(output: &ProcessOutput, stream: TaskOutput) -> String {
+    let bytes = match stream {
+        TaskOutput::Stdout => output.stdout(),
+        TaskOutput::Stderr => output.stderr(),
+    };
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches(['\r', '\n'])
+        .to_owned()
 }
 
 /// A started task's request and sandbox.
@@ -196,14 +234,14 @@ enum Message {
     Done(Option<TaskIndex>, io::Result<ProcessOutput>, Duration),
 }
 
-/// A finished request's exit status, or the error that stopped it.
-///
-/// `None` inside `Ok` means the process died from a signal.
-type Outcome = io::Result<Option<i32>>;
+/// A finished request's captured output, or the error that stopped it.
+type Outcome = io::Result<ProcessOutput>;
 
 /// The status a request counts as. A signal or an execution error counts as 1.
 fn task_status(outcome: &Outcome) -> i32 {
-    outcome.as_ref().map_or(1, |status| status.unwrap_or(1))
+    outcome
+        .as_ref()
+        .map_or(1, |output| output.status_code().unwrap_or(1))
 }
 
 /// Runs requests concurrently, reporting each line and each result as it arrives.
@@ -247,7 +285,7 @@ fn run_requests_concurrently(
                     on_event(&RunEvent::Output { task, stream, line })?;
                 }
                 Message::Done(task, Ok(output), elapsed) => {
-                    outcomes.push((task, Ok(output.status_code())));
+                    outcomes.push((task, Ok(output.clone())));
                     on_event(&RunEvent::Finished {
                         task,
                         output,
@@ -281,6 +319,8 @@ fn run_requests_concurrently(
 fn record_outcomes(
     execution: &mut WorkflowExecution<'_>,
     mut outcomes: Vec<(Option<TaskIndex>, Outcome)>,
+    read_tasks: &HashSet<TaskIndex>,
+    outputs: &mut HashMap<TaskIndex, ProcessOutput>,
     exit_status: &mut i32,
 ) -> io::Result<()> {
     outcomes.sort_by_key(|(task, _)| position(*task));
@@ -295,7 +335,10 @@ fn record_outcomes(
             return Err(io::Error::other("workflow task is not running"));
         }
         match outcome {
-            Ok(_) => {
+            Ok(output) => {
+                if read_tasks.contains(&index) {
+                    outputs.insert(index, output);
+                }
                 if status != 0 && *exit_status == 0 {
                     *exit_status = status;
                 }

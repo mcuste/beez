@@ -117,6 +117,53 @@ fn runs_ready_tasks_and_releases_dependents() {
 }
 
 #[test]
+fn fills_output_placeholders_from_finished_dependencies() {
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "inspect",
+            &[],
+            "bash",
+            arguments(&["-c", "printf 'first\\nsecond\\n'; printf 'warn\\r\\n' >&2"]),
+        )),
+        assert_ok!(command_task(
+            "review",
+            &["inspect"],
+            "printf",
+            arguments(&[
+                "%s|%s|%s",
+                "{{ tasks.inspect.stdout }}",
+                "{{tasks.inspect.stderr}}",
+                "{{ literal }}",
+            ]),
+        )),
+    ]));
+    let mut events = Vec::new();
+
+    let status = assert_ok!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
+
+    assert_eq!(status, 0);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RecordedEvent::Finished {
+                task: Some(1),
+                stdout,
+                status: Some(0),
+                ..
+            } if stdout == b"first\nsecond|warn|{{ literal }}"
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
 fn blocks_dependents_after_a_failed_task() {
     let directory = assert_ok!(TemporaryDirectory::new("runner-failed-dependency"));
     let marker = directory.path().join("blocked-task-ran");

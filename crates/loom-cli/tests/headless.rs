@@ -167,6 +167,39 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
 }
 
 #[test]
+fn passes_the_output_of_a_task_into_a_prompt_file() {
+    let directory = TemporaryDirectory::new("cli-workflow-task-output").unwrap();
+    fake_harness(&directory, "claude", 0).unwrap();
+    directory
+        .write(
+            "review.md",
+            "review these files:\n{{ tasks.inspect.stdout }}\n",
+        )
+        .unwrap();
+    let workflow = directory
+        .write(
+            "workflow.yaml",
+            "tasks:\n  - id: inspect\n    command: [printf, 'a.rs\\nb.rs\\n']\n  - id: review\n    depends_on: [inspect]\n    harness: claude\n    prompt_file: review.md\n",
+        )
+        .unwrap();
+
+    let output = common::loom()
+        .args(["run", "workflow", "--output", "grouped", "--color", "never"])
+        .arg(workflow)
+        .env("PATH", extended_path(directory.path()))
+        .env("LOOM_LOG_DIR", directory.join("logs"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[--print][review these files:\n    a.rs\n    b.rs\n    ]"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn rejects_an_unsupported_harness() {
     let output = common::loom()
         .args(["run", "cursor", "inspect the repository"])

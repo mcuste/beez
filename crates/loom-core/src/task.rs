@@ -100,6 +100,41 @@ impl TaskRequest {
     pub fn command(program: String, arguments: Vec<String>) -> Self {
         Self::Command { program, arguments }
     }
+
+    /// The texts that may read the output of other tasks: the prompt of a
+    /// harness task, or the arguments of a command task.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::Harness { prompt, .. } => std::slice::from_ref(prompt).iter(),
+            Self::Command { arguments, .. } => arguments.iter(),
+        }
+        .map(String::as_str)
+    }
+
+    /// Replaces each text from [`Self::texts`] with what `map` returns for it.
+    pub fn try_map_texts<E>(
+        self,
+        mut map: impl FnMut(&str) -> Result<String, E>,
+    ) -> Result<Self, E> {
+        Ok(match self {
+            Self::Harness {
+                harness,
+                prompt,
+                options,
+            } => Self::Harness {
+                harness,
+                prompt: map(&prompt)?,
+                options,
+            },
+            Self::Command { program, arguments } => Self::Command {
+                program,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| map(argument))
+                    .collect::<Result<_, _>>()?,
+            },
+        })
+    }
 }
 
 /// A task declaration with dependencies identified by task ID.
@@ -148,6 +183,7 @@ impl TaskIndex {
 pub struct Task {
     pub(crate) id: TaskId,
     pub(crate) dependencies: Vec<TaskIndex>,
+    pub(crate) reads: Vec<TaskIndex>,
     pub(crate) request: TaskRequest,
     pub(crate) sandbox: Option<SandboxPolicy>,
 }
@@ -163,6 +199,12 @@ impl Task {
     #[must_use]
     pub fn dependencies(&self) -> &[TaskIndex] {
         &self.dependencies
+    }
+
+    /// The tasks whose output the request reads. Each is a dependency.
+    #[must_use]
+    pub fn reads(&self) -> &[TaskIndex] {
+        &self.reads
     }
 
     /// The action to execute after dependencies succeed.

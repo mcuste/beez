@@ -9,7 +9,9 @@ loom run workflow workflow.yaml
 ```
 
 Workflow manifests support YAML and JSON. Each task defines either a harness
-prompt or a literal command. Dependencies run before their dependents.
+prompt or a literal command. A harness task writes its prompt inline with
+`prompt`, or names a file with `prompt_file`, relative to the manifest.
+Dependencies run before their dependents.
 
 Loom supports four harnesses: `pi`, `omp`, `claude` for Claude Code, and `codex`.
 Harness tasks accept an optional `model` and `effort`. Loom sends the effort with
@@ -51,6 +53,41 @@ Run a single harness prompt with the same options:
 loom run claude --model opus --effort high "inspect the repository"
 loom run codex --model gpt-5 --effort high "inspect the repository"
 ```
+
+## Task outputs
+
+A task can read the output of a task it depends on. `{{ tasks.<id>.stdout }}`
+and `{{ tasks.<id>.stderr }}` in a prompt, a prompt file, or a command argument
+stand for the captured stream of that task. Loom fills them in when the task
+starts, so the dependency has finished and its output is complete.
+
+```yaml
+tasks:
+  - id: changed
+    command: [git, diff, --name-only, main]
+
+  - id: review
+    depends_on: [changed]
+    harness: claude
+    prompt_file: prompts/review.md
+
+  - id: notify
+    depends_on: [review]
+    command: [./notify.sh, "{{ tasks.review.stdout }}"]
+```
+
+```markdown
+Review these files and report problems:
+
+{{ tasks.changed.stdout }}
+```
+
+The task a placeholder names must be in `depends_on`, and a manifest that
+breaks that rule fails to load. Loom removes the newlines that end the output,
+so a one-line result fits inside a sentence. Braces that do not start with
+`tasks.` stay as they are, so a prompt can talk about other template
+languages. `run.json` records the prompt and the arguments as the manifest
+wrote them, and `tasks/<id>.stdout` holds what each placeholder received.
 
 ## Output
 

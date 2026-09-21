@@ -25,7 +25,7 @@ pub enum OutputStream {
 pub type OutputSink<'sink> = dyn Fn(OutputStream, &[u8]) + Send + Sync + 'sink;
 
 /// Captured child-process streams and exit status.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
