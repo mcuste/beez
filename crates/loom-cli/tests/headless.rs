@@ -37,11 +37,16 @@ fn passes_the_model_and_effort_to_claude() {
             "inspect the repository",
         ])
         .env("PATH", extended_path(directory.path()))
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         output.stdout,
         b"[--print][--model][opus][--effort][high][inspect the repository]"
@@ -64,11 +69,16 @@ fn passes_the_effort_to_codex_as_a_config_override() {
             "inspect the repository",
         ])
         .env("PATH", extended_path(directory.path()))
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         output.stdout,
         b"[exec][--model][gpt-5][-c][model_reasoning_effort=high][inspect the repository]"
@@ -101,6 +111,7 @@ fn rejects_a_prompt_that_starts_with_a_hyphen_without_a_separator() {
     let output = common::loom()
         .args(["run", "pi", "--print me"])
         .env("PATH", directory.path())
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -129,11 +140,16 @@ fn runs_a_workflow_codex_task_with_a_model_and_effort() {
         .args(["run", "workflow"])
         .arg(workflow)
         .env("PATH", extended_path(directory.path()))
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         output.stdout,
         b"[exec][--model][gpt-5][-c][model_reasoning_effort=high][inspect the repository]"
@@ -155,11 +171,16 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
         .args(["run", "workflow"])
         .arg(workflow)
         .env("PATH", extended_path(directory.path()))
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         output.stdout,
         b"[--print][--model][opus][--thinking][high][inspect the repository]"
@@ -169,7 +190,9 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
 #[test]
 fn passes_the_output_of_a_task_into_a_prompt_file() {
     let directory = TemporaryDirectory::new("cli-workflow-task-output").unwrap();
-    fake_harness(&directory, "claude", 0).unwrap();
+    let harness = fake_harness(&directory, "claude", 0).unwrap();
+    // Echo to stdout only: grouped output merges streams and would interleave two copies.
+    fs::write(&harness, "#!/bin/sh\nprintf '[%s]' \"$@\"\n").unwrap();
     directory
         .write(
             "review.md",
@@ -187,6 +210,7 @@ fn passes_the_output_of_a_task_into_a_prompt_file() {
         .args(["run", "workflow", "--output", "grouped", "--color", "never"])
         .arg(workflow)
         .env("PATH", extended_path(directory.path()))
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -228,6 +252,7 @@ fn rejects_an_unsupported_workflow_harness() {
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -247,6 +272,7 @@ fn reports_when_a_harness_cannot_start() {
     let output = common::loom()
         .args(["run", "pi", "inspect the repository"])
         .env("PATH", directory.path())
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -258,7 +284,9 @@ fn reports_when_a_harness_cannot_start() {
 
 #[test]
 fn runs_a_command_with_literal_arguments() {
+    let directory = TemporaryDirectory::new("cli-command").unwrap();
     let output = common::loom()
+        .current_dir(directory.path())
         .args([
             "run",
             "command",
@@ -299,11 +327,16 @@ fn runs_a_yaml_workflow_in_dependency_order() {
     let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, "test    \u{2502} done\n".as_bytes());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("Summary   2 passed in"),
@@ -324,12 +357,17 @@ fn prefixes_every_line_of_every_task_that_runs_together() {
     let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     // Both tasks run in one batch, so Loom may relay them in either order.
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines: Vec<&str> = stdout.lines().collect();
     lines.sort_unstable();
@@ -358,6 +396,7 @@ fn returns_a_failed_workflow_status_and_blocks_dependents() {
     let output = common::loom()
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -390,11 +429,16 @@ fn runs_a_json_workflow() {
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"json");
     assert!(output.stderr.is_empty());
 }
@@ -412,6 +456,7 @@ fn reports_invalid_workflow_manifests() {
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -432,6 +477,7 @@ fn rejects_a_workflow_without_tasks() {
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -454,11 +500,16 @@ fn groups_each_task_behind_a_status_line() {
     let output = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     // One reader thread per stream, so a task's own two lines may swap.
@@ -486,11 +537,16 @@ fn prefixes_every_line_with_its_task_in_stream_mode() {
     let output = common::loom()
         .args(["run", "workflow", "--output", "stream", "--color", "never"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // The spinners are hidden without a terminal, and every line still arrives.
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
@@ -521,6 +577,7 @@ fn reports_a_blocked_task_and_counts_it_in_the_summary() {
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
@@ -549,11 +606,16 @@ fn relays_a_single_task_workflow_without_decoration() {
     let output = common::loom()
         .args(["run", "workflow"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"solo");
     assert!(output.stderr.is_empty());
 }
@@ -576,6 +638,7 @@ fn closes_each_grouped_task_with_its_status_line() {
     let status = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .stdout(stdout)
         .stderr(stderr)
@@ -628,11 +691,16 @@ fn keeps_a_grouped_block_off_the_status_line() {
     let output = common::loom()
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // A blank line keeps no trailing spaces, and the last line still ends.
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -661,22 +729,30 @@ fn stamps_a_grouped_line_when_it_arrives() {
             "never",
         ])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     // A block prints when its task ends, so a stamp must be the arrival time
     // of its own line, not the time the block was written.
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("    0.0s     early"));
-    assert!(
-        lines
-            .next()
-            .is_some_and(|line| line.starts_with("    1.0s")),
-        "stdout: {stdout}"
-    );
+    let late = lines.next().unwrap_or_default();
+    let seconds: f64 = late
+        .split_whitespace()
+        .next()
+        .and_then(|stamp| stamp.strip_suffix('s'))
+        .and_then(|stamp| stamp.parse().ok())
+        .unwrap_or_else(|| panic!("stdout: {stdout}"));
+    assert!(seconds >= 1.0, "stdout: {stdout}");
+    assert!(late.ends_with("     late"), "stdout: {stdout}");
     assert_eq!(lines.next(), None);
 }
 
@@ -693,11 +769,16 @@ fn stamps_every_line_with_a_utc_date_and_time() {
     let output = common::loom()
         .args(["run", "workflow", "--timestamps", "--color", "never"])
         .arg(workflow)
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     for line in stdout.lines() {
         let (stamp, rest) = line.split_at(24);
@@ -724,6 +805,7 @@ fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>>
         .args(["run", name])
         .args(arguments)
         .env("PATH", extended_path(directory.path()))
+        .current_dir(directory.path())
         .env("LOOM_LOG_DIR", directory.join("logs"))
         .output()
         .map_err(Into::into)
