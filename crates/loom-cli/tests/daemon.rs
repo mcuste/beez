@@ -17,7 +17,7 @@ mod common;
 const LIMIT: Duration = Duration::from_secs(20);
 const STEP: Duration = Duration::from_millis(50);
 /// How far ahead a test puts a fire, so a busy machine still reaches it in time.
-const LEAD: Duration = Duration::from_secs(3);
+const LEAD: Duration = Duration::from_secs(5);
 
 /// A workflow of one task that writes a file, with the given schedule.
 ///
@@ -287,12 +287,28 @@ fn fires_a_one_time_schedule_once() {
     let root = directory.join("root");
     let marker = directory.join("marker");
     let daemon = start(&root).unwrap();
-    // The daemon runs already, so the whole lead time is its to wait.
-    let at = loom_schedule::format_instant(std::time::SystemTime::now() + LEAD);
+    // Watching a manifest takes a process start and a round trip to the
+    // daemon, so the fire time is set only once the daemon lists the job.
+    let later = loom_schedule::format_instant(std::time::SystemTime::now() + LIMIT);
     let path = directory
-        .write("once.yaml", ticking(&format!("  at: \"{at}\"\n"), &marker))
+        .write(
+            "once.yaml",
+            ticking(&format!("  at: \"{later}\"\n"), &marker),
+        )
         .unwrap();
     add(&root, &path).unwrap();
+    wait_for(&root, "watched the manifest", || {
+        loom(&root, &["schedule", "list"]).is_ok_and(|output| stdout(&output).contains(&later))
+    })
+    .unwrap();
+
+    let at = loom_schedule::format_instant(std::time::SystemTime::now() + LEAD);
+    fs::write(&path, ticking(&format!("  at: \"{at}\"\n"), &marker)).unwrap();
+    // The daemon reads a changed manifest when it wakes, and a command wakes it.
+    wait_for(&root, "read the new fire time", || {
+        loom(&root, &["schedule", "list"]).is_ok_and(|output| stdout(&output).contains(&at))
+    })
+    .unwrap();
 
     wait_for(&root, "fired the one-time schedule", || marker.exists()).unwrap();
     wait_for(&root, "finished the run", || {
