@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Beez logo: three bees in a honeycomb cell" width="180">
+</p>
+
 # Beez
 
 [![CI](https://github.com/mcuste/beez/actions/workflows/ci.yml/badge.svg)](https://github.com/mcuste/beez/actions/workflows/ci.yml)

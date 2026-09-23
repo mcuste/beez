@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 512 512" width="512" height="512">
+  <title>Beez</title>
+  <defs>
+    <clipPath id="body">
+      <ellipse cx="0" cy="0" rx="56" ry="40"/>
+    </clipPath>
+    <g id="bee">
+      <ellipse cx="-14" cy="-44" rx="20" ry="30" transform="rotate(-24 -14 -44)" fill="#FFFFFF" fill-opacity="0.9" stroke="#2B2118" stroke-width="5"/>
+      <ellipse cx="10" cy="-46" rx="17" ry="27" transform="rotate(22 10 -46)" fill="#FFFFFF" fill-opacity="0.9" stroke="#2B2118" stroke-width="5"/>
+      <path d="M -54 -7 L -72 0 L -54 7 Z" fill="#2B2118" stroke="#2B2118" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M 26 -34 Q 30 -58 46 -64" fill="none" stroke="#2B2118" stroke-width="5" stroke-linecap="round"/>
+      <path d="M 38 -29 Q 50 -48 66 -50" fill="none" stroke="#2B2118" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="46" cy="-64" r="6" fill="#2B2118"/>
+      <circle cx="66" cy="-50" r="6" fill="#2B2118"/>
+      <ellipse cx="0" cy="0" rx="56" ry="40" fill="#FFC83D"/>
+      <g clip-path="url(#body)" fill="#2B2118">
+        <rect x="-36" y="-40" width="14" height="80"/>
+        <rect x="-10" y="-40" width="14" height="80"/>
+      </g>
+      <ellipse cx="0" cy="0" rx="56" ry="40" fill="none" stroke="#2B2118" stroke-width="6"/>
+      <circle cx="30" cy="-8" r="8" fill="#2B2118"/>
+      <circle cx="33" cy="-11" r="3" fill="#FFFFFF"/>
+      <circle cx="18" cy="6" r="6" fill="#FF8FA3" fill-opacity="0.8"/>
+      <path d="M 31 11 Q 38 18 45 10" fill="none" stroke="#2B2118" stroke-width="4" stroke-linecap="round"/>
+    </g>
+  </defs>
+
+  <polygon points="256,28 453.5,142 453.5,370 256,484 58.5,370 58.5,142" fill="#FFF4D6" stroke="#F5B400" stroke-width="28" stroke-linejoin="round"/>
+
+  <g fill="none" stroke="#E0A200" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 16">
+    <path d="M 112 358 C 116 392 168 392 168 362 C 168 344 152 336 158 322"/>
+    <path d="M 92 262 C 70 232 92 196 124 192"/>
+    <path d="M 312 104 C 282 106 270 150 290 175"/>
+  </g>
+
+  <use xlink:href="#bee" transform="translate(262 316) scale(1.35)"/>
+  <use xlink:href="#bee" transform="translate(196 176) rotate(-12) scale(0.85)"/>
+  <use xlink:href="#bee" transform="translate(356 184) rotate(10) scale(0.75)"/>
+</svg>
