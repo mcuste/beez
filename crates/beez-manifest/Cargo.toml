@@ -1,0 +1,22 @@
+[package]
+name = "beez-manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+beez-core = { path = "../beez-core" }
+beez-policy = { path = "../beez-policy" }
+beez-schedule = { path = "../beez-schedule" }
+noyalib = "0.0.28"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+beez-test-support = { workspace = true }
+
+[lints]
+workspace = true

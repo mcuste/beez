@@ -1,9 +1,9 @@
 # Sandbox
 
 A sandbox is a set of operating-system rules that limit what a program can
-do. Every Loom task runs inside one, so a coding agent or a command cannot
+do. Every Beez task runs inside one, so a coding agent or a command cannot
 read your secrets, change files outside the project, or talk to hosts you did
-not allow. Loom applies the sandbox itself, so every harness and every command
+not allow. Beez applies the sandbox itself, so every harness and every command
 gets the same rules.
 
 - macOS uses Seatbelt through `sandbox-exec`. Nothing to install.
@@ -15,7 +15,7 @@ gets the same rules.
 Network:
 
 - All connections are denied unless the host is allowed.
-- Loom runs a local HTTP proxy and a SOCKS5 proxy that only connect to
+- Beez runs a local HTTP proxy and a SOCKS5 proxy that only connect to
   allowed hosts. It points `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` at
   them.
 - An allowed host that resolves to a loopback or link-local address, such as a
@@ -31,7 +31,7 @@ Filesystem:
   directory, and the harness's own state directory.
 - Files a task could use to run code later stay read-only: `.git/hooks`,
   `.github/workflows`, `.envrc`, `.vscode`, `.claude`, and `.mcp.json`.
-  `.loom` is read-only too, so a task cannot rewrite the log of its own run.
+  `.beez` is read-only too, so a task cannot rewrite the log of its own run.
 
 Programs:
 
@@ -94,7 +94,7 @@ tasks:
 From the command line:
 
 ```sh
-loom run codex --allow-domain github.com --allow-write /data "fix the build"
+beez run codex --allow-domain github.com --allow-write /data "fix the build"
 ```
 
 `--allow-domain` and `--allow-write` add to the default rules. `--no-sandbox`

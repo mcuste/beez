@@ -8,20 +8,20 @@ project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `loom run workflow` runs the tasks of a YAML or JSON manifest in dependency
+- `beez run workflow` runs the tasks of a YAML or JSON manifest in dependency
   order, with independent tasks in parallel.
-- `loom run claude`, `codex`, `pi`, and `omp` run one prompt. `model` and
+- `beez run claude`, `codex`, `pi`, and `omp` run one prompt. `model` and
   `effort` are passed with each harness's own flags.
-- `loom run command` runs a program without a shell.
+- `beez run command` runs a program without a shell.
 - Every task runs in an operating-system sandbox: Seatbelt on macOS,
   bubblewrap and Landlock on Linux. The sandbox limits network hosts, file
   reads and writes, and the programs a task may run. A manifest widens the
   rules per workflow or per task, or opts out with `sandbox: false`.
 - Task output is labeled by task ID, streamed or grouped, with optional
   timestamps and colour control.
-- Every run is saved under `.loom` with a combined log, the raw streams of
+- Every run is saved under `.beez` with a combined log, the raw streams of
   each task, and a `run.json` record.
 - A prompt or command argument can include the output of a dependency with
   `{{ tasks.<id>.stdout }}` and `{{ tasks.<id>.stderr }}`.
-- Manifests can carry a `schedule`. `loom schedule` watches manifests and
-  `loom daemon` fires them on cron expressions or at one instant.
+- Manifests can carry a `schedule`. `beez schedule` watches manifests and
+  `beez daemon` fires them on cron expressions or at one instant.

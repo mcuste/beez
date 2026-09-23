@@ -1,0 +1,26 @@
+[package]
+name = "beez-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+harness-contract = []
+
+[dependencies]
+beez-policy = { path = "../beez-policy" }
+beez-sandbox = { path = "../beez-sandbox" }
+
+[dev-dependencies]
+beez-test-support = { workspace = true }
+
+[[test]]
+name = "harness_contract"
+path = "tests/harness_contract.rs"
+required-features = ["harness-contract"]
+
+[lints]
+workspace = true

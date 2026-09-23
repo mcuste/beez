@@ -1,6 +1,6 @@
 # Schedules
 
-A manifest can say when it runs. The Loom daemon, a background process, reads
+A manifest can say when it runs. The Beez daemon, a background process, reads
 the manifests it watches and starts them at the times they name.
 
 ```yaml
@@ -20,9 +20,9 @@ tasks:
 Watch the manifest, then start the daemon:
 
 ```sh
-loom schedule add nightly.yaml
-loom daemon start
-loom schedule list
+beez schedule add nightly.yaml
+beez daemon start
+beez schedule list
 ```
 
 ```
@@ -31,27 +31,27 @@ JOB      CONDITION  SCHEDULE   NEXT FIRE             LAST RUN
 nightly  waiting    0 3 * * *  2026-09-10T03:00:00Z  20260909T030000004Z-4123 (ok)
 ```
 
-The schedule lives only in the manifest. Loom stores the list of watched
+The schedule lives only in the manifest. Beez stores the list of watched
 manifests and what already happened, and nothing else. When you edit a
 manifest, the daemon reads it again on the next change and on every fire, so
 the schedule updates without a command.
 
-One daemon serves every repository. It lives in `~/.loom` no matter where you
+One daemon serves every repository. It lives in `~/.beez` no matter where you
 run a command, and each watched manifest remembers the directory its tasks run
 in.
 
 ```sh
-loom schedule add ~/work/alpha/nightly.yaml
-loom schedule add ~/work/beta/weekly.yaml
-loom daemon start
+beez schedule add ~/work/alpha/nightly.yaml
+beez schedule add ~/work/beta/weekly.yaml
+beez daemon start
 ```
 
-`--root <PATH>` or `LOOM_ROOT` uses another directory. A second root is a
+`--root <PATH>` or `BEEZ_ROOT` uses another directory. A second root is a
 second daemon with its own jobs, socket, and runs.
 
 ## Cron expressions
 
-Loom takes the five fields of a crontab, in the same order and with the same
+Beez takes the five fields of a crontab, in the same order and with the same
 meaning.
 
 ```
@@ -82,7 +82,7 @@ schedule:
   offset: "+02:00"
 ```
 
-Loom does not read the time zone database, so an offset stays the same all
+Beez does not read the time zone database, so an offset stays the same all
 year. A schedule in a zone with daylight saving moves by one hour twice a year.
 
 ## One-time runs
@@ -142,17 +142,17 @@ The job ID is the manifest file name, then the schedule name after a colon:
 
 | Command                           | What it does                              |
 | --------------------------------- | ----------------------------------------- |
-| `loom schedule add <manifest>`    | Watches one more manifest                 |
-| `loom schedule remove <manifest>` | Stops watching one manifest               |
-| `loom schedule list`              | Reports every job                         |
-| `loom schedule trigger <job>`     | Runs one job now, beside its schedule     |
-| `loom schedule pause <job>`       | Holds one job back                        |
-| `loom schedule resume <job>`      | Lets a paused job fire again              |
-| `loom daemon run`                 | Runs the daemon in this terminal          |
-| `loom daemon start`               | Starts the daemon in the background       |
-| `loom daemon stop`                | Stops it once its running runs end        |
-| `loom daemon status`              | Reports the daemon and its jobs           |
-| `loom daemon reload`              | Reads every watched manifest again        |
+| `beez schedule add <manifest>`    | Watches one more manifest                 |
+| `beez schedule remove <manifest>` | Stops watching one manifest               |
+| `beez schedule list`              | Reports every job                         |
+| `beez schedule trigger <job>`     | Runs one job now, beside its schedule     |
+| `beez schedule pause <job>`       | Holds one job back                        |
+| `beez schedule resume <job>`      | Lets a paused job fire again              |
+| `beez daemon run`                 | Runs the daemon in this terminal          |
+| `beez daemon start`               | Starts the daemon in the background       |
+| `beez daemon stop`                | Stops it once its running runs end        |
+| `beez daemon status`              | Reports the daemon and its jobs           |
+| `beez daemon reload`              | Reads every watched manifest again        |
 
 `add`, `remove`, `list`, `pause`, and `resume` work without a daemon. The
 others need a running one.
@@ -162,7 +162,7 @@ others need a running one.
 The daemon keeps its own files and its runs in one root.
 
 ```
-~/.loom/
+~/.beez/
   daemon/
     daemon.sock      commands arrive here
     daemon.json      the pid and start time of the running daemon
@@ -186,7 +186,7 @@ started it:
 2026-09-10T03:00:00.004Z Running   review
 ```
 
-The daemon writes its own lines to standard error. `loom daemon start` sends
+The daemon writes its own lines to standard error. `beez daemon start` sends
 them to `daemon.log`.
 
 ```
@@ -200,32 +200,32 @@ after every run. `--keep-runs` changes the number, and zero keeps every run.
 
 ## Running at boot
 
-`loom daemon start` survives a closed terminal, but not a reboot. Use launchd
-or systemd for that, with `loom daemon run` in the foreground.
+`beez daemon start` survives a closed terminal, but not a reboot. Use launchd
+or systemd for that, with `beez daemon run` in the foreground.
 
 launchd:
 
 ```xml
 <key>ProgramArguments</key>
 <array>
-  <string>/usr/local/bin/loom</string>
+  <string>/usr/local/bin/beez</string>
   <string>daemon</string>
   <string>run</string>
 </array>
 <key>StandardErrorPath</key>
-<string>/Users/you/.loom/daemon/daemon.log</string>
+<string>/Users/you/.beez/daemon/daemon.log</string>
 ```
 
 systemd:
 
 ```ini
 [Service]
-ExecStart=/usr/local/bin/loom daemon run
+ExecStart=/usr/local/bin/beez daemon run
 ```
 
 The daemon finds its jobs in `manifests.json` in its root, so the service
 needs no working directory. A daemon that cannot write its root says so and
-stops. `loom daemon reload` reads the list again, so a running daemon picks
+stops. `beez daemon reload` reads the list again, so a running daemon picks
 up a list written by hand.
 
 A scheduled harness run needs its credentials in the environment of the

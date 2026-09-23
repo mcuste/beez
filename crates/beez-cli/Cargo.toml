@@ -1,0 +1,34 @@
+[package]
+name = "beez"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Run coding agents and commands in sandboxed workflows, on demand or on a schedule"
+
+[[bin]]
+name = "beez"
+path = "src/main.rs"
+
+
+[dependencies]
+anstream.workspace = true
+anstyle.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+beez-policy = { path = "../beez-policy" }
+beez-daemon = { path = "../beez-daemon" }
+beez-manifest = { path = "../beez-manifest" }
+beez-record = { path = "../beez-record" }
+beez-runner = { path = "../beez-runner" }
+beez-sandbox = { path = "../beez-sandbox" }
+beez-process.workspace = true
+
+[dev-dependencies]
+beez-schedule = { path = "../beez-schedule" }
+beez-test-support = { workspace = true }
+
+[lints]
+workspace = true

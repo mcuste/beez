@@ -1,8 +1,8 @@
 /target/
 .DS_Store
 
-# Loom run directories
-.loom/
+# Beez run directories
+.beez/
 
 # Local scratch: roadmap notes and workflow drivers
 /ROADMAP.md

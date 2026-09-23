@@ -1,0 +1,24 @@
+[package]
+name = "beez-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+beez-manifest = { path = "../beez-manifest" }
+beez-record = { path = "../beez-record" }
+beez-runner = { path = "../beez-runner" }
+beez-sandbox = { path = "../beez-sandbox" }
+beez-schedule = { path = "../beez-schedule" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+signal-hook = { version = "0.4.4", default-features = false, features = ["iterator"] }
+
+[dev-dependencies]
+beez-test-support = { workspace = true }
+
+[lints]
+workspace = true

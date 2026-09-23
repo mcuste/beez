@@ -1,18 +1,18 @@
 [workspace]
 members = [
-  "crates/loom-policy",
-  "crates/loom-core",
-  "crates/loom-process",
-  "crates/loom-sandbox",
-  "crates/loom-manifest",
-  "crates/loom-daemon",
-  "crates/loom-record",
-  "crates/loom-schedule",
-  "crates/loom-runner",
-  "crates/loom-cli",
-  "crates/loom-test-support",
+  "crates/beez-policy",
+  "crates/beez-core",
+  "crates/beez-process",
+  "crates/beez-sandbox",
+  "crates/beez-manifest",
+  "crates/beez-daemon",
+  "crates/beez-record",
+  "crates/beez-schedule",
+  "crates/beez-runner",
+  "crates/beez-cli",
+  "crates/beez-test-support",
 ]
-default-members = ["crates/loom-cli"]
+default-members = ["crates/beez-cli"]
 resolver = "3"
 
 [workspace.package]
@@ -29,8 +29,8 @@ anstyle = "1.0.14"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 indicatif = { version = "0.18.6", default-features = false, features = ["unicode-width"] }
-loom-process = { path = "crates/loom-process" }
-loom-test-support = { path = "crates/loom-test-support" }
+beez-process = { path = "crates/beez-process" }
+beez-test-support = { path = "crates/beez-test-support" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

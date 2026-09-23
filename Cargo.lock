@@ -68,6 +68,118 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "beez"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "beez-daemon",
+ "beez-manifest",
+ "beez-policy",
+ "beez-process",
+ "beez-record",
+ "beez-runner",
+ "beez-sandbox",
+ "beez-schedule",
+ "beez-test-support",
+ "clap",
+ "indicatif",
+]
+
+[[package]]
+name = "beez-core"
+version = "0.1.0"
+dependencies = [
+ "beez-policy",
+]
+
+[[package]]
+name = "beez-daemon"
+version = "0.1.0"
+dependencies = [
+ "beez-manifest",
+ "beez-record",
+ "beez-runner",
+ "beez-sandbox",
+ "beez-schedule",
+ "beez-test-support",
+ "serde",
+ "serde_json",
+ "signal-hook",
+]
+
+[[package]]
+name = "beez-manifest"
+version = "0.1.0"
+dependencies = [
+ "beez-core",
+ "beez-policy",
+ "beez-schedule",
+ "beez-test-support",
+ "noyalib",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "beez-policy"
+version = "0.1.0"
+
+[[package]]
+name = "beez-process"
+version = "0.1.0"
+dependencies = [
+ "beez-policy",
+ "beez-sandbox",
+ "beez-test-support",
+]
+
+[[package]]
+name = "beez-record"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "beez-core",
+ "beez-process",
+ "beez-runner",
+ "beez-test-support",
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "beez-runner"
+version = "0.1.0"
+dependencies = [
+ "beez-core",
+ "beez-policy",
+ "beez-process",
+ "beez-test-support",
+]
+
+[[package]]
+name = "beez-sandbox"
+version = "0.1.0"
+dependencies = [
+ "beez-policy",
+ "beez-test-support",
+ "landlock",
+]
+
+[[package]]
+name = "beez-schedule"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cron",
+]
+
+[[package]]
+name = "beez-test-support"
+version = "0.1.0"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -359,118 +471,6 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
-
-[[package]]
-name = "loom-cli"
-version = "0.1.0"
-dependencies = [
- "anstream",
- "anstyle",
- "clap",
- "indicatif",
- "loom-daemon",
- "loom-manifest",
- "loom-policy",
- "loom-process",
- "loom-record",
- "loom-runner",
- "loom-sandbox",
- "loom-schedule",
- "loom-test-support",
-]
-
-[[package]]
-name = "loom-core"
-version = "0.1.0"
-dependencies = [
- "loom-policy",
-]
-
-[[package]]
-name = "loom-daemon"
-version = "0.1.0"
-dependencies = [
- "loom-manifest",
- "loom-record",
- "loom-runner",
- "loom-sandbox",
- "loom-schedule",
- "loom-test-support",
- "serde",
- "serde_json",
- "signal-hook",
-]
-
-[[package]]
-name = "loom-manifest"
-version = "0.1.0"
-dependencies = [
- "loom-core",
- "loom-policy",
- "loom-schedule",
- "loom-test-support",
- "noyalib",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "loom-policy"
-version = "0.1.0"
-
-[[package]]
-name = "loom-process"
-version = "0.1.0"
-dependencies = [
- "loom-policy",
- "loom-sandbox",
- "loom-test-support",
-]
-
-[[package]]
-name = "loom-record"
-version = "0.1.0"
-dependencies = [
- "anstream",
- "chrono",
- "loom-core",
- "loom-process",
- "loom-runner",
- "loom-test-support",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "loom-runner"
-version = "0.1.0"
-dependencies = [
- "loom-core",
- "loom-policy",
- "loom-process",
- "loom-test-support",
-]
-
-[[package]]
-name = "loom-sandbox"
-version = "0.1.0"
-dependencies = [
- "landlock",
- "loom-policy",
- "loom-test-support",
-]
-
-[[package]]
-name = "loom-schedule"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cron",
-]
-
-[[package]]
-name = "loom-test-support"
-version = "0.1.0"
 
 [[package]]
 name = "memchr"

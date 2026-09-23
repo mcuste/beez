@@ -39,13 +39,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked --package loom-cli --target ${{ matrix.target }}
+      - run: cargo build --release --locked --package beez --target ${{ matrix.target }}
       - id: archive
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          asset="loom-${GITHUB_REF_NAME}-${TARGET}.tar.gz"
-          tar -czf "${asset}" -C "target/${TARGET}/release" loom
+          asset="beez-${GITHUB_REF_NAME}-${TARGET}.tar.gz"
+          tar -czf "${asset}" -C "target/${TARGET}/release" beez
           echo "asset=${asset}" >> "${GITHUB_OUTPUT}"
       - uses: actions/upload-artifact@v4
         with:
@@ -66,7 +66,7 @@ jobs:
           path: dist
           merge-multiple: true
       - working-directory: dist
-        run: shasum -a 256 loom-* > SHA256SUMS
+        run: shasum -a 256 beez-* > SHA256SUMS
       - run: python3 scripts/release-notes.py "${GITHUB_REF_NAME}" > release-notes.md
       - env:
           GH_REPO: ${{ github.repository }}
@@ -75,5 +75,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}"
           --title "${GITHUB_REF_NAME}"
           --notes-file release-notes.md
-          dist/loom-*
+          dist/beez-*
           dist/SHA256SUMS

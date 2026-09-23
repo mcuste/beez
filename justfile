@@ -27,7 +27,7 @@ test-integration:
 
 # Needs pi, omp, claude, and codex installed and signed in.
 test-contract:
-    cargo test --package loom-process --features harness-contract --test harness_contract -- --nocapture
+    cargo test --package beez-process --features harness-contract --test harness_contract -- --nocapture
 
 deny:
     cargo deny check
@@ -40,10 +40,10 @@ check: format-check clippy cargo-check build deny machete
 verify: check test
 
 install:
-    cargo install --path crates/loom-cli --locked
+    cargo install --path crates/beez-cli --locked
 
 run *args:
-    cargo run --package loom-cli -- "$@"
+    cargo run --package beez -- "$@"
 
 release version *args:
     python3 scripts/release.py "$@"

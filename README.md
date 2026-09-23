@@ -1,17 +1,17 @@
-# Loom
+# Beez
 
 [![CI](https://github.com/mcuste/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/mcuste/loom/actions/workflows/ci.yml)
 
-Loom runs coding agents and shell commands as tasks, inside a sandbox, on your
-own machine. You describe the tasks in one YAML file. Loom runs them in the
+Beez runs coding agents and shell commands as tasks, inside a sandbox, on your
+own machine. You describe the tasks in one YAML file. Beez runs them in the
 right order, shows their output, saves a log of every run, and can start the
 same file on a schedule.
 
 A coding agent is a program such as Claude Code or Codex. You give it a
 written instruction, called a prompt, and it reads and changes files and runs
-commands to carry it out. Loom calls these programs harnesses. A sandbox is a
+commands to carry it out. Beez calls these programs harnesses. A sandbox is a
 set of operating-system rules that limit what a program can read, write, run,
-and connect to. Loom puts every task in a sandbox by default, so an agent
+and connect to. Beez puts every task in a sandbox by default, so an agent
 cannot reach your secrets or send data to hosts you did not allow.
 
 ## Requirements
@@ -31,7 +31,7 @@ cargo install --git https://github.com/mcuste/loom --locked
 ```
 
 Or download a binary from the
-[releases page](https://github.com/mcuste/loom/releases) and put `loom` on
+[releases page](https://github.com/mcuste/loom/releases) and put `beez` on
 your `PATH`. Each release includes a `SHA256SUMS` file to check the download.
 A Homebrew tap will follow.
 
@@ -40,7 +40,7 @@ A Homebrew tap will follow.
 Run one prompt in a sandbox:
 
 ```sh
-loom run claude "inspect the repository and list the problems you find"
+beez run claude "inspect the repository and list the problems you find"
 ```
 
 Run a workflow. Save this as `review.yaml`:
@@ -63,13 +63,13 @@ tasks:
 ```
 
 ```sh
-loom run workflow review.yaml
+beez run workflow review.yaml
 ```
 
-Loom runs `changed` first, gives its output to the `review` prompt, and runs
+Beez runs `changed` first, gives its output to the `review` prompt, and runs
 `test` after the review. Tasks that do not depend on each other run at the
 same time. The output of each task is labeled with its ID, and the whole run
-is saved under `.loom/` next to your repository.
+is saved under `.beez/` next to your repository.
 
 Run the same file every night at 03:00 UTC by adding a schedule and starting
 the daemon:
@@ -80,14 +80,14 @@ schedule:
 ```
 
 ```sh
-loom schedule add review.yaml
-loom daemon start
+beez schedule add review.yaml
+beez daemon start
 ```
 
 ## Documentation
 
 - [Workflows](docs/workflows.md): the YAML file, harnesses, and task outputs
-- [Output and logs](docs/output.md): what Loom prints and what it saves
+- [Output and logs](docs/output.md): what Beez prints and what it saves
 - [Sandbox](docs/sandbox.md): what a task may do, and how to allow more
 - [Schedules](docs/schedules.md): running workflows on a timer with the daemon
 - [Development](docs/development.md): layout, commands, tests, and releases

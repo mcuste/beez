@@ -16,4 +16,4 @@
 
 ## Risk
 
-<!-- Call out sandbox policy changes, platform behavior, files under .loom or ~/.loom, and release changes. -->
+<!-- Call out sandbox policy changes, platform behavior, files under .beez or ~/.beez, and release changes. -->

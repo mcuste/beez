@@ -7,7 +7,7 @@ large behavior or interface change, so the design is settled before the
 implementation. Small fixes and documentation changes can go straight to a
 pull request.
 
-Do not commit build output, `.loom` directories, editor state, or planning
+Do not commit build output, `.beez` directories, editor state, or planning
 files.
 
 ## Development setup
@@ -115,7 +115,7 @@ chore: release <version>
 A pull request explains the observable result, the reason for the change, and
 the commands or manual scenario that verified it. Keep unrelated cleanup out
 of the diff. Call out sandbox policy changes, platform-specific behavior,
-changes to the files under `.loom` or `~/.loom`, and release changes.
+changes to the files under `.beez` or `~/.beez`, and release changes.
 
 A pull request is ready for review when CI passes, user-visible changes have
 changelog entries, and the commits follow the convention above.

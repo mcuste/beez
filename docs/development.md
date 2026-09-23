@@ -2,22 +2,22 @@
 
 ## Layout
 
-Loom is a Cargo workspace. One binary, `loom`, comes from `crates/loom-cli`.
+Beez is a Cargo workspace. One binary, `beez`, comes from `crates/beez-cli`.
 The other crates are libraries it uses. No crate is published to crates.io.
 
 | Path                          | Contents                                                          |
 | ----------------------------- | ----------------------------------------------------------------- |
-| `crates/loom-cli`             | The `loom` command: argument parsing, terminal output, reports    |
-| `crates/loom-core`            | Task and workflow types, dependency graph, output placeholders    |
-| `crates/loom-manifest`        | Reads and validates YAML and JSON manifests                       |
-| `crates/loom-policy`          | Sandbox policy: paths, hosts, programs, groups, harness defaults  |
-| `crates/loom-sandbox`         | Seatbelt on macOS, bubblewrap and Landlock on Linux, the proxies  |
-| `crates/loom-process`         | Starts harnesses and commands as processes                        |
-| `crates/loom-runner`          | Runs the tasks of a workflow in dependency order                  |
-| `crates/loom-record`          | Writes the files of a run under `.loom`                           |
-| `crates/loom-schedule`        | Cron expressions and one-time instants                            |
-| `crates/loom-daemon`          | The background process that fires scheduled jobs                  |
-| `crates/loom-test-support`    | Helpers shared by the integration tests                           |
+| `crates/beez-cli`             | The `beez` command: argument parsing, terminal output, reports    |
+| `crates/beez-core`            | Task and workflow types, dependency graph, output placeholders    |
+| `crates/beez-manifest`        | Reads and validates YAML and JSON manifests                       |
+| `crates/beez-policy`          | Sandbox policy: paths, hosts, programs, groups, harness defaults  |
+| `crates/beez-sandbox`         | Seatbelt on macOS, bubblewrap and Landlock on Linux, the proxies  |
+| `crates/beez-process`         | Starts harnesses and commands as processes                        |
+| `crates/beez-runner`          | Runs the tasks of a workflow in dependency order                  |
+| `crates/beez-record`          | Writes the files of a run under `.beez`                           |
+| `crates/beez-schedule`        | Cron expressions and one-time instants                            |
+| `crates/beez-daemon`          | The background process that fires scheduled jobs                  |
+| `crates/beez-test-support`    | Helpers shared by the integration tests                           |
 | `scripts/check-version.py`    | Checks the version, the changelog, and a release tag              |
 | `scripts/release.py`          | Prepares, verifies, commits, tags, and optionally pushes a release|
 | `scripts/release-notes.py`    | Extracts the changelog section for the GitHub release             |
@@ -53,8 +53,8 @@ On Linux, install `bwrap` (bubblewrap). The sandbox tests need it.
 | `just machete`          | Find unused dependencies                                           |
 | `just check`            | Run every static, build, and dependency check                      |
 | `just verify`           | Run `just check` and the full test suite                           |
-| `just install`          | Install `loom` from the working tree                               |
-| `just run <args>`       | Run `loom` from the working tree                                   |
+| `just install`          | Install `beez` from the working tree                               |
+| `just run <args>`       | Run `beez` from the working tree                                   |
 | `just release <version>`| Prepare a release                                                  |
 
 CI runs `just verify`. Run the same command locally before opening a pull
@@ -67,14 +67,14 @@ Unit tests live next to the code they test. Integration tests live in the
 
 | Test                                     | Covers                                                   |
 | ---------------------------------------- | -------------------------------------------------------- |
-| `loom-cli/tests`                         | The built binary: workflows, logs, sandbox, daemon, version |
-| `loom-runner/tests/runner.rs`            | Task order, failure handling, and output placeholders    |
-| `loom-process/tests/process_runner.rs`   | Process start, streams, and exit status                  |
-| `loom-process/tests/harness_contract.rs` | The flags each real harness accepts. Opt-in.             |
-| `loom-manifest/tests/load.rs`            | Manifest parsing and validation errors                   |
-| `loom-sandbox/tests/proxy.rs`            | The HTTP and SOCKS5 proxies                              |
+| `beez-cli/tests`                         | The built binary: workflows, logs, sandbox, daemon, version |
+| `beez-runner/tests/runner.rs`            | Task order, failure handling, and output placeholders    |
+| `beez-process/tests/process_runner.rs`   | Process start, streams, and exit status                  |
+| `beez-process/tests/harness_contract.rs` | The flags each real harness accepts. Opt-in.             |
+| `beez-manifest/tests/load.rs`            | Manifest parsing and validation errors                   |
+| `beez-sandbox/tests/proxy.rs`            | The HTTP and SOCKS5 proxies                              |
 
-Tests use a fake harness from `loom-test-support` instead of a real one, so
+Tests use a fake harness from `beez-test-support` instead of a real one, so
 they need no account and no network. Rules:
 
 - Do not depend on the developer's home directory, credentials, or installed
@@ -106,14 +106,14 @@ pass the same gate as source changes.
 
 A tag named `v<version>` starts `release.yml`. The workflow checks that the
 tag matches `Cargo.toml` and that `CHANGELOG.md` has a section for the
-version. It then builds `loom` for four targets on native runners:
+version. It then builds `beez` for four targets on native runners:
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 
-Each target becomes `loom-v<version>-<target>.tar.gz`. The publish job writes
+Each target becomes `beez-v<version>-<target>.tar.gz`. The publish job writes
 `SHA256SUMS`, attaches the archives, and uses the changelog section as the
 release body. Nothing goes to crates.io. Users install with
 `cargo install --git`, from the release archives, or later from a Homebrew tap

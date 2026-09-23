@@ -1,0 +1,20 @@
+[package]
+name = "beez-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+beez-policy = { path = "../beez-policy" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+
+[dev-dependencies]
+beez-test-support = { workspace = true }
+
+[lints]
+workspace = true

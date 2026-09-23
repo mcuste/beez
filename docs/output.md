@@ -1,11 +1,11 @@
 # Output and logs
 
-Loom prints task output to the terminal while a run happens, and saves the
+Beez prints task output to the terminal while a run happens, and saves the
 same output to disk so you can read it later.
 
 ## Terminal output
 
-Tasks in a workflow run at the same time, so Loom labels each line with the
+Tasks in a workflow run at the same time, so Beez labels each line with the
 task ID. `--output` picks the form.
 
 `stream` is the default. It prints every line as it arrives. A solid bar marks
@@ -40,21 +40,21 @@ Summary   3 passed in 10.3s
 In grouped mode a long task shows nothing until it ends, and a run that is
 killed loses what it had collected. Prefer `stream` in CI.
 
-A workflow with one task, `loom run command`, and the single-prompt harness
+A workflow with one task, `beez run command`, and the single-prompt harness
 commands pass the output through unchanged. Use one of those when a later step
 needs the exact bytes.
 
-Loom keeps its own lines apart from task output:
+Beez keeps its own lines apart from task output:
 
-- Task output goes to standard output. Every line Loom writes goes to standard
+- Task output goes to standard output. Every line Beez writes goes to standard
   error.
-- Loom's lines start with a status word in the first column. Task output is
+- Beez's lines start with a status word in the first column. Task output is
   indented or prefixed.
-- Loom does not change the bytes of a task, so the colours a task chose reach
+- Beez does not change the bytes of a task, so the colours a task chose reach
   the terminal as written.
 
 ```sh
-loom run workflow build.yaml > tasks.log 2> loom.log
+beez run workflow build.yaml > tasks.log 2> beez.log
 ```
 
 Sandbox notes use the status word form, so a denied connection never looks
@@ -71,7 +71,7 @@ terminal.
 
 ## Timestamps and colour
 
-`--timestamps` adds a UTC date and time to every line Loom writes. Loom does
+`--timestamps` adds a UTC date and time to every line Beez writes. Beez does
 not read the time zone database, so it reports UTC and marks it with `Z`.
 
 ```
@@ -90,20 +90,20 @@ Write the value with an equals sign. Without it, the flag would take the
 manifest path as its value. In grouped mode a line keeps the time it arrived,
 not the time its block was printed.
 
-`--color auto|always|never` controls Loom's own colours. Loom also follows
+`--color auto|always|never` controls Beez's own colours. Beez also follows
 `NO_COLOR`, `CLICOLOR_FORCE`, and `TERM=dumb`.
 
 ## Saved runs
 
-Every run writes its output to disk. Loom uses `.loom/` in the repository
-root, or in the working directory outside a repository. An existing `.loom/`
+Every run writes its output to disk. Beez uses `.beez/` in the repository
+root, or in the working directory outside a repository. An existing `.beez/`
 in a parent directory wins over both. The directory ignores itself in Git.
 
 Each run gets a directory named after its start time and process ID. The
 names sort by time, and `latest` points at the newest run.
 
 ```
-.loom/
+.beez/
   latest -> runs/20260909T164512815Z-70632
   runs/
     20260909T164512815Z-70632/
@@ -118,24 +118,24 @@ names sort by time, and `latest` points at the newest run.
 
 | File                 | Contents                                                                                            |
 | -------------------- | --------------------------------------------------------------------------------------------------- |
-| `run.log`            | The whole run in one file: every task line with its ID and stream mark, every Loom line, UTC times. Colours removed. |
+| `run.log`            | The whole run in one file: every task line with its ID and stream mark, every Beez line, UTC times. Colours removed. |
 | `tasks/<id>.stdout`  | The exact bytes one task wrote to standard output.                                                  |
 | `tasks/<id>.stderr`  | The exact bytes one task wrote to standard error.                                                   |
 | `run.json`           | The arguments, working directory, manifest, start and end times, exit status, and one entry per task with its dependencies, request, state, exit status, and duration. |
 
-Loom names the run directory before the tasks start:
+Beez names the run directory before the tasks start:
 
 ```
-Logging   .loom/runs/20260909T164512815Z-70632
+Logging   .beez/runs/20260909T164512815Z-70632
 Running   api
 ```
 
 Options:
 
-- `--log-dir <PATH>` or `LOOM_LOG_DIR` writes the run somewhere else.
+- `--log-dir <PATH>` or `BEEZ_LOG_DIR` writes the run somewhere else.
 - `--no-log` writes nothing.
 
-A problem with the saved files never stops a run. Loom reports it once as a
-warning and continues. Loom keeps every run. Remove old runs yourself when the
+A problem with the saved files never stops a run. Beez reports it once as a
+warning and continues. Beez keeps every run. Remove old runs yourself when the
 directory grows too large. The daemon prunes its own runs, see
 [Schedules](schedules.md).
