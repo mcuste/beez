@@ -53,15 +53,13 @@ def main() -> None:
         fail("usage: homebrew-formula.py v<version> <SHA256SUMS>")
 
     tag = sys.argv[1]
-    match = TAG_PATTERN.fullmatch(tag)
-    if match is None:
+    if TAG_PATTERN.fullmatch(tag) is None:
         fail(f"invalid release tag {tag!r}")
 
     checksums = read_checksums(Path(sys.argv[2]))
     print(f'''class Beez < Formula
   desc "{DESCRIPTION}"
   homepage "{REPOSITORY}"
-  version "{match.group(1)}"
   license "MIT"
 
 {platform_block("macos", tag, checksums)}
