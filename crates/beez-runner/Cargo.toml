@@ -5,15 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+description = "Runs the tasks of a beez workflow in dependency order"
 
 [dependencies]
-beez-core = { path = "../beez-core" }
-beez-policy = { path = "../beez-policy" }
-beez-process = { path = "../beez-process" }
+beez-core.workspace = true
+beez-policy.workspace = true
+beez-process.workspace = true
 
 [dev-dependencies]
-beez-test-support = { workspace = true }
+beez-test-support.workspace = true
 
 [lints]
 workspace = true

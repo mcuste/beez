@@ -19,18 +19,23 @@ def fail(message: str) -> None:
     raise SystemExit(f"check-version: {message}")
 
 
-def workspace_version() -> str:
+def load_workspace() -> dict:
     with CARGO_MANIFEST.open("rb") as source:
-        return tomllib.load(source)["workspace"]["package"]["version"]
+        return tomllib.load(source)["workspace"]
 
 
 def main() -> None:
     if len(sys.argv) > 2:
         fail("usage: check-version.py [v<version>]")
 
-    version = workspace_version()
+    workspace = load_workspace()
+    version = workspace["package"]["version"]
     if VERSION_PATTERN.fullmatch(version) is None:
         fail(f"Cargo.toml version {version!r} is not a three-part version")
+
+    for name, dependency in workspace["dependencies"].items():
+        if name.startswith("beez-") and "version" in dependency and dependency["version"] != f"={version}":
+            fail(f"{name} must be pinned to ={version}, got {dependency['version']!r}")
 
     changelog = CHANGELOG.read_text()
     if "## [Unreleased]" not in changelog:

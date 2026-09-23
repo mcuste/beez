@@ -5,18 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+description = "Reads and validates beez YAML and JSON manifests"
 
 [dependencies]
-beez-core = { path = "../beez-core" }
-beez-policy = { path = "../beez-policy" }
-beez-schedule = { path = "../beez-schedule" }
+beez-core.workspace = true
+beez-policy.workspace = true
+beez-schedule.workspace = true
 noyalib = "0.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 
 [dev-dependencies]
-beez-test-support = { workspace = true }
+beez-test-support.workspace = true
 
 [lints]
 workspace = true

@@ -21,7 +21,6 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/mcuste/beez"
-publish = false
 
 [workspace.dependencies]
 anstream = "1.0.0"
@@ -29,7 +28,15 @@ anstyle = "1.0.14"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 indicatif = { version = "0.18.6", default-features = false, features = ["unicode-width"] }
-beez-process = { path = "crates/beez-process" }
+beez-core = { path = "crates/beez-core", version = "=0.1.0" }
+beez-daemon = { path = "crates/beez-daemon", version = "=0.1.0" }
+beez-manifest = { path = "crates/beez-manifest", version = "=0.1.0" }
+beez-policy = { path = "crates/beez-policy", version = "=0.1.0" }
+beez-process = { path = "crates/beez-process", version = "=0.1.0" }
+beez-record = { path = "crates/beez-record", version = "=0.1.0" }
+beez-runner = { path = "crates/beez-runner", version = "=0.1.0" }
+beez-sandbox = { path = "crates/beez-sandbox", version = "=0.1.0" }
+beez-schedule = { path = "crates/beez-schedule", version = "=0.1.0" }
 beez-test-support = { path = "crates/beez-test-support" }
 
 [workspace.lints.rust]

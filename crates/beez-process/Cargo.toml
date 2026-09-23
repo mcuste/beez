@@ -5,17 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+description = "Starts beez harnesses and commands as processes"
 
 [features]
 harness-contract = []
 
 [dependencies]
-beez-policy = { path = "../beez-policy" }
-beez-sandbox = { path = "../beez-sandbox" }
+beez-policy.workspace = true
+beez-sandbox.workspace = true
 
 [dev-dependencies]
-beez-test-support = { workspace = true }
+beez-test-support.workspace = true
 
 [[test]]
 name = "harness_contract"

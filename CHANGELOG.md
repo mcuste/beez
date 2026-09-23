@@ -8,6 +8,9 @@ project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Releases publish `beez` to crates.io and to the `mcuste/tap` Homebrew tap,
+  so `cargo install beez --locked` and `brew install mcuste/tap/beez` install
+  it on Linux and macOS.
 - `beez run workflow` runs the tasks of a YAML or JSON manifest in dependency
   order, with independent tasks in parallel.
 - `beez run claude`, `codex`, `pi`, and `omp` run one prompt. `model` and

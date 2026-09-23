@@ -49,3 +49,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: python3 scripts/check-version.py
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --workspace --dry-run --locked

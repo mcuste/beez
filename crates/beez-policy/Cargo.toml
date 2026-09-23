@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+description = "Sandbox policy for beez: paths, hosts, programs, groups, and harness defaults"
 
 [lints]
 workspace = true

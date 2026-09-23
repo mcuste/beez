@@ -24,16 +24,21 @@ cannot reach your secrets or send data to hosts you did not allow.
 
 ## Install
 
+With Homebrew on macOS or Linux:
+
+```sh
+brew install mcuste/tap/beez
+```
+
 With Rust installed:
 
 ```sh
-cargo install --git https://github.com/mcuste/beez --locked
+cargo install beez --locked
 ```
 
 Or download a binary from the
 [releases page](https://github.com/mcuste/beez/releases) and put `beez` on
 your `PATH`. Each release includes a `SHA256SUMS` file to check the download.
-A Homebrew tap will follow.
 
 ## Quick start
 

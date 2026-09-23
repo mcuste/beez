@@ -49,27 +49,36 @@ def read_version() -> str:
 
 
 def replace_version(old: str, new: str) -> None:
-    """Change the version line under [workspace.package] and nothing else."""
+    """Change the workspace version and the pinned versions of the internal crates."""
     lines = CARGO_MANIFEST.read_text().splitlines(keepends=True)
     current_section: str | None = None
-    replacements = 0
+    package_replacements = 0
+    pin_replacements = 0
 
     for index, line in enumerate(lines):
         heading = re.fullmatch(r"\s*\[([^]]+)]\s*\n?", line)
         if heading is not None:
             current_section = heading.group(1)
             continue
-        if current_section != "workspace.package":
-            continue
-        match = re.fullmatch(r'(\s*version\s*=\s*")([^"]+)("\s*\n?)', line)
-        if match is not None:
-            if match.group(2) != old:
-                fail("Cargo.toml changed while preparing the release.")
-            lines[index] = f"{match.group(1)}{new}{match.group(3)}"
-            replacements += 1
+        if current_section == "workspace.package":
+            match = re.fullmatch(r'(\s*version\s*=\s*")([^"]+)("\s*\n?)', line)
+            if match is not None:
+                if match.group(2) != old:
+                    fail("Cargo.toml changed while preparing the release.")
+                lines[index] = f"{match.group(1)}{new}{match.group(3)}"
+                package_replacements += 1
+        elif current_section == "workspace.dependencies" and line.startswith("beez-"):
+            pin = f'version = "={old}"'
+            if pin in line:
+                lines[index] = line.replace(pin, f'version = "={new}"')
+                pin_replacements += 1
+            elif "version" in line:
+                fail(f"internal crate is not pinned to ={old}: {line.strip()}")
 
-    if replacements != 1:
-        fail(f"expected one version field under [workspace.package], found {replacements}.")
+    if package_replacements != 1:
+        fail(f"expected one version field under [workspace.package], found {package_replacements}.")
+    if pin_replacements == 0:
+        fail("found no pinned internal crates under [workspace.dependencies].")
     CARGO_MANIFEST.write_text("".join(lines))
 
 

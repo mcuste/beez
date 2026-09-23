@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+description = "Cron expressions and one-time instants for beez"
 
 [dependencies]
 chrono.workspace = true

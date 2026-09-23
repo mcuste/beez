@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+description = "Task and workflow types, dependency graph, and output placeholders for beez"
 
 [dependencies]
-beez-policy = { path = "../beez-policy" }
+beez-policy.workspace = true
 
 [lints]
 workspace = true

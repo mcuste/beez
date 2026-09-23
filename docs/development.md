@@ -3,7 +3,8 @@
 ## Layout
 
 Beez is a Cargo workspace. One binary, `beez`, comes from `crates/beez-cli`.
-The other crates are libraries it uses. No crate is published to crates.io.
+The other crates are libraries it uses. All crates except `beez-test-support`
+are published to crates.io, so `cargo install beez` works.
 
 | Path                          | Contents                                                          |
 | ----------------------------- | ----------------------------------------------------------------- |
@@ -21,6 +22,7 @@ The other crates are libraries it uses. No crate is published to crates.io.
 | `scripts/check-version.py`    | Checks the version, the changelog, and a release tag              |
 | `scripts/release.py`          | Prepares, verifies, commits, tags, and optionally pushes a release|
 | `scripts/release-notes.py`    | Extracts the changelog section for the GitHub release             |
+| `scripts/homebrew-formula.py` | Writes the Homebrew formula from the release checksums            |
 | `.github/workflows/ci.yml`    | Verification gate for pull requests and `main`                    |
 | `.github/workflows/release.yml` | Builds and publishes release binaries for a `v*` tag            |
 
@@ -97,7 +99,8 @@ For a behavior change:
 permissions. The quality job runs `just verify` on Ubuntu and macOS, because
 the sandbox differs per platform. On Ubuntu it installs bubblewrap and turns
 off the AppArmor rule that stops bubblewrap from bringing up loopback in a
-user namespace. A second job runs `scripts/check-version.py`.
+user namespace. A second job runs `scripts/check-version.py` and
+`cargo publish --workspace --dry-run`.
 
 Dependabot proposes monthly updates for Cargo and GitHub Actions. Updates must
 pass the same gate as source changes.
@@ -115,9 +118,19 @@ version. It then builds `beez` for four targets on native runners:
 
 Each target becomes `beez-v<version>-<target>.tar.gz`. The publish job writes
 `SHA256SUMS`, attaches the archives, and uses the changelog section as the
-release body. Nothing goes to crates.io. Users install with
-`cargo install --git`, from the release archives, or later from a Homebrew tap
-that points at these archives and checksums.
+release body. The crates job runs `cargo publish --workspace` after all
+builds pass. It publishes the library crates first and `beez` last, with the
+`CARGO_REGISTRY_TOKEN` repository secret. After the GitHub release exists, the Homebrew job runs
+`scripts/homebrew-formula.py` to write `Formula/beez.rb` from `SHA256SUMS`.
+It pushes the formula to the `mcuste/homebrew-tap` repository with the
+`HOMEBREW_TAP_TOKEN` repository secret. Users install with
+`brew install mcuste/tap/beez`, `cargo install beez`, or from the release
+archives.
+
+The internal crates pin each other to the exact workspace version under
+`[workspace.dependencies]`. `scripts/check-version.py` fails when a pin does
+not match, and CI runs `cargo publish --workspace --dry-run` to check that
+every crate packages and builds.
 
 Prepare a release from a clean `main`:
 
@@ -129,7 +142,8 @@ The command needs a three-part version. It refuses a dirty tree, another
 branch, an existing tag, a lower version, and an empty `Unreleased` section.
 It then:
 
-1. Sets the version under `[workspace.package]` in `Cargo.toml`.
+1. Sets the version under `[workspace.package]` in `Cargo.toml` and the
+   internal crate pins under `[workspace.dependencies]`.
 2. Turns `Unreleased` into a dated section and adds a new empty `Unreleased`.
 3. Updates `Cargo.lock` and runs `just verify`. It restores the files if that
    fails.
@@ -143,4 +157,5 @@ git push origin v<version>
 ```
 
 `just release <version> --push` does both pushes after the tag. Check the
-GitHub release assets and `SHA256SUMS` after the workflow completes.
+GitHub release assets, `SHA256SUMS`, the crates.io page, and the formula in
+`mcuste/homebrew-tap` after the workflow completes.
