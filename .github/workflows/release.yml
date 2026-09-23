@@ -47,7 +47,7 @@ jobs:
           asset="beez-${GITHUB_REF_NAME}-${TARGET}.tar.gz"
           tar -czf "${asset}" -C "target/${TARGET}/release" beez
           echo "asset=${asset}" >> "${GITHUB_OUTPUT}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.archive.outputs.asset }}
           path: ${{ steps.archive.outputs.asset }}
