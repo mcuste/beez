@@ -1,6 +1,10 @@
 # Beez
 
 [![CI](https://github.com/mcuste/beez/actions/workflows/ci.yml/badge.svg)](https://github.com/mcuste/beez/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/beez.svg)](https://crates.io/crates/beez)
+[![GitHub release](https://img.shields.io/github/v/release/mcuste/beez)](https://github.com/mcuste/beez/releases/latest)
+[![Homebrew](https://img.shields.io/badge/homebrew-mcuste%2Ftap%2Fbeez-orange)](https://github.com/mcuste/homebrew-tap)
+[![License: MIT](https://img.shields.io/github/license/mcuste/beez)](LICENSE)
 
 Beez runs coding agents and shell commands as tasks, inside a sandbox, on your
 own machine. You describe the tasks in one YAML file. Beez runs them in the
