@@ -17,7 +17,7 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -47,7 +47,7 @@ jobs:
     name: Validate release metadata
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: python3 scripts/check-version.py
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish --workspace --dry-run --locked
