@@ -742,16 +742,20 @@ fn stamps_a_grouped_line_when_it_arrives() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let seconds = |line: &str| -> f64 {
+        line.split_whitespace()
+            .next()
+            .and_then(|stamp| stamp.strip_suffix('s'))
+            .and_then(|stamp| stamp.parse().ok())
+            .unwrap_or_else(|| panic!("stdout: {stdout}"))
+    };
     let mut lines = stdout.lines();
-    assert_eq!(lines.next(), Some("    0.0s     early"));
+    let early = lines.next().unwrap_or_default();
     let late = lines.next().unwrap_or_default();
-    let seconds: f64 = late
-        .split_whitespace()
-        .next()
-        .and_then(|stamp| stamp.strip_suffix('s'))
-        .and_then(|stamp| stamp.parse().ok())
-        .unwrap_or_else(|| panic!("stdout: {stdout}"));
-    assert!(seconds >= 1.0, "stdout: {stdout}");
+    // Compare against the one-second sleep, since slow runners can delay the first line.
+    assert!(seconds(early) < 1.0, "stdout: {stdout}");
+    assert!(early.ends_with("     early"), "stdout: {stdout}");
+    assert!(seconds(late) >= 1.0, "stdout: {stdout}");
     assert!(late.ends_with("     late"), "stdout: {stdout}");
     assert_eq!(lines.next(), None);
 }
