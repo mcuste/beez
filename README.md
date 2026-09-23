@@ -1,6 +1,6 @@
 # Beez
 
-[![CI](https://github.com/mcuste/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/mcuste/loom/actions/workflows/ci.yml)
+[![CI](https://github.com/mcuste/beez/actions/workflows/ci.yml/badge.svg)](https://github.com/mcuste/beez/actions/workflows/ci.yml)
 
 Beez runs coding agents and shell commands as tasks, inside a sandbox, on your
 own machine. You describe the tasks in one YAML file. Beez runs them in the
@@ -27,11 +27,11 @@ cannot reach your secrets or send data to hosts you did not allow.
 With Rust installed:
 
 ```sh
-cargo install --git https://github.com/mcuste/loom --locked
+cargo install --git https://github.com/mcuste/beez --locked
 ```
 
 Or download a binary from the
-[releases page](https://github.com/mcuste/loom/releases) and put `beez` on
+[releases page](https://github.com/mcuste/beez/releases) and put `beez` on
 your `PATH`. Each release includes a `SHA256SUMS` file to check the download.
 A Homebrew tap will follow.
 

@@ -150,6 +150,6 @@ Program groups:
 ## Reporting a vulnerability
 
 Report a vulnerability through the repository's
-[private security advisory form](https://github.com/mcuste/loom/security/advisories/new).
+[private security advisory form](https://github.com/mcuste/beez/security/advisories/new).
 Include the affected version, the platform, the steps to reproduce, and the
 rule that was crossed. Do not open a public issue until a fix is available.
