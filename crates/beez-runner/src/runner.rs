@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use beez_core::{TaskIndex, TaskOutput, TaskRequest, Template, Workflow, WorkflowExecution};
+use beez_core::{
+    Completion, Task, TaskIndex, TaskOutput, TaskRequest, Workflow, WorkflowExecution,
+};
 use beez_policy::SandboxPolicy;
 use beez_process::{
     ExecutionRequest, HarnessCall, OutputStream, ProcessCall, ProcessOutput, ProcessRunner,
@@ -127,11 +129,6 @@ impl Runner {
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
         let mut execution = workflow.execution();
-        let read_tasks = workflow
-            .tasks()
-            .iter()
-            .flat_map(|task| task.reads().iter().copied())
-            .collect::<HashSet<_>>();
         let mut outputs = HashMap::new();
         let mut exit_status = 0;
         while execution.has_pending() {
@@ -148,8 +145,12 @@ impl Runner {
             let jobs = tasks
                 .into_iter()
                 .map(|task| {
-                    let request = render_request(workflow, task.request, &outputs)?;
-                    Ok((Some(task.index), execution_request(request), task.sandbox))
+                    let request = render_request(task.task, &outputs)?;
+                    Ok((
+                        Some(task.index),
+                        execution_request(request),
+                        task.task.sandbox().cloned(),
+                    ))
                 })
                 .collect::<io::Result<Vec<_>>>()?;
             let outcomes = run_requests_concurrently(&self.processes, jobs, on_event)?;
@@ -157,7 +158,7 @@ impl Runner {
             record_outcomes(
                 &mut execution,
                 outcomes,
-                &read_tasks,
+                workflow,
                 &mut outputs,
                 &mut exit_status,
             )?;
@@ -166,21 +167,17 @@ impl Runner {
     }
 }
 
-/// Fills the output placeholders of a request from the finished tasks.
+/// Fills the output placeholders of a task's request from the finished tasks.
 fn render_request(
-    workflow: &Workflow,
-    request: TaskRequest,
+    task: &Task,
     outputs: &HashMap<TaskIndex, ProcessOutput>,
 ) -> io::Result<TaskRequest> {
-    request.try_map_texts(|text| {
-        let template = Template::parse(text).map_err(io::Error::other)?;
-        template
-            .render(|reference| {
-                let output = outputs.get(&workflow.index_of(reference.task())?)?;
-                Some(output_text(output, reference.output()))
-            })
-            .map_err(|reference| io::Error::other(format!("{reference} has no output yet")))
+    task.render_request(|source, stream| {
+        outputs
+            .get(&source)
+            .map(|output| output_text(output, stream))
     })
+    .map_err(|reference| io::Error::other(format!("{reference} has no output yet")))
 }
 
 /// One captured stream as text, without the newlines that end it.
@@ -194,31 +191,24 @@ fn output_text(output: &ProcessOutput, stream: TaskOutput) -> String {
         .to_owned()
 }
 
-/// A started task's request and sandbox.
-struct StartedTask {
+/// A started task and its position.
+struct StartedTask<'workflow> {
     index: TaskIndex,
-    request: TaskRequest,
-    sandbox: Option<SandboxPolicy>,
+    task: &'workflow Task,
 }
 
-/// Marks ready tasks as running and returns their requests.
-fn start_ready_tasks(
-    execution: &mut WorkflowExecution<'_>,
+/// Marks ready tasks as running and returns them.
+fn start_ready_tasks<'workflow>(
+    execution: &mut WorkflowExecution<'workflow>,
     on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
-) -> io::Result<Vec<StartedTask>> {
+) -> io::Result<Vec<StartedTask<'workflow>>> {
     execution
         .ready()
         .into_iter()
         .map(|index| {
-            let task = execution
-                .start(index)
-                .ok_or_else(|| io::Error::other("workflow task is not ready"))?;
+            let task = execution.start(index).map_err(io::Error::other)?;
             on_event(&RunEvent::Started { task: Some(index) })?;
-            Ok(StartedTask {
-                index,
-                request: task.request().clone(),
-                sandbox: task.sandbox().cloned(),
-            })
+            Ok(StartedTask { index, task })
         })
         .collect()
 }
@@ -319,7 +309,7 @@ fn run_requests_concurrently(
 fn record_outcomes(
     execution: &mut WorkflowExecution<'_>,
     mut outcomes: Vec<(Option<TaskIndex>, Outcome)>,
-    read_tasks: &HashSet<TaskIndex>,
+    workflow: &Workflow,
     outputs: &mut HashMap<TaskIndex, ProcessOutput>,
     exit_status: &mut i32,
 ) -> io::Result<()> {
@@ -331,12 +321,17 @@ fn record_outcomes(
             continue;
         };
         let status = task_status(&outcome);
-        if !execution.complete(index, status == 0) {
-            return Err(io::Error::other("workflow task is not running"));
-        }
+        let completion = if status == 0 {
+            Completion::Succeeded
+        } else {
+            Completion::Failed
+        };
+        execution
+            .complete(index, completion)
+            .map_err(io::Error::other)?;
         match outcome {
             Ok(output) => {
-                if read_tasks.contains(&index) {
+                if workflow.is_read(index) {
                     outputs.insert(index, output);
                 }
                 if status != 0 && *exit_status == 0 {

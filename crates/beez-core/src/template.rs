@@ -12,9 +12,6 @@ pub enum TaskOutput {
 }
 
 impl TaskOutput {
-    /// Every stream a placeholder can read.
-    pub const ALL: [Self; 2] = [Self::Stdout, Self::Stderr];
-
     /// The name the placeholder uses for this stream.
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -22,6 +19,21 @@ impl TaskOutput {
             Self::Stdout => "stdout",
             Self::Stderr => "stderr",
         }
+    }
+
+    /// The stream a placeholder names, if any.
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "stdout" => Some(Self::Stdout),
+            "stderr" => Some(Self::Stderr),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TaskOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
     }
 }
 
@@ -46,16 +58,20 @@ impl OutputReference {
     pub fn output(&self) -> TaskOutput {
         self.output
     }
+
+    /// Reads `<id>.<stream>`, the part of a placeholder after `tasks.`.
+    fn parse_path(path: &str) -> Option<Self> {
+        let (task, output) = path.rsplit_once('.')?;
+        Some(Self {
+            task: task.parse().ok()?,
+            output: TaskOutput::from_name(output)?,
+        })
+    }
 }
 
 impl fmt::Display for OutputReference {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{{{{ tasks.{}.{} }}}}",
-            self.task,
-            self.output.name()
-        )
+        write!(formatter, "{{{{ tasks.{}.{} }}}}", self.task, self.output)
     }
 }
 
@@ -89,15 +105,18 @@ impl std::error::Error for TemplateError {}
 ///
 /// Only a placeholder that starts with `tasks.` is a reference. Every other
 /// pair of braces stays literal text, so a prompt can talk about templates.
+///
+/// `R` is how a reference names its task: by ID as parsed, or by position
+/// once a workflow has resolved it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Template {
-    segments: Vec<Segment>,
+pub struct Template<R = OutputReference> {
+    segments: Vec<Segment<R>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Segment {
+enum Segment<R> {
     Text(String),
-    Output(OutputReference),
+    Output(R),
 }
 
 const OPEN: &str = "{{";
@@ -113,8 +132,7 @@ impl Template {
         while let Some((literal, placeholder, after)) = next_placeholder(rest) {
             push_text(&mut segments, literal);
             match parse_reference(placeholder) {
-                Some(Ok(reference)) => segments.push(Segment::Output(reference)),
-                Some(Err(error)) => return Err(error),
+                Some(reference) => segments.push(Segment::Output(reference?)),
                 None => push_text(&mut segments, placeholder),
             }
             rest = after;
@@ -123,9 +141,11 @@ impl Template {
 
         Ok(Self { segments })
     }
+}
 
+impl<R> Template<R> {
     /// Every output the text reads, in the order it reads them.
-    pub fn references(&self) -> impl Iterator<Item = &OutputReference> {
+    pub fn references(&self) -> impl Iterator<Item = &R> {
         self.segments.iter().filter_map(|segment| match segment {
             Segment::Output(reference) => Some(reference),
             Segment::Text(_) => None,
@@ -135,25 +155,39 @@ impl Template {
     /// Replaces every reference with the output `lookup` returns for it.
     ///
     /// Fails with the first reference `lookup` has no output for.
-    pub fn render(
-        &self,
-        mut lookup: impl FnMut(&OutputReference) -> Option<String>,
-    ) -> Result<String, OutputReference> {
+    pub fn render(&self, mut lookup: impl FnMut(&R) -> Option<String>) -> Result<String, &R> {
         let mut rendered = String::new();
         for segment in &self.segments {
             match segment {
                 Segment::Text(text) => rendered.push_str(text),
-                Segment::Output(reference) => match lookup(reference) {
-                    Some(output) => rendered.push_str(&output),
-                    None => return Err(reference.clone()),
-                },
+                Segment::Output(reference) => {
+                    rendered.push_str(&lookup(reference).ok_or(reference)?);
+                }
             }
         }
         Ok(rendered)
     }
+
+    /// Converts every reference with `map`, keeping the text around it.
+    pub(crate) fn try_map_references<S, E>(
+        self,
+        mut map: impl FnMut(R) -> Result<S, E>,
+    ) -> Result<Template<S>, E> {
+        let segments = self
+            .segments
+            .into_iter()
+            .map(|segment| {
+                Ok(match segment {
+                    Segment::Text(text) => Segment::Text(text),
+                    Segment::Output(reference) => Segment::Output(map(reference)?),
+                })
+            })
+            .collect::<Result<_, E>>()?;
+        Ok(Template { segments })
+    }
 }
 
-fn push_text(segments: &mut Vec<Segment>, text: &str) {
+fn push_text<R>(segments: &mut Vec<Segment<R>>, text: &str) {
     if text.is_empty() {
         return;
     }
@@ -178,24 +212,11 @@ fn next_placeholder(text: &str) -> Option<(&str, &str, &str)> {
 fn parse_reference(placeholder: &str) -> Option<Result<OutputReference, TemplateError>> {
     let inner = placeholder.strip_prefix(OPEN)?.strip_suffix(CLOSE)?.trim();
     let path = inner.strip_prefix(PREFIX)?;
-    let error = || TemplateError {
-        placeholder: placeholder.to_owned(),
-    };
-
-    let Some((task, output)) = path.rsplit_once('.') else {
-        return Some(Err(error()));
-    };
-    let Some(output) = TaskOutput::ALL
-        .into_iter()
-        .find(|stream| stream.name() == output)
-    else {
-        return Some(Err(error()));
-    };
-    let Ok(task) = task.parse::<TaskId>() else {
-        return Some(Err(error()));
-    };
-
-    Some(Ok(OutputReference { task, output }))
+    Some(
+        OutputReference::parse_path(path).ok_or_else(|| TemplateError {
+            placeholder: placeholder.to_owned(),
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -278,7 +299,7 @@ mod tests {
         let missing =
             sut.render(|reference| (reference.task().as_str() == "a").then(|| "A".to_owned()));
 
-        assert_eq!(missing, Err(reference("b", TaskOutput::Stdout)));
+        assert_eq!(missing, Err(&reference("b", TaskOutput::Stdout)));
     }
 
     #[test]

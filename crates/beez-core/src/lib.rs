@@ -6,4 +6,4 @@ mod workflow;
 
 pub use task::{Task, TaskDefinition, TaskId, TaskIdError, TaskIndex, TaskRequest};
 pub use template::{OutputReference, TaskOutput, Template, TemplateError};
-pub use workflow::{Workflow, WorkflowError, WorkflowExecution};
+pub use workflow::{Completion, ExecutionError, Workflow, WorkflowError, WorkflowExecution};

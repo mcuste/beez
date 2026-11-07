@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use beez_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
 
+use crate::template::{OutputReference, TaskOutput, Template};
+
 /// Reports an invalid task ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskIdError {
@@ -103,7 +105,7 @@ impl TaskRequest {
 
     /// The texts that may read the output of other tasks: the prompt of a
     /// harness task, or the arguments of a command task.
-    pub fn texts(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn texts(&self) -> impl Iterator<Item = &str> {
         match self {
             Self::Harness { prompt, .. } => std::slice::from_ref(prompt).iter(),
             Self::Command { arguments, .. } => arguments.iter(),
@@ -112,10 +114,7 @@ impl TaskRequest {
     }
 
     /// Replaces each text from [`Self::texts`] with what `map` returns for it.
-    pub fn try_map_texts<E>(
-        self,
-        mut map: impl FnMut(&str) -> Result<String, E>,
-    ) -> Result<Self, E> {
+    fn try_map_texts<E>(self, mut map: impl FnMut(&str) -> Result<String, E>) -> Result<Self, E> {
         Ok(match self {
             Self::Harness {
                 harness,
@@ -178,6 +177,13 @@ impl TaskIndex {
     }
 }
 
+/// An output placeholder whose task a workflow has found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedReference {
+    pub(crate) source: TaskIndex,
+    pub(crate) reference: OutputReference,
+}
+
 /// A task with resolved predecessor references.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Task {
@@ -185,6 +191,8 @@ pub struct Task {
     pub(crate) dependencies: Vec<TaskIndex>,
     pub(crate) reads: Vec<TaskIndex>,
     pub(crate) request: TaskRequest,
+    /// One template per text of `request`, in [`TaskRequest::texts`] order.
+    pub(crate) templates: Vec<Template<ResolvedReference>>,
     pub(crate) sandbox: Option<SandboxPolicy>,
 }
 
@@ -217,6 +225,25 @@ impl Task {
     #[must_use]
     pub fn sandbox(&self) -> Option<&SandboxPolicy> {
         self.sandbox.as_ref()
+    }
+
+    /// The request with every output placeholder replaced by what `lookup`
+    /// returns for the task and stream it names.
+    ///
+    /// Fails with the first placeholder `lookup` has no output for.
+    pub fn render_request(
+        &self,
+        mut lookup: impl FnMut(TaskIndex, TaskOutput) -> Option<String>,
+    ) -> Result<TaskRequest, OutputReference> {
+        let mut templates = self.templates.iter();
+        self.request
+            .clone()
+            .try_map_texts(|text| match templates.next() {
+                Some(template) => template
+                    .render(|resolved| lookup(resolved.source, resolved.reference.output()))
+                    .map_err(|resolved| resolved.reference.clone()),
+                None => Ok(text.to_owned()),
+            })
     }
 }
 
