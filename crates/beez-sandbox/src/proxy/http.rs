@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
-use super::{HANDSHAKE_TIMEOUT, Rules, connect};
+use super::{HANDSHAKE_TIMEOUT, PLAIN_HTTP_PORT, Rules, TLS_PORT, connect, open_tunnel};
 use crate::stream::pipe;
 
 /// Bounds the buffer when a client never ends its request head.
@@ -72,34 +72,65 @@ struct Request {
 /// Reads the target out of a request head, or `None` when the head is malformed.
 fn parse_request(head: &[u8]) -> Option<Request> {
     let head = std::str::from_utf8(head).ok()?;
-    let mut lines = head.split("\r\n");
-    let mut request_line = lines.next().unwrap_or_default().split(' ');
-    let method = request_line.next()?;
-    let target = request_line.next()?;
+    let request_line = head.split("\r\n").next().unwrap_or_default();
+    let mut parts = request_line.split(' ');
+    let method = parts.next()?;
+    let target = parts.next()?;
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        let (host, port) = split_authority(target, 443)?;
+        let (host, port) = split_authority(target, TLS_PORT)?;
         return Some(Request {
             host,
             port,
             forward: None,
         });
     }
+    let version = parts.next()?;
     let rest = target
         .strip_prefix("http://")
         .or_else(|| target.strip_prefix("HTTP://"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let (host, port) = split_authority(authority, 80)?;
+    let (host, port) = split_authority(authority, PLAIN_HTTP_PORT)?;
+    let path = rest
+        .strip_prefix(authority)
+        .unwrap_or_default()
+        .split('#')
+        .next()
+        .unwrap_or_default();
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    let forward = rewrite_head(
+        head,
+        &format!("{method} {path} {version}"),
+        &host_header(&host, port),
+    );
     Some(Request {
         host,
         port,
-        forward: Some(rewrite_head(head)),
+        forward: Some(forward),
     })
+}
+
+/// The `Host` header for a checked target, with the port when it is not 80.
+fn host_header(host: &str, port: u16) -> String {
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    if port == PLAIN_HTTP_PORT {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 pub(super) fn serve_http(mut client: TcpStream, rules: &Rules) -> io::Result<()> {
     client.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let (head, early_body) = match read_head(&mut client) {
+    let (head, mut early_body) = match read_head(&mut client) {
         Ok(parts) => parts,
         Err(error) => {
             let _ = respond(&mut client, "400 Bad Request");
@@ -110,7 +141,12 @@ pub(super) fn serve_http(mut client: TcpStream, rules: &Rules) -> io::Result<()>
         return respond(&mut client, "400 Bad Request");
     };
 
-    if !rules.permits(&request.host, request.port) {
+    let default_port = if request.forward.is_some() {
+        PLAIN_HTTP_PORT
+    } else {
+        TLS_PORT
+    };
+    if !rules.permits(&request.host, request.port, default_port) {
         return respond(&mut client, "403 Forbidden");
     }
     let mut upstream = match connect(rules, &request.host, request.port) {
@@ -123,27 +159,44 @@ pub(super) fn serve_http(mut client: TcpStream, rules: &Rules) -> io::Result<()>
             return Err(error);
         }
     };
-    client.set_read_timeout(None)?;
-
-    if let Some(head) = request.forward {
+    if let Some(head) = &request.forward {
         upstream.write_all(head.as_bytes())?;
     } else {
         client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
         client.flush()?;
+        let Some(received) =
+            open_tunnel(rules, &mut client, &request.host, request.port, early_body)?
+        else {
+            return Ok(());
+        };
+        early_body = received;
     }
+    client.set_read_timeout(None)?;
     upstream.write_all(&early_body)?;
     pipe(client, upstream)
 }
 
-/// Forces the upstream to close after one response so the connection cannot
-/// be reused for a different host.
-fn rewrite_head(head: &str) -> String {
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
-    let mut rewritten = format!("{request_line}\r\n");
-    for line in lines.filter(|line| !line.is_empty()) {
+/// Headers the proxy drops and writes again itself.
+const REPLACED_HEADERS: [&str; 4] = [
+    "host",
+    "connection",
+    "proxy-connection",
+    "proxy-authorization",
+];
+
+/// Rewrites a plain request for the origin.
+///
+/// The request line takes the origin form, and `Host` names the host the
+/// proxy checked, so a server that picks its site from `Host` serves that one.
+/// The upstream closes after one response, so the connection cannot be reused
+/// for a different host.
+fn rewrite_head(head: &str, request_line: &str, host: &str) -> String {
+    let mut rewritten = format!("{request_line}\r\nHost: {host}\r\n");
+    for line in head.split("\r\n").skip(1).filter(|line| !line.is_empty()) {
         let name = line.split(':').next().unwrap_or_default().trim();
-        if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("proxy-connection")
+        if REPLACED_HEADERS
+            .iter()
+            .any(|replaced| name.eq_ignore_ascii_case(replaced))
         {
             continue;
         }
@@ -160,7 +213,7 @@ mod tests {
     use std::net::{Ipv4Addr, TcpStream};
     use std::thread;
 
-    use super::{parse_request, read_head, rewrite_head, split_authority};
+    use super::{host_header, parse_request, read_head, rewrite_head, split_authority};
     use crate::proxy::loopback_listener;
 
     /// A connected loopback pair, client end first.
@@ -231,14 +284,18 @@ mod tests {
         assert_eq!((tunnel.host.as_str(), tunnel.port), ("example.com", 8443));
         assert!(tunnel.forward.is_none());
 
-        let plain = parse_request(b"GET http://example.com/a?b HTTP/1.1\r\n\r\n").unwrap();
+        let plain = parse_request(b"GET http://example.com/a?b#c HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!((plain.host.as_str(), plain.port), ("example.com", 80));
-        assert!(plain.forward.is_some());
+        assert_eq!(
+            plain.forward.as_deref(),
+            Some("GET /a?b HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+        );
 
         assert!(parse_request(b"GET\r\n\r\n").is_none());
         assert!(parse_request(b"GET /path HTTP/1.1\r\n\r\n").is_none());
         assert!(parse_request(b"CONNECT host:notaport HTTP/1.1\r\n\r\n").is_none());
         assert!(parse_request(b"GET http://local\xffhost/ HTTP/1.1\r\n\r\n").is_none());
+        assert!(parse_request(b"GET http://example.com/\r\n\r\n").is_none());
     }
 
     #[test]
@@ -246,8 +303,35 @@ mod tests {
         let head = "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nProxy-Connection: keep-alive\r\nConnection: keep-alive\r\nAccept: */*\r\n\r\n";
 
         assert_eq!(
-            rewrite_head(head),
-            "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+            rewrite_head(head, "GET / HTTP/1.1", "example.com"),
+            "GET / HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn names_the_checked_host_whatever_host_the_client_sent() {
+        let request = parse_request(
+            b"GET http://api.example.com/v1 HTTP/1.1\r\nHost: evil.example\r\nhost: evil.example\r\nProxy-Authorization: x\r\n\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.forward.as_deref(),
+            Some("GET /v1 HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n")
+        );
+    }
+
+    #[test]
+    fn writes_the_port_and_brackets_into_the_host_header() {
+        assert_eq!(host_header("example.com", 80), "example.com");
+        assert_eq!(host_header("example.com", 8080), "example.com:8080");
+        assert_eq!(host_header("::1", 3000), "[::1]:3000");
+        assert_eq!(
+            parse_request(b"GET http://example.com:8080 HTTP/1.1\r\n\r\n")
+                .unwrap()
+                .forward
+                .as_deref(),
+            Some("GET / HTTP/1.1\r\nHost: example.com:8080\r\nConnection: close\r\n\r\n")
         );
     }
 }

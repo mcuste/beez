@@ -36,8 +36,10 @@ impl std::error::Error for DomainRuleError {}
 
 /// A host the sandbox may reach, such as `github.com`, `*.npmjs.org`, or `pypi.org:443`.
 ///
-/// A leading `*.` matches any subdomain but not the bare domain. Without a
-/// port the rule matches every port.
+/// A leading `*.` matches any subdomain but not the bare domain. A rule with a
+/// port matches that port only. A rule without one matches the port the
+/// caller names as the default, so the proxy can allow 443 for a tunnel and 80
+/// for plain HTTP.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DomainRule {
     host: String,
@@ -47,11 +49,16 @@ pub struct DomainRule {
 
 impl DomainRule {
     /// True when the rule grants access to `host` on `port`.
+    ///
+    /// A rule without a port grants `default_port` and no other.
     #[must_use]
-    pub fn matches(&self, host: &str, port: u16) -> bool {
-        if self.port.is_some_and(|allowed| allowed != port) {
-            return false;
-        }
+    pub fn matches(&self, host: &str, port: u16, default_port: u16) -> bool {
+        self.port.unwrap_or(default_port) == port && self.matches_host(host)
+    }
+
+    /// True when the rule names `host`, whatever the port.
+    #[must_use]
+    pub fn matches_host(&self, host: &str) -> bool {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         if self.wildcard {
             host.strip_suffix(self.host.as_str())
@@ -122,32 +129,33 @@ mod tests {
     use super::{DomainRule, DomainRuleError};
 
     #[test]
-    fn matches_an_exact_host_on_any_port() {
+    fn matches_an_exact_host_on_the_default_port_only() {
         let sut = "GitHub.com".parse::<DomainRule>().unwrap();
 
-        assert!(sut.matches("github.com", 443));
-        assert!(sut.matches("github.com.", 80));
-        assert!(!sut.matches("api.github.com", 443));
+        assert!(sut.matches("github.com", 443, 443));
+        assert!(sut.matches("github.com.", 80, 80));
+        assert!(!sut.matches("github.com", 80, 443));
+        assert!(!sut.matches("github.com", 22, 443));
+        assert!(!sut.matches("api.github.com", 443, 443));
     }
 
     #[test]
     fn matches_a_host_whatever_its_case() {
         let sut = "github.com".parse::<DomainRule>().unwrap();
 
-        assert!(sut.matches("GitHub.COM", 443));
-        assert!(
-            "*.npmjs.org"
-                .parse::<DomainRule>()
-                .unwrap()
-                .matches("Registry.NPMJS.org", 443)
-        );
+        assert!(sut.matches("GitHub.COM", 443, 443));
+        assert!("*.npmjs.org".parse::<DomainRule>().unwrap().matches(
+            "Registry.NPMJS.org",
+            443,
+            443
+        ));
     }
 
     #[test]
     fn matches_a_host_the_rule_names_with_a_trailing_dot() {
         let sut = "github.com.".parse::<DomainRule>().unwrap();
 
-        assert!(sut.matches("github.com", 443));
+        assert!(sut.matches("github.com", 443, 443));
         assert_eq!(sut.to_string(), "github.com");
     }
 
@@ -155,18 +163,18 @@ mod tests {
     fn matches_subdomains_of_a_wildcard_but_not_the_apex() {
         let sut = "*.npmjs.org".parse::<DomainRule>().unwrap();
 
-        assert!(sut.matches("registry.npmjs.org", 443));
-        assert!(sut.matches("a.b.npmjs.org", 443));
-        assert!(!sut.matches("npmjs.org", 443));
-        assert!(!sut.matches("evilnpmjs.org", 443));
+        assert!(sut.matches("registry.npmjs.org", 443, 443));
+        assert!(sut.matches("a.b.npmjs.org", 443, 443));
+        assert!(!sut.matches("npmjs.org", 443, 443));
+        assert!(!sut.matches("evilnpmjs.org", 443, 443));
     }
 
     #[test]
     fn refuses_a_wildcard_host_without_a_subdomain_label() {
         let sut = "*.npmjs.org".parse::<DomainRule>().unwrap();
 
-        assert!(!sut.matches(".npmjs.org", 443));
-        assert!(!sut.matches("npmjs.org.", 443));
+        assert!(!sut.matches(".npmjs.org", 443, 443));
+        assert!(!sut.matches("npmjs.org.", 443, 443));
     }
 
     #[test]
@@ -188,8 +196,9 @@ mod tests {
     fn restricts_the_port_when_given() {
         let sut = "pypi.org:443".parse::<DomainRule>().unwrap();
 
-        assert!(sut.matches("pypi.org", 443));
-        assert!(!sut.matches("pypi.org", 80));
+        assert!(sut.matches("pypi.org", 443, 443));
+        assert!(sut.matches("pypi.org", 443, 80));
+        assert!(!sut.matches("pypi.org", 80, 80));
         assert_eq!(sut.to_string(), "pypi.org:443");
     }
 

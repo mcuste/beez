@@ -18,8 +18,19 @@ Network:
 - Beez runs a local HTTP proxy and a SOCKS5 proxy that only connect to
   allowed hosts. It points `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` at
   them.
-- An allowed host that resolves to a loopback or link-local address, such as a
-  cloud metadata service, is refused unless `localhost: true`.
+- A host without a port allows port 443 through a tunnel and port 80 for
+  plain HTTP. Name the port to allow another one, such as `github.com:22`.
+- A tunnel to port 443 must start TLS for the host it was opened for. The
+  proxy reads the server name in the first TLS message and refuses a tunnel
+  that names another host, names none, or hides the name with Encrypted
+  Client Hello. Without this check, a task could open a tunnel to an allowed
+  host on a shared CDN address and then ask that address for any other site
+  it serves.
+- The proxy writes the `Host` header of a plain HTTP request itself, so the
+  request reaches the host the proxy checked.
+- An allowed host that resolves to a loopback, link-local, or cloud metadata
+  address is refused unless `localhost: true`. This includes IPv6 addresses
+  that carry such an IPv4 address.
 - Each harness gets the hosts it needs to run, such as `api.anthropic.com`
   for `claude`.
 
@@ -32,6 +43,20 @@ Filesystem:
 - Files a task could use to run code later stay read-only: `.git/hooks`,
   `.github/workflows`, `.envrc`, `.vscode`, `.claude`, and `.mcp.json`.
   `.beez` is read-only too, so a task cannot rewrite the log of its own run.
+
+Local services:
+
+- A task cannot reach programs on the host through Unix sockets, such as the
+  Docker daemon, an SSH or GPG agent, the D-Bus buses, or a terminal
+  multiplexer. Beez removes `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, and the D-Bus
+  addresses from the environment.
+- On macOS a task may call only the system services that command-line tools
+  need, such as user lookups, preferences, logging, and certificate checks.
+  It cannot ask another service to act for it, such as opening a URL in the
+  browser or reading the clipboard.
+- On Linux `/tmp` and `/run` are empty and private to each task, because they
+  hold the host's sockets. Files a task writes in `/tmp` are gone when it
+  ends. The program Beez starts stays visible even when it lives in `/tmp`.
 
 Programs:
 
@@ -84,7 +109,8 @@ tasks:
   leaves the field out keeps the choice of the workflow, and so does
   `localhost`. Hosts a harness needs to run always apply.
 - `allow` in `network` takes hosts such as `github.com`, `*.npmjs.org`, or
-  `pypi.org:443`.
+  `pypi.org:443`. A host without a port allows 443 for TLS and 80 for plain
+  HTTP.
 - Paths accept `~` for the home directory. Relative paths start at the
   working directory.
 - `allow` in `executables` takes program names, files, or directories. Tool
@@ -137,6 +163,10 @@ Program groups:
 
 - Allowing a host allows every path on it.
 - A process that can read a secret and reach one allowed host can leak it.
+- The proxy reads the server name only on port 443. A tunnel to a port that a
+  rule names, such as `example.com:8443`, carries any bytes.
+- On Linux, sockets outside `/tmp`, `/run`, and the denied credential
+  directories stay reachable.
 - Once an interpreter such as `node` is allowed, the program list limits
   tooling, not capability.
 - On Linux the program list also names the dynamic loader, which every linked

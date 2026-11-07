@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
-use super::{HANDSHAKE_TIMEOUT, Rules, connect};
+use super::{HANDSHAKE_TIMEOUT, Rules, TLS_PORT, connect, open_tunnel};
 use crate::stream::pipe;
 
 const SOCKS_VERSION: u8 = 5;
@@ -106,10 +106,10 @@ pub(super) fn serve_socks(mut client: TcpStream, rules: &Rules) -> io::Result<()
         return Ok(());
     };
 
-    if !rules.permits(&host, port) {
+    if !rules.permits(&host, port, TLS_PORT) {
         return socks_reply(&mut client, SOCKS_NOT_ALLOWED);
     }
-    let upstream = match connect(rules, &host, port) {
+    let mut upstream = match connect(rules, &host, port) {
         Ok(upstream) => upstream,
         Err(error) => {
             let status = match error.kind() {
@@ -121,7 +121,11 @@ pub(super) fn serve_socks(mut client: TcpStream, rules: &Rules) -> io::Result<()
             return Err(error);
         }
     };
-    client.set_read_timeout(None)?;
     socks_reply(&mut client, SOCKS_SUCCEEDED)?;
+    let Some(received) = open_tunnel(rules, &mut client, &host, port, Vec::new())? else {
+        return Ok(());
+    };
+    client.set_read_timeout(None)?;
+    upstream.write_all(&received)?;
     pipe(client, upstream)
 }

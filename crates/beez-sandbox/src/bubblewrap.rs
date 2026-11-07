@@ -21,6 +21,25 @@ pub(crate) const SOCKS_PORT: u16 = 1080;
 
 static BRIDGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Directories that get an empty tmpfs of their own in every sandbox.
+///
+/// They hold the host's Unix sockets: the D-Bus buses, the Docker and Podman
+/// sockets, SSH and GPG agents, terminal multiplexers, and the bridges of other
+/// runs. A read-only mount does not stop a connection to a socket, so these
+/// directories must be replaced, not just made read-only.
+const PRIVATE_DIRECTORIES: [&str; 2] = ["/tmp", "/run"];
+
+/// Paths under `/run` that hold programs rather than sockets, kept read-only.
+///
+/// NixOS puts the system profile and its setuid wrappers here, and `PATH`
+/// points into them.
+const KEPT_RUN_PATHS: [&str; 4] = [
+    "/run/current-system",
+    "/run/booted-system",
+    "/run/wrappers",
+    "/run/opengl-driver",
+];
+
 /// Unix sockets on the host that forward to the proxies.
 ///
 /// The sandbox has no network namespace of its own, so these sockets are the
@@ -268,8 +287,11 @@ impl Drop for HeldMasks {
 
 /// Every `bwrap` argument, ending with the program to run inside the sandbox.
 ///
-/// The arguments after `sandbox-init` are read back by Beez's own
-/// `sandbox-init` command, so their names must match its options.
+/// bubblewrap applies its mounts in order, and a mount covers whatever an
+/// earlier one put at the same path or below it. So the layers come in this
+/// order: the empty private directories first, then the paths the task may
+/// write, which may sit inside them, then the denies, which must win over the
+/// writes, and the bridge last, so that nothing covers it.
 fn bwrap_arguments(
     resolved: &ResolvedSandbox,
     bridge: &Bridge,
@@ -277,91 +299,195 @@ fn bwrap_arguments(
     program_arguments: &[OsString],
     plan: &MaskPlan,
 ) -> Vec<OsString> {
-    let mut arguments = flags(&[
-        "--new-session",
-        "--die-with-parent",
-        "--unshare-net",
-        "--unshare-pid",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-    ]);
-    if !resolved
-        .write_allow
-        .iter()
-        .any(|path| path == Path::new("/tmp"))
-    {
-        arguments.extend(flags(&["--tmpfs", "/tmp"]));
-    }
-    for path in &resolved.write_allow {
-        bind(&mut arguments, "--bind", path, path);
-    }
-    // A parent bound onto itself becomes a mount point, and the kernel refuses
-    // to rename a mount point. Without it a task moves the parent aside and the
-    // deny mount goes with it. This bind must come before the denies inside it,
-    // and a parent that does not exist yet cannot be bound.
-    for path in resolved.protected_ancestors() {
-        if path.exists() {
-            bind(&mut arguments, "--bind", &path, &path);
-        }
-    }
-    for path in &resolved.write_deny {
-        if plan.covers(path) {
-            bind(&mut arguments, "--ro-bind", bridge.empty_directory(), path);
-        } else if path.exists() {
-            bind(&mut arguments, "--ro-bind", path, path);
-        }
-        // A path outside every writable directory needs no mount.
-    }
-    for path in &resolved.read_deny {
-        if path.is_dir() {
-            option(&mut arguments, "--tmpfs", path);
-        } else {
-            bind(&mut arguments, "--ro-bind", Path::new("/dev/null"), path);
-        }
-    }
-    bind(
-        &mut arguments,
-        "--bind",
-        bridge.directory.path(),
-        bridge.directory.path(),
-    );
-    option(&mut arguments, "--chdir", &resolved.working_directory);
-    arguments.push(OsString::from("--"));
-    arguments.push(beez.into());
-    arguments.push(OsString::from("sandbox-init"));
+    Bwrap::isolated()
+        .private_directories()
+        .writable_paths(resolved)
+        .write_denies(resolved, bridge.empty_directory(), plan)
+        .read_denies(&resolved.read_deny)
+        .bind(bridge.directory.path())
+        .chdir(&resolved.working_directory)
+        .run(sandbox_init(resolved, bridge, beez, program_arguments))
+}
+
+/// The command `bwrap` runs: `beez sandbox-init`, which starts the proxy
+/// relays and limits the programs, then runs the task's program.
+///
+/// The arguments after `sandbox-init` are read back by Beez's own
+/// `sandbox-init` command, so their names must match its options.
+fn sandbox_init(
+    resolved: &ResolvedSandbox,
+    bridge: &Bridge,
+    beez: &Path,
+    program_arguments: &[OsString],
+) -> Vec<OsString> {
+    let mut command = vec![beez.into(), OsString::from("sandbox-init")];
     for (port, socket) in [
         (HTTP_PORT, &bridge.http_socket),
         (SOCKS_PORT, &bridge.socks_socket),
     ] {
-        arguments.push(OsString::from("--relay"));
-        arguments.push(relay_argument(port, socket));
+        command.push(OsString::from("--relay"));
+        command.push(relay_argument(port, socket));
     }
     for path in resolved.executables.iter().flatten() {
-        option(&mut arguments, "--exec", path);
+        command.push(OsString::from("--exec"));
+        command.push(path.into());
     }
-    arguments.push(OsString::from("--"));
-    arguments.push(resolved.program().into());
-    arguments.extend(program_arguments.iter().cloned());
-    arguments
+    command.push(OsString::from("--"));
+    command.push(resolved.program().into());
+    command.extend(program_arguments.iter().cloned());
+    command
 }
 
-fn flags(names: &[&str]) -> Vec<OsString> {
-    names.iter().map(OsString::from).collect()
+/// A `bwrap` command line, built one mount at a time.
+#[derive(Debug, Default)]
+#[must_use]
+struct Bwrap {
+    arguments: Vec<OsString>,
 }
 
-fn option(arguments: &mut Vec<OsString>, name: &str, value: &Path) {
-    arguments.push(OsString::from(name));
-    arguments.push(value.into());
-}
+impl Bwrap {
+    /// New namespaces with the host's root mounted read-only.
+    ///
+    /// The task gets no network and sees only its own processes.
+    fn isolated() -> Self {
+        Self::default()
+            .flags(&[
+                "--new-session",
+                "--die-with-parent",
+                "--unshare-net",
+                "--unshare-pid",
+            ])
+            .ro_bind(Path::new("/"), Path::new("/"))
+            .option("--dev", Path::new("/dev"))
+            .option("--proc", Path::new("/proc"))
+    }
 
-fn bind(arguments: &mut Vec<OsString>, mode: &str, source: &Path, target: &Path) {
-    option(arguments, mode, source);
-    arguments.push(target.into());
+    /// Replaces the directories that hold the host's Unix sockets with empty ones.
+    fn private_directories(mut self) -> Self {
+        for directory in PRIVATE_DIRECTORIES {
+            self = self.tmpfs(Path::new(directory));
+        }
+        // Old systems keep /var/run as a directory of its own instead of a link.
+        let var_run = Path::new("/var/run");
+        if fs::symlink_metadata(var_run).is_ok_and(|metadata| metadata.is_dir()) {
+            self = self.tmpfs(var_run);
+        }
+        for path in KEPT_RUN_PATHS {
+            self = self.keep(Path::new(path));
+        }
+        self
+    }
+
+    /// Mounts the paths the task may write, and the program when it lives in
+    /// a private directory.
+    fn writable_paths(mut self, resolved: &ResolvedSandbox) -> Self {
+        // The private /tmp stands in for the host's, so a grant to write it
+        // binds nothing. Paths inside it, such as a working directory, still bind.
+        let bound = resolved
+            .write_allow
+            .iter()
+            .filter(|path| !PRIVATE_DIRECTORIES.map(Path::new).contains(&path.as_path()))
+            .collect::<Vec<_>>();
+        for path in &bound {
+            self = self.bind(path);
+        }
+        let program = resolved.program();
+        if PRIVATE_DIRECTORIES
+            .iter()
+            .any(|directory| program.starts_with(directory))
+            && !bound.iter().any(|path| program.starts_with(path))
+        {
+            self = self.ro_bind(program, program);
+        }
+        self
+    }
+
+    /// Keeps denied paths unwritable, even inside a writable directory.
+    fn write_denies(mut self, resolved: &ResolvedSandbox, empty: &Path, plan: &MaskPlan) -> Self {
+        // A parent bound onto itself becomes a mount point, and the kernel
+        // refuses to rename a mount point. Without it a task moves the parent
+        // aside and the deny mount goes with it. This bind must come before
+        // the denies inside it, and a parent that does not exist yet cannot be
+        // bound.
+        for path in resolved.protected_ancestors() {
+            if path.exists() {
+                self = self.bind(&path);
+            }
+        }
+        for path in &resolved.write_deny {
+            if plan.covers(path) {
+                self = self.ro_bind(empty, path);
+            } else if path.exists() {
+                self = self.ro_bind(path, path);
+            }
+            // A path outside every writable directory needs no mount.
+        }
+        self
+    }
+
+    /// Hides denied directories behind an empty tmpfs and denied files behind
+    /// `/dev/null`.
+    fn read_denies(mut self, paths: &[PathBuf]) -> Self {
+        for path in paths {
+            self = if path.is_dir() {
+                self.tmpfs(path)
+            } else {
+                self.ro_bind(Path::new("/dev/null"), path)
+            };
+        }
+        self
+    }
+
+    /// Puts a host path back read-only, as a link when it is one.
+    fn keep(self, path: &Path) -> Self {
+        if let Ok(target) = fs::read_link(path) {
+            self.mount("--symlink", &target, path)
+        } else if path.exists() {
+            self.ro_bind(path, path)
+        } else {
+            self
+        }
+    }
+
+    fn tmpfs(self, path: &Path) -> Self {
+        self.option("--tmpfs", path)
+    }
+
+    /// Mounts a host path writable at the same place.
+    fn bind(self, path: &Path) -> Self {
+        self.mount("--bind", path, path)
+    }
+
+    fn ro_bind(self, source: &Path, target: &Path) -> Self {
+        self.mount("--ro-bind", source, target)
+    }
+
+    fn chdir(self, path: &Path) -> Self {
+        self.option("--chdir", path)
+    }
+
+    /// Ends the options with the command to run inside the sandbox.
+    fn run(mut self, command: Vec<OsString>) -> Vec<OsString> {
+        self.arguments.push(OsString::from("--"));
+        self.arguments.extend(command);
+        self.arguments
+    }
+
+    fn mount(mut self, kind: &str, source: &Path, target: &Path) -> Self {
+        self.arguments
+            .extend([OsString::from(kind), source.into(), target.into()]);
+        self
+    }
+
+    fn option(mut self, name: &str, value: &Path) -> Self {
+        self.arguments.extend([OsString::from(name), value.into()]);
+        self
+    }
+
+    fn flags(mut self, names: &[&str]) -> Self {
+        self.arguments.extend(names.iter().map(OsString::from));
+        self
+    }
 }
 
 #[cfg(test)]
@@ -372,7 +498,7 @@ mod tests {
 
     use beez_test_support::{TemporaryDirectory, text};
 
-    use super::{Bridge, HTTP_PORT, MaskPlan, SOCKS_PORT, bwrap_arguments};
+    use super::{Bridge, Bwrap, HTTP_PORT, MaskPlan, SOCKS_PORT, bwrap_arguments};
     use crate::resolve::ResolvedSandbox;
 
     /// A policy that may write `work` and must not write `.git/hooks` in it.
@@ -497,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn replaces_tmp_with_a_tmpfs_unless_the_policy_may_write_it() {
+    fn gives_every_sandbox_a_private_tmp_and_run_even_when_tmp_is_writable() {
         let directory = TemporaryDirectory::new("bwrap-tmp").unwrap();
         let work = directory.join("work");
         fs::create_dir(&work).unwrap();
@@ -505,20 +631,78 @@ mod tests {
         writable_tmp.write_allow.push(PathBuf::from("/tmp"));
         let bridge = bridge();
 
-        let private_tmp = arguments(&resolved(&work), &bridge);
-        let shared_tmp = arguments(&writable_tmp, &bridge);
+        let sut = arguments(&writable_tmp, &bridge);
+
+        assert!(has_run(&sut, &["--tmpfs", "/tmp"]), "{sut:?}");
+        assert!(has_run(&sut, &["--tmpfs", "/run"]), "{sut:?}");
+        assert!(!has_run(&sut, &["--bind", "/tmp", "/tmp"]), "{sut:?}");
+    }
+
+    #[test]
+    fn keeps_a_program_in_the_host_tmp_visible() {
+        let directory = TemporaryDirectory::new("bwrap-tmp-program").unwrap();
+        let work = directory.join("work");
+        fs::create_dir(&work).unwrap();
+        let mut policy = resolved(&work);
+        policy.write_allow.push(PathBuf::from("/tmp"));
+        policy.program = PathBuf::from("/tmp/tools/claude");
+        let bridge = bridge();
+
+        let sut = arguments(&policy, &bridge);
 
         assert!(
-            has_run(&private_tmp, &["--tmpfs", "/tmp"]),
-            "{private_tmp:?}"
+            has_run(
+                &sut,
+                &["--ro-bind", "/tmp/tools/claude", "/tmp/tools/claude"]
+            ),
+            "{sut:?}"
         );
-        assert!(
-            !has_run(&shared_tmp, &["--tmpfs", "/tmp"]),
-            "{shared_tmp:?}"
-        );
-        assert!(
-            has_run(&shared_tmp, &["--bind", "/tmp", "/tmp"]),
-            "{shared_tmp:?}"
+    }
+
+    #[test]
+    fn mounts_the_private_directories_before_anything_inside_them() {
+        let directory = TemporaryDirectory::new("bwrap-tmp-order").unwrap();
+        let work = directory.join("work");
+        fs::create_dir(&work).unwrap();
+        let bridge = bridge();
+
+        let sut = arguments(&resolved(&work), &bridge);
+
+        let tmp = run_at(&sut, &["--tmpfs", "/tmp"]).unwrap();
+        let work = text(&work);
+        let bridge_directory = text(bridge.directory.path());
+        let work_bind = run_at(&sut, &["--bind", &work, &work]).unwrap();
+        let bridge_bind = run_at(&sut, &["--bind", &bridge_directory, &bridge_directory]).unwrap();
+        assert!(tmp < work_bind && tmp < bridge_bind, "{sut:?}");
+    }
+
+    #[test]
+    fn keeps_a_run_path_as_a_link_or_a_read_only_bind() {
+        let directory = TemporaryDirectory::new("bwrap-keep").unwrap();
+        let program_directory = directory.join("wrappers");
+        fs::create_dir(&program_directory).unwrap();
+        let link = directory.join("current-system");
+        std::os::unix::fs::symlink("/nix/store/system", &link).unwrap();
+
+        let sut = Bwrap::default()
+            .keep(&program_directory)
+            .keep(&link)
+            .keep(&directory.join("missing"))
+            .arguments;
+
+        let program_directory = text(&program_directory);
+        let link = text(&link);
+        assert_eq!(
+            sut,
+            [
+                "--ro-bind",
+                program_directory.as_str(),
+                program_directory.as_str(),
+                "--symlink",
+                "/nix/store/system",
+                link.as_str(),
+            ]
+            .map(OsString::from)
         );
     }
 

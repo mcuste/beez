@@ -9,6 +9,38 @@ use crate::resolve::ResolvedSandbox;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// System services a sandboxed program may call.
+///
+/// A Mach service is a system process that does work for its caller, outside
+/// the sandbox. Allowing every service lets a task have one act for it: Launch
+/// Services opens a URL in the browser, and the pasteboard server hands over
+/// the clipboard. These are the services command-line tools need: user and
+/// group lookups, notifications, logging, preferences, the temporary
+/// directory, certificate checks, file events, network settings, and sleep
+/// assertions.
+const MACH_SERVICES: [&str; 20] = [
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
+    "com.apple.system.DirectoryService.libinfo_v1",
+    "com.apple.system.DirectoryService.membership_v1",
+    "com.apple.system.notification_center",
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.logd.events",
+    "com.apple.diagnosticd",
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+    "com.apple.bsd.dirhelper",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+    "com.apple.ocspd",
+    "com.apple.SecurityServer",
+    "com.apple.FSEvents",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.PowerManagement.control",
+];
+
 /// Wraps the program in `sandbox-exec` with a generated profile.
 pub(crate) fn command(
     resolved: &ResolvedSandbox,
@@ -34,13 +66,17 @@ pub(crate) fn profile(resolved: &ResolvedSandbox, http_port: u16, socks_port: u1
         "(allow process-info* (target same-sandbox))\n",
         "(allow signal (target same-sandbox))\n",
         "(allow sysctl-read)\n",
-        "(allow mach-lookup)\n",
         "(allow ipc-posix*)\n",
         "(allow pseudo-tty)\n",
         "(allow user-preference-read)\n",
         "(allow file-ioctl)\n",
         "(allow file-read*)\n",
     ));
+    profile.push_str("(allow mach-lookup");
+    for service in MACH_SERVICES {
+        let _ = write!(profile, " (global-name \"{service}\")");
+    }
+    profile.push_str(")\n");
 
     write_rule(
         &mut profile,
@@ -192,6 +228,18 @@ mod tests {
 
         assert!(sut.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
         assert!(sut.contains("(allow process-exec* (literal \"/bin/bash\") (subpath \"/usr\"))"));
+    }
+
+    #[test]
+    fn allows_only_the_listed_system_services() {
+        let sut = profile(&resolved(), 3128, 1080);
+
+        assert!(!sut.contains("(allow mach-lookup)"), "{sut}");
+        assert!(sut.contains(
+            "(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\")"
+        ));
+        assert!(!sut.contains("launchservicesd"), "{sut}");
+        assert!(!sut.contains("pasteboard"), "{sut}");
     }
 
     #[test]

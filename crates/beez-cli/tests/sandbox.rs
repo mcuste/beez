@@ -97,6 +97,45 @@ fn sandboxes_a_command_unless_it_asks_for_no_sandbox() {
 }
 
 #[test]
+fn hides_variables_that_point_at_host_sockets() {
+    let (directory, work) = working_directory("cli-sandbox-socket-variables").unwrap();
+
+    let output = common::beez()
+        .args([
+            "run",
+            "command",
+            "bash",
+            "-c",
+            "printf %s \"${SSH_AUTH_SOCK-unset} ${DBUS_SESSION_BUS_ADDRESS-unset}\"",
+        ])
+        .current_dir(&work)
+        .env("BEEZ_LOG_DIR", directory.join("logs"))
+        .env("SSH_AUTH_SOCK", "/tmp/agent.sock")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"unset unset");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn gives_each_task_its_own_tmp_on_linux() {
+    let (directory, work) = working_directory("cli-sandbox-private-tmp").unwrap();
+    let host = Path::new("/tmp").join(format!("beez-host-{}", std::process::id()));
+    let inside = Path::new("/tmp").join(format!("beez-inside-{}", std::process::id()));
+    fs::write(&host, "host").unwrap();
+    let script = format!("test ! -e {} && touch {}", host.display(), inside.display());
+
+    let output = run_command(&directory, &work, &["bash", "-c", &script]).unwrap();
+
+    let _ = fs::remove_file(&host);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!inside.exists());
+}
+
+#[test]
 fn refuses_no_sandbox_together_with_an_allowance() {
     let (directory, work) = working_directory("cli-sandbox-conflict").unwrap();
 
@@ -332,10 +371,10 @@ fn http_origin() -> io::Result<u16> {
     Ok(port)
 }
 
-/// A policy that allows `localhost` and, with `localhost`, local addresses.
-fn network(localhost: bool) -> String {
+/// A policy that allows `localhost` on `port` and, with `localhost`, local addresses.
+fn network(localhost: bool, port: u16) -> String {
     format!(
-        "  network:\n    defaults: false\n    allow: [\"localhost\"]\n    localhost: {localhost}\n{WORK_ONLY}"
+        "  network:\n    defaults: false\n    allow: [\"localhost:{port}\"]\n    localhost: {localhost}\n{WORK_ONLY}"
     )
 }
 
@@ -351,7 +390,10 @@ fn reaches_an_allowed_host_through_the_http_proxy() {
     let output = run_workflow(
         &directory,
         &work,
-        &manifest(&network(true), &fetch("HTTP_PROXY", origin_port)),
+        &manifest(
+            &network(true, origin_port),
+            &fetch("HTTP_PROXY", origin_port),
+        ),
     )
     .unwrap();
 
@@ -367,7 +409,10 @@ fn reaches_an_allowed_host_through_the_socks_proxy() {
     let output = run_workflow(
         &directory,
         &work,
-        &manifest(&network(true), &fetch("ALL_PROXY", origin_port)),
+        &manifest(
+            &network(true, origin_port),
+            &fetch("ALL_PROXY", origin_port),
+        ),
     )
     .unwrap();
 
@@ -379,7 +424,7 @@ fn reaches_an_allowed_host_through_the_socks_proxy() {
 fn refuses_local_connections_directly_and_through_the_proxy() {
     let (directory, work) = working_directory("cli-sandbox-local-network").unwrap();
     let (origin_port, origin) = unused_origin().unwrap();
-    let sandbox = network(false);
+    let sandbox = network(false, origin_port);
 
     let direct = run_workflow(
         &directory,

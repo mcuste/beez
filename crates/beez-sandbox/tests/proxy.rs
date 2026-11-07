@@ -92,7 +92,7 @@ fn socks_reply(client: &mut TcpStream) -> io::Result<[u8; 10]> {
 #[test]
 fn tunnels_connect_requests_to_allowed_hosts() {
     let (origin_port, origin) = echo_origin().unwrap();
-    let proxy = proxy(&["localhost"], true).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], true).unwrap();
     let mut client = connect(proxy.http_port()).unwrap();
 
     write!(
@@ -117,7 +117,7 @@ fn tunnels_connect_requests_to_allowed_hosts() {
 #[test]
 fn tunnels_bytes_that_arrive_with_the_connect_request() {
     let (origin_port, origin) = echo_origin().unwrap();
-    let proxy = proxy(&["localhost"], true).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], true).unwrap();
 
     let response = exchange(
         proxy.http_port(),
@@ -171,7 +171,7 @@ fn matches_wildcard_rules_against_subdomains_only() {
 #[test]
 fn refuses_an_allowed_host_that_resolves_to_a_local_address() {
     let (origin_port, origin) = unused_origin().unwrap();
-    let proxy = proxy(&["localhost"], false).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], false).unwrap();
 
     let response = exchange(
         proxy.http_port(),
@@ -186,7 +186,7 @@ fn refuses_an_allowed_host_that_resolves_to_a_local_address() {
 #[test]
 fn forwards_plain_http_requests_with_a_closing_connection() {
     let (origin_port, origin) = echo_origin().unwrap();
-    let proxy = proxy(&["localhost"], true).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], true).unwrap();
 
     let response = exchange(
         proxy.http_port(),
@@ -200,17 +200,64 @@ fn forwards_plain_http_requests_with_a_closing_connection() {
     let forwarded = String::from_utf8(origin.join().unwrap().unwrap()).unwrap();
     assert_eq!(
         forwarded,
-        format!(
-            "GET http://localhost:{origin_port}/path HTTP/1.1\r\nHost: localhost:{origin_port}\r\nConnection: close\r\n\r\n"
-        )
+        format!("GET /path HTTP/1.1\r\nHost: localhost:{origin_port}\r\nConnection: close\r\n\r\n")
     );
     assert_eq!(response, forwarded.as_bytes());
 }
 
 #[test]
+fn sends_plain_http_to_the_checked_host_whatever_host_header_it_had() {
+    let (origin_port, origin) = echo_origin().unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], true).unwrap();
+
+    exchange(
+        proxy.http_port(),
+        format!("GET http://localhost:{origin_port}/ HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+            .as_bytes(),
+    )
+    .unwrap();
+
+    let forwarded = String::from_utf8(origin.join().unwrap().unwrap()).unwrap();
+    assert!(
+        forwarded.contains(&format!("\r\nHost: localhost:{origin_port}\r\n")),
+        "{forwarded}"
+    );
+    assert!(!forwarded.contains("evil.example"), "{forwarded}");
+}
+
+#[test]
+fn allows_only_the_web_ports_for_a_rule_without_a_port() {
+    let (origin_port, origin) = unused_origin().unwrap();
+    let proxy = proxy(&["localhost"], true).unwrap();
+
+    let tunnel = exchange(
+        proxy.http_port(),
+        format!("CONNECT localhost:{origin_port} HTTP/1.1\r\n\r\n").as_bytes(),
+    )
+    .unwrap();
+    let plain = exchange(
+        proxy.http_port(),
+        format!("GET http://localhost:{origin_port}/ HTTP/1.1\r\n\r\n").as_bytes(),
+    )
+    .unwrap();
+    let (mut client, _) = socks_client(proxy.socks_port()).unwrap();
+    client
+        .write_all(&socks_request("localhost", origin_port).unwrap())
+        .unwrap();
+
+    assert!(tunnel.starts_with(b"HTTP/1.1 403 Forbidden"));
+    assert!(plain.starts_with(b"HTTP/1.1 403 Forbidden"));
+    assert_eq!(
+        socks_reply(&mut client).unwrap().get(..2),
+        Some(&[5, 2][..])
+    );
+    assert_never_reached(&origin);
+}
+
+#[test]
 fn forwards_a_body_that_arrives_with_the_request_head() {
     let (origin_port, origin) = echo_origin().unwrap();
-    let proxy = proxy(&["localhost"], true).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], true).unwrap();
 
     exchange(
         proxy.http_port(),
@@ -228,7 +275,7 @@ fn forwards_a_body_that_arrives_with_the_request_head() {
 #[test]
 fn serves_socks5_connections_to_allowed_domains() {
     let (origin_port, origin) = echo_origin().unwrap();
-    let proxy = proxy(&["localhost"], true).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], true).unwrap();
     let (mut client, greeting) = socks_client(proxy.socks_port()).unwrap();
 
     client
@@ -278,7 +325,7 @@ fn refuses_socks5_connections_to_literal_addresses() {
 #[test]
 fn refuses_socks5_connections_to_a_local_address() {
     let (origin_port, origin) = unused_origin().unwrap();
-    let proxy = proxy(&["localhost"], false).unwrap();
+    let proxy = proxy(&[&format!("localhost:{origin_port}")], false).unwrap();
     let (mut client, _) = socks_client(proxy.socks_port()).unwrap();
 
     client

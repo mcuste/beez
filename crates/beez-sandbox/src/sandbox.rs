@@ -8,6 +8,17 @@ use beez_policy::{HeadlessHarness, SandboxPolicy};
 use crate::proxy::Proxy;
 use crate::resolve::ResolvedSandbox;
 
+/// Variables that point a program at a host socket the sandbox hides or refuses.
+///
+/// The sandbox stops the connection either way. Removing them makes a tool
+/// report that no agent or bus is there, instead of a permission error.
+const HOST_SOCKET_VARIABLES: [&str; 4] = [
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
+];
+
 /// A program wrapped in the platform sandbox, with its proxy kept alive.
 #[derive(Debug)]
 pub struct SandboxedCommand {
@@ -99,6 +110,9 @@ impl SandboxedCommand {
 fn configure(command: &mut Command, resolved: &ResolvedSandbox, http_port: u16, socks_port: u16) {
     let http = format!("http://127.0.0.1:{http_port}");
     let socks = format!("socks5h://127.0.0.1:{socks_port}");
+    for name in HOST_SOCKET_VARIABLES {
+        command.env_remove(name);
+    }
     command
         .current_dir(&resolved.working_directory)
         .env("HTTP_PROXY", &http)
