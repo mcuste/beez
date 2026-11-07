@@ -330,7 +330,7 @@ fn runs_a_fire_it_missed_only_when_the_schedule_asks_for_it() {
     let root = directory.join("root");
     let marker = directory.join("marker");
     // The fire is already past, so it is missed as soon as the daemon starts.
-    let at = beez_schedule::format_instant(std::time::SystemTime::now() - Duration::from_secs(60));
+    let at = beez_schedule::format_instant(std::time::SystemTime::now() - Duration::from_mins(1));
     let missed = directory
         .write(
             "missed.yaml",

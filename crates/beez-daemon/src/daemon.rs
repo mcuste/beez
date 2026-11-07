@@ -39,7 +39,7 @@ const SCHEMA: u32 = 1;
 
 /// Longest the timer sleeps. A clock change or a machine that slept cannot
 /// hide a fire for longer than this.
-const MAX_SLEEP: Duration = Duration::from_secs(60);
+const MAX_SLEEP: Duration = Duration::from_mins(1);
 
 /// The record of a running daemon, as `daemon.json` holds it.
 #[derive(Debug, Serialize)]
