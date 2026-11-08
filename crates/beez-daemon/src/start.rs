@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::control::{self, Response};
+use crate::daemon::RunLimits;
 use crate::message;
 use crate::paths::DaemonPaths;
 
@@ -19,7 +20,7 @@ const ATTEMPTS: usize = 50;
 ///
 /// The arguments are read back by Beez's own `daemon run` command, so their
 /// names must match its options.
-pub fn start(paths: &DaemonPaths, limit: usize, keep_runs: usize) -> io::Result<Response> {
+pub fn start(paths: &DaemonPaths, limits: RunLimits) -> io::Result<Response> {
     if control::is_running(paths.socket()) {
         return Ok(Response::error(message::already_running(paths.root())));
     }
@@ -32,9 +33,9 @@ pub fn start(paths: &DaemonPaths, limit: usize, keep_runs: usize) -> io::Result<
         .args(["daemon", "run", "--root"])
         .arg(paths.root())
         .arg("--limit")
-        .arg(limit.to_string())
+        .arg(limits.limit.to_string())
         .arg("--keep-runs")
-        .arg(keep_runs.to_string())
+        .arg(limits.keep_runs.to_string())
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)

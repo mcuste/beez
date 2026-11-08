@@ -7,8 +7,7 @@
 use std::io;
 use std::path::Path;
 
-use crate::control::Response;
-use crate::message;
+use crate::message::{self, Refusal};
 use crate::paths::DaemonPaths;
 use crate::store::{Registry, Watched};
 
@@ -21,24 +20,24 @@ pub(crate) fn watch(
     watched: Watched,
 ) -> io::Result<String> {
     let path = watched.path.clone();
-    let added = registry.add(watched);
+    let watch = registry.add(watched);
     registry.save(&paths.manifests())?;
 
-    Ok(message::watching(&path, added))
+    Ok(message::watching(&path, watch))
 }
 
 /// Removes a manifest from the list and writes the list.
 ///
-/// Answers with an error when the manifest was not watched.
+/// Refuses a manifest that was not watched.
 pub(crate) fn unwatch(
     registry: &mut Registry,
     paths: &DaemonPaths,
     manifest: &Path,
-) -> io::Result<Response> {
+) -> io::Result<Result<String, Refusal>> {
     if !registry.remove(manifest) {
-        return Ok(Response::error(message::not_watched(manifest)));
+        return Ok(Err(Refusal::NotWatched(manifest.to_path_buf())));
     }
     registry.save(&paths.manifests())?;
 
-    Ok(Response::done(message::stopped_watching(manifest)))
+    Ok(Ok(message::stopped_watching(manifest)))
 }

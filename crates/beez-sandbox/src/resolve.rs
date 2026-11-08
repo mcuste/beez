@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, btree_set};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
@@ -27,13 +27,13 @@ const MACOS_TOOLCHAIN_DIRECTORIES: [&str; 2] = [
 
 /// A policy turned into absolute host paths and concrete host rules.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedSandbox {
+pub(crate) struct ResolvedSandbox {
     pub(crate) allowed_domains: Vec<DomainRule>,
     pub(crate) localhost: bool,
-    pub(crate) read_deny: Vec<PathBuf>,
-    pub(crate) write_allow: Vec<PathBuf>,
-    pub(crate) write_deny: Vec<PathBuf>,
-    pub(crate) executables: Option<Vec<PathBuf>>,
+    pub(crate) read_deny: PathSet,
+    pub(crate) write_allow: PathSet,
+    pub(crate) write_deny: PathSet,
+    pub(crate) execution: Execution,
     pub(crate) environment: Vec<(OsString, OsString)>,
     pub(crate) working_directory: PathBuf,
     pub(crate) program: PathBuf,
@@ -46,7 +46,7 @@ impl ResolvedSandbox {
     /// because there is nothing to protect or grant yet. Write denies keep
     /// paths that do not exist so a run cannot create them. Program names
     /// missing from `PATH` are skipped.
-    pub fn resolve(
+    pub(crate) fn resolve(
         policy: &SandboxPolicy,
         harness: Option<HeadlessHarness>,
         program: &Path,
@@ -72,29 +72,29 @@ impl ResolvedSandbox {
         if filesystem.defaults() {
             write_allow.extend(fs::canonicalize(std::env::temp_dir()));
         }
-        let write_deny = dedup(
-            filesystem
-                .write_deny()
-                .iter()
-                .map(|path| canonicalize_lenient(&path.resolve(home, &working_directory)))
-                .collect(),
-        );
+        let write_deny = filesystem
+            .write_deny()
+            .iter()
+            .map(|path| canonicalize_lenient(&path.resolve(home, &working_directory)))
+            .collect();
 
-        let executables = policy.executables().map(|executables| {
-            let groups = executables.groups();
-            let state_paths = groups
-                .iter()
-                .flat_map(|group| group.state_sandbox_paths())
-                .collect::<Vec<_>>();
-            write_allow.extend(existing(&state_paths, home, &working_directory));
-            resolve_executables(
-                &groups,
-                executables.allow(),
-                &program,
-                home,
-                &working_directory,
-            )
-        });
+        let execution = policy
+            .executables()
+            .map_or(Execution::Unrestricted, |executables| {
+                let groups = executables.groups();
+                let state_paths = groups
+                    .iter()
+                    .flat_map(|group| group.state_sandbox_paths())
+                    .collect::<Vec<_>>();
+                write_allow.extend(existing(&state_paths, home, &working_directory));
+                Execution::Only(resolve_executables(
+                    &groups,
+                    executables.allow(),
+                    &program,
+                    home,
+                    &working_directory,
+                ))
+            });
 
         let environment = profile
             .as_ref()
@@ -108,9 +108,9 @@ impl ResolvedSandbox {
             allowed_domains: policy.network().allowed_domains(profile.as_ref()),
             localhost: policy.network().localhost(),
             read_deny,
-            write_allow: dedup(write_allow),
+            write_allow,
             write_deny,
-            executables,
+            execution,
             environment,
             working_directory,
             program,
@@ -119,7 +119,7 @@ impl ResolvedSandbox {
 
     /// The canonical path of the program to run.
     #[must_use]
-    pub fn program(&self) -> &Path {
+    pub(crate) fn program(&self) -> &Path {
         &self.program
     }
 
@@ -135,35 +135,123 @@ impl ResolvedSandbox {
     /// A task must not move a denied path out of the way and put a writable
     /// one in its place, so both backends stop these directories from being
     /// renamed or removed. Parents come before their own children.
-    pub(crate) fn protected_ancestors(&self) -> Vec<PathBuf> {
-        dedup(
-            self.write_deny
-                .iter()
-                .flat_map(|denied| denied.ancestors().skip(1))
-                .filter(|ancestor| self.inside_write_allow(ancestor))
-                .map(Path::to_path_buf)
-                .collect(),
-        )
+    pub(crate) fn protected_ancestors(&self) -> PathSet {
+        self.write_deny
+            .iter()
+            .flat_map(|denied| denied.ancestors().skip(1))
+            .filter(|ancestor| self.inside_write_allow(ancestor))
+            .map(Path::to_path_buf)
+            .collect()
     }
 }
 
-/// Sorted, with each path once.
-fn dedup(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+/// Paths in sorted order, each once.
+///
+/// The order puts every parent before the paths inside it. The bubblewrap
+/// mounts rely on that: a mount covers whatever an earlier one put at the
+/// same path or below it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PathSet(BTreeSet<PathBuf>);
+
+impl PathSet {
+    /// The paths, parents first.
+    pub(crate) fn iter(&self) -> btree_set::Iter<'_, PathBuf> {
+        self.0.iter()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.0.contains(path)
+    }
+}
+
+impl FromIterator<PathBuf> for PathSet {
+    fn from_iter<I: IntoIterator<Item = PathBuf>>(paths: I) -> Self {
+        Self(paths.into_iter().collect())
+    }
+}
+
+impl Extend<PathBuf> for PathSet {
+    fn extend<I: IntoIterator<Item = PathBuf>>(&mut self, paths: I) {
+        self.0.extend(paths);
+    }
+}
+
+impl<const N: usize> From<[PathBuf; N]> for PathSet {
+    fn from(paths: [PathBuf; N]) -> Self {
+        paths.into_iter().collect()
+    }
+}
+
+impl IntoIterator for PathSet {
+    type Item = PathBuf;
+    type IntoIter = btree_set::IntoIter<PathBuf>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a PathSet {
+    type Item = &'a PathBuf;
+    type IntoIter = btree_set::Iter<'a, PathBuf>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Which programs a task may start.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Execution {
+    /// Any program.
+    Unrestricted,
+    /// Only the files and directories on the allowlist.
+    Only(ExecAllowlist),
+}
+
+/// The files and directories a task may execute.
+///
+/// It always holds the program the task runs, so it is never empty. An empty
+/// list would leave a backend nothing to allow, and must not read as no
+/// restriction at all.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExecAllowlist(PathSet);
+
+impl ExecAllowlist {
+    /// An allowlist of `program` and `others`.
+    pub(crate) fn new(program: PathBuf, others: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut paths = PathSet::from([program]);
+        paths.extend(others);
+        Self(paths)
+    }
+
+    /// The allowed paths, parents first.
+    pub(crate) fn iter(&self) -> btree_set::Iter<'_, PathBuf> {
+        self.0.iter()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.0.contains(path)
+    }
+}
+
+impl<'a> IntoIterator for &'a ExecAllowlist {
+    type Item = &'a PathBuf;
+    type IntoIter = btree_set::Iter<'a, PathBuf>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 /// Canonical paths of the rules that exist on this host.
-fn existing(paths: &[SandboxPath], home: &Path, working_directory: &Path) -> Vec<PathBuf> {
-    dedup(
-        paths
-            .iter()
-            .filter_map(|path| canonical(path, home, working_directory))
-            .collect(),
-    )
+fn existing(paths: &[SandboxPath], home: &Path, working_directory: &Path) -> PathSet {
+    paths
+        .iter()
+        .filter_map(|path| canonical(path, home, working_directory))
+        .collect()
 }
 
 /// The canonical path of one rule, when it exists on this host.
@@ -243,7 +331,7 @@ fn resolve_executables(
     program: &Path,
     home: &Path,
     working_directory: &Path,
-) -> Vec<PathBuf> {
+) -> ExecAllowlist {
     let mut paths = BTreeSet::new();
     paths.insert(program.to_path_buf());
 
@@ -289,7 +377,7 @@ fn resolve_executables(
     #[cfg(target_os = "linux")]
     paths.extend(dynamic_loaders());
 
-    paths.into_iter().collect()
+    ExecAllowlist::new(program.to_path_buf(), paths)
 }
 
 /// The dynamic loaders on this host.
@@ -383,8 +471,17 @@ mod tests {
     use beez_test_support::{TemporaryDirectory, text};
 
     use super::{
-        ResolvedSandbox, canonicalize_lenient, git_helper_directories, shebang_interpreters,
+        ExecAllowlist, Execution, PathSet, ResolvedSandbox, canonicalize_lenient,
+        git_helper_directories, shebang_interpreters,
     };
+
+    /// The allowlist of a restricted sandbox.
+    fn allowlist(sandbox: ResolvedSandbox) -> ExecAllowlist {
+        match sandbox.execution {
+            Execution::Only(allowlist) => allowlist,
+            Execution::Unrestricted => panic!("execution is unrestricted"),
+        }
+    }
 
     fn canonical(path: &Path) -> PathBuf {
         fs::canonicalize(path).unwrap()
@@ -403,12 +500,11 @@ mod tests {
     ) -> SandboxPolicy {
         SandboxPolicy::new(
             NetworkPolicy::default(),
-            FilesystemPolicy::new(
-                Some(false),
-                paths(read_deny),
-                paths(write_allow),
-                paths(write_deny),
-            ),
+            FilesystemPolicy::default()
+                .with_defaults(Some(false))
+                .with_read_deny(paths(read_deny))
+                .with_write_allow(paths(write_allow))
+                .with_write_deny(paths(write_deny)),
             executables,
         )
     }
@@ -451,9 +547,12 @@ mod tests {
 
         let sut = resolve(&policy, &work, &home);
 
-        assert_eq!(sut.read_deny, [canonical(&secret)]);
-        assert_eq!(sut.write_allow, [canonical(&work)]);
-        assert_eq!(sut.write_deny, [canonical(&work).join("no-deny")]);
+        assert_eq!(sut.read_deny, PathSet::from([canonical(&secret)]));
+        assert_eq!(sut.write_allow, PathSet::from([canonical(&work)]));
+        assert_eq!(
+            sut.write_deny,
+            PathSet::from([canonical(&work).join("no-deny")])
+        );
     }
 
     #[test]
@@ -471,7 +570,7 @@ mod tests {
         let work = canonical(&work);
         assert_eq!(
             sut.protected_ancestors(),
-            [work.join("a"), work.join("a/b")]
+            PathSet::from([work.join("a"), work.join("a/b")])
         );
     }
 
@@ -481,7 +580,9 @@ mod tests {
         let temporary = canonical(&std::env::temp_dir());
         let with_defaults = SandboxPolicy::new(
             NetworkPolicy::default(),
-            FilesystemPolicy::new(Some(true), Vec::new(), paths(&["."]), Vec::new()),
+            FilesystemPolicy::default()
+                .with_defaults(Some(true))
+                .with_write_allow(paths(&["."])),
             None,
         );
 
@@ -496,12 +597,9 @@ mod tests {
     fn allows_writes_to_the_state_paths_of_enabled_executable_groups() {
         let (_directory, work, home) = host("resolve-state");
         fs::create_dir(home.join(".cargo")).unwrap();
-        let executables = ExecutablePolicy::new(
-            Some(false),
-            vec![ExecutableGroup::Rust],
-            Vec::new(),
-            Vec::new(),
-        );
+        let executables = ExecutablePolicy::default()
+            .with_defaults(Some(false))
+            .with_groups(vec![ExecutableGroup::Rust]);
 
         let sut = resolve(
             &policy(&[], &[&text(&work)], &[], Some(executables)),
@@ -541,13 +639,29 @@ mod tests {
     }
 
     #[test]
+    fn keeps_paths_sorted_with_parents_first_and_each_once() {
+        let sut = PathSet::from([
+            PathBuf::from("/a/b/c"),
+            PathBuf::from("/b"),
+            PathBuf::from("/a"),
+            PathBuf::from("/a/b"),
+            PathBuf::from("/a"),
+        ]);
+
+        assert_eq!(
+            sut.iter().collect::<Vec<_>>(),
+            ["/a", "/a/b", "/a/b/c", "/b"].map(Path::new)
+        );
+    }
+
+    #[test]
     fn grants_no_environment_to_a_command_without_a_harness() {
         let (_directory, work, home) = host("resolve-no-harness");
 
         let sut = resolve(&policy(&[], &[&text(&work)], &[], None), &work, &home);
 
-        assert!(sut.environment.is_empty());
-        assert!(sut.allowed_domains.is_empty());
+        assert_eq!(sut.environment, Vec::<(OsString, OsString)>::new());
+        assert_eq!(sut.allowed_domains, Vec::<beez_policy::DomainRule>::new());
     }
 
     #[test]
@@ -556,49 +670,49 @@ mod tests {
 
         let sut = resolve(&policy(&[], &[&text(&work)], &[], None), &work, &home);
 
-        assert!(sut.executables.is_none());
+        assert_eq!(sut.execution, Execution::Unrestricted);
     }
 
     #[test]
     fn always_allows_the_program_itself() {
         let (_directory, work, home) = host("resolve-program");
         let tool = program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
-        let executables = ExecutablePolicy::new(Some(false), Vec::new(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::default().with_defaults(Some(false));
         let policy = policy(&[], &[&text(&work)], &[], Some(executables));
 
         let sut =
             ResolvedSandbox::resolve(&policy, None, Path::new("./tool.sh"), &work, &home).unwrap();
 
         assert_eq!(sut.program(), canonical(&tool));
-        assert!(sut.executables.unwrap().contains(&canonical(&tool)));
+        assert!(allowlist(sut).contains(&canonical(&tool)));
+    }
+
+    #[test]
+    fn holds_the_program_in_every_allowlist() {
+        let sut = ExecAllowlist::new(PathBuf::from("/bin/tool"), []);
+
+        assert_eq!(sut.iter().collect::<Vec<_>>(), [Path::new("/bin/tool")]);
     }
 
     #[test]
     fn allows_the_interpreter_a_shebang_names() {
         let (_directory, work, home) = host("resolve-shebang");
         program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
-        let executables = ExecutablePolicy::new(Some(false), Vec::new(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::default().with_defaults(Some(false));
         let policy = policy(&[], &[&text(&work)], &[], Some(executables));
 
         let sut =
             ResolvedSandbox::resolve(&policy, None, Path::new("./tool.sh"), &work, &home).unwrap();
 
-        assert!(
-            sut.executables
-                .unwrap()
-                .contains(&canonical(Path::new("/bin/sh")))
-        );
+        assert!(allowlist(sut).contains(&canonical(Path::new("/bin/sh"))));
     }
 
     #[test]
     fn skips_group_programs_that_are_missing_from_path() {
         let (_directory, work, home) = host("resolve-groups");
-        let executables = ExecutablePolicy::new(
-            Some(true),
-            ExecutableGroup::ALL.to_vec(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let executables = ExecutablePolicy::default()
+            .with_defaults(Some(true))
+            .with_groups(ExecutableGroup::ALL.to_vec());
 
         let sut = resolve(
             &policy(&[], &[&text(&work)], &[], Some(executables)),
@@ -606,7 +720,7 @@ mod tests {
             &home,
         );
 
-        let executables = sut.executables.unwrap();
+        let executables = allowlist(sut);
         assert!(executables.contains(&canonical(Path::new("/bin/sh"))));
         assert!(
             executables.iter().all(|path| path.exists()),
@@ -618,7 +732,7 @@ mod tests {
     #[test]
     fn allows_the_dynamic_loader_so_a_linked_program_can_start() {
         let (_directory, work, home) = host("resolve-loader");
-        let executables = ExecutablePolicy::new(Some(true), Vec::new(), Vec::new(), Vec::new());
+        let executables = ExecutablePolicy::default().with_defaults(Some(true));
 
         let sut = resolve(
             &policy(&[], &[&text(&work)], &[], Some(executables)),
@@ -626,7 +740,7 @@ mod tests {
             &home,
         );
 
-        assert!(sut.executables.unwrap().iter().any(|path| {
+        assert!(allowlist(sut).iter().any(|path| {
             path.file_name()
                 .is_some_and(|name| name.as_encoded_bytes().starts_with(b"ld-"))
         }));
@@ -690,7 +804,10 @@ mod tests {
     fn ignores_git_helper_directories_that_do_not_exist() {
         let directory = TemporaryDirectory::new("resolve-git-missing").unwrap();
 
-        assert!(git_helper_directories(&directory.join("usr/bin/git")).is_empty());
+        assert_eq!(
+            git_helper_directories(&directory.join("usr/bin/git")),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]
@@ -705,6 +822,9 @@ mod tests {
 
     #[test]
     fn ignores_files_without_a_shebang() {
-        assert!(shebang_interpreters(Path::new("/nonexistent/script")).is_empty());
+        assert_eq!(
+            shebang_interpreters(Path::new("/nonexistent/script")),
+            Vec::<PathBuf>::new()
+        );
     }
 }

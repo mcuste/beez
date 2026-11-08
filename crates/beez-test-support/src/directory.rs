@@ -47,6 +47,16 @@ impl TemporaryDirectory {
         fs::write(&path, contents)?;
         Ok(path)
     }
+
+    /// Writes `script` to `name` inside the directory, makes it executable, and returns its path.
+    #[cfg(unix)]
+    pub fn executable(&self, name: &str, script: impl AsRef<[u8]>) -> io::Result<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = self.write(name, script)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        Ok(path)
+    }
 }
 
 impl Drop for TemporaryDirectory {

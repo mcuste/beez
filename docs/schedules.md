@@ -68,7 +68,9 @@ minute  hour  day-of-month  month  day-of-week
 | `@daily`             | Midnight. Also `@hourly`, `@weekly`, `@monthly`, `@yearly` |
 
 Days of the week count from Sunday as 0, and 7 is Sunday too. A restricted day
-of month and a restricted day of week mean either day, as in a crontab.
+of month and a restricted day of week mean either day, as in a crontab. A day
+field that starts with `*`, such as `*/2`, is not restricted, so `0 3 1 * */2`
+runs on the 1st only when it falls on Sunday, Tuesday, Thursday, or Saturday.
 
 A six-field expression starts with seconds, and a seven-field expression ends
 with a year. The seconds must be one fixed value, so a job starts at most once

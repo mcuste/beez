@@ -66,14 +66,17 @@ impl fmt::Display for TaskId {
 }
 
 /// A task action Beez can execute.
+///
+/// `T` is the form of each text that may read the output of other tasks:
+/// plain text as written, or a parsed template inside a workflow.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TaskRequest {
+pub enum TaskRequest<T = String> {
     /// Sends a prompt to a headless harness.
     Harness {
         /// Harness that receives the prompt.
         harness: HeadlessHarness,
         /// Prompt for the harness.
-        prompt: String,
+        prompt: T,
         /// Model and effort for the harness.
         options: HarnessOptions,
     },
@@ -82,11 +85,11 @@ pub enum TaskRequest {
         /// Program path or name.
         program: String,
         /// Literal program arguments.
-        arguments: Vec<String>,
+        arguments: Vec<T>,
     },
 }
 
-impl TaskRequest {
+impl TaskRequest<String> {
     /// Builds a harness prompt request.
     #[must_use]
     pub fn harness(harness: HeadlessHarness, prompt: String, options: HarnessOptions) -> Self {
@@ -102,35 +105,37 @@ impl TaskRequest {
     pub fn command(program: String, arguments: Vec<String>) -> Self {
         Self::Command { program, arguments }
     }
+}
 
+impl<T> TaskRequest<T> {
     /// The texts that may read the output of other tasks: the prompt of a
     /// harness task, or the arguments of a command task.
-    pub(crate) fn texts(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn texts(&self) -> impl Iterator<Item = &T> {
         match self {
             Self::Harness { prompt, .. } => std::slice::from_ref(prompt).iter(),
             Self::Command { arguments, .. } => arguments.iter(),
         }
-        .map(String::as_str)
     }
 
-    /// Replaces each text from [`Self::texts`] with what `map` returns for it.
-    fn try_map_texts<E>(self, mut map: impl FnMut(&str) -> Result<String, E>) -> Result<Self, E> {
+    /// The same request with each text from [`Self::texts`] replaced by what
+    /// `map` returns for it.
+    pub(crate) fn try_map_texts<U, E>(
+        &self,
+        mut map: impl FnMut(&T) -> Result<U, E>,
+    ) -> Result<TaskRequest<U>, E> {
         Ok(match self {
             Self::Harness {
                 harness,
                 prompt,
                 options,
-            } => Self::Harness {
-                harness,
-                prompt: map(&prompt)?,
-                options,
+            } => TaskRequest::Harness {
+                harness: *harness,
+                prompt: map(prompt)?,
+                options: options.clone(),
             },
-            Self::Command { program, arguments } => Self::Command {
-                program,
-                arguments: arguments
-                    .iter()
-                    .map(|argument| map(argument))
-                    .collect::<Result<_, _>>()?,
+            Self::Command { program, arguments } => TaskRequest::Command {
+                program: program.clone(),
+                arguments: arguments.iter().map(map).collect::<Result<_, _>>()?,
             },
         })
     }
@@ -190,9 +195,10 @@ pub struct Task {
     pub(crate) id: TaskId,
     pub(crate) dependencies: Vec<TaskIndex>,
     pub(crate) reads: Vec<TaskIndex>,
+    /// The request as written, kept verbatim for callers that record it.
     pub(crate) request: TaskRequest,
-    /// One template per text of `request`, in [`TaskRequest::texts`] order.
-    pub(crate) templates: Vec<Template<ResolvedReference>>,
+    /// The same request with every text parsed into a template.
+    pub(crate) template: TaskRequest<Template<ResolvedReference>>,
     pub(crate) sandbox: Option<SandboxPolicy>,
 }
 
@@ -235,15 +241,11 @@ impl Task {
         &self,
         mut lookup: impl FnMut(TaskIndex, TaskOutput) -> Option<String>,
     ) -> Result<TaskRequest, OutputReference> {
-        let mut templates = self.templates.iter();
-        self.request
-            .clone()
-            .try_map_texts(|text| match templates.next() {
-                Some(template) => template
-                    .render(|resolved| lookup(resolved.source, resolved.reference.output()))
-                    .map_err(|resolved| resolved.reference.clone()),
-                None => Ok(text.to_owned()),
-            })
+        self.template.try_map_texts(|template| {
+            template
+                .render(|resolved| lookup(resolved.source, resolved.reference.output()))
+                .map_err(|resolved| resolved.reference.clone())
+        })
     }
 }
 

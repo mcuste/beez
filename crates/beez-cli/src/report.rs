@@ -9,8 +9,8 @@ use anstream::AutoStream;
 use anstyle::{AnsiColor, Color, Effects, Style};
 use beez_process::{OutputStream, ProcessOutput};
 use beez_record::{
-    Labels, LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, VERB_WIDTH,
-    seconds, stream_mark, trim_newline, utc,
+    Labels, LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, TaskState,
+    VERB_WIDTH, seconds, stream_mark, trim_newline, utc,
 };
 use beez_runner::RunEvent;
 use clap::{Args, ValueEnum};
@@ -102,15 +102,32 @@ const YELLOW: Style = Style::new()
     .bold();
 const DIM: Style = Style::new().effects(Effects::DIMMED);
 
-/// What the reporter does with each line.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// What the reporter does with each line, and what it keeps to do it.
 enum Layout {
     /// Prefix every line, with a spinner for each running task.
-    Stream,
+    Stream {
+        /// The spinner row of each task, while the task runs.
+        spinners: Vec<Option<ProgressBar>>,
+        /// How every spinner row is drawn.
+        style: ProgressStyle,
+    },
     /// Collect a task and print it behind status lines when it ends.
-    Grouped,
+    Grouped {
+        /// The rendered output of each task, until the task ends.
+        buffers: Vec<Vec<u8>>,
+    },
     /// Relay both streams with no change, for a workflow of one task.
     Plain,
+}
+
+impl Layout {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Stream { .. } => "Stream",
+            Self::Grouped { .. } => "Grouped",
+            Self::Plain => "Plain",
+        }
+    }
 }
 
 /// Which stream a write belongs on.
@@ -145,9 +162,6 @@ pub(crate) struct Reporter {
     layout: Layout,
     labels: Labels,
     terminal: Arc<Terminal>,
-    spinner: ProgressStyle,
-    spinners: Vec<Option<ProgressBar>>,
-    buffers: Vec<Vec<u8>>,
     tally: RunTally,
 }
 
@@ -155,7 +169,7 @@ impl std::fmt::Debug for Reporter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Reporter")
-            .field("layout", &self.layout)
+            .field("layout", &self.layout.name())
             .field("labels", &self.labels)
             .finish_non_exhaustive()
     }
@@ -172,7 +186,7 @@ impl Reporter {
     ) -> Self {
         let labels = target.labels();
         let layout = resolve_layout(render.output, labels.len());
-        let bars = (layout == Layout::Stream)
+        let bars = matches!(layout, Layout::Stream { .. })
             .then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr()));
         let choice = color_choice(render.color);
         let (log, failure) = OpenLog::open(settings, target, working_directory);
@@ -187,18 +201,15 @@ impl Reporter {
             started: Instant::now(),
             timestamps: render.timestamps,
         });
-        // A plain run relays the bytes of its task, so Beez keeps quiet there.
-        if layout != Layout::Plain {
-            announce(&terminal, directory.as_deref(), failure);
-        }
+        // A plain run relays the bytes of its task, so it names no run
+        // directory. A log that could not open is still worth a warning.
+        let announced = directory.filter(|_| !matches!(layout, Layout::Plain));
+        announce(&terminal, announced.as_deref(), failure, working_directory);
 
         Self {
             layout,
-            spinners: vec![None; labels.len()],
-            buffers: vec![Vec::new(); labels.len()],
             labels,
             terminal,
-            spinner: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
             tally: RunTally::default(),
         }
     }
@@ -211,6 +222,9 @@ impl Reporter {
         let terminal = Arc::clone(&self.terminal);
         Box::new(move |message| {
             terminal.record("Sandbox", message);
+            // Shown in a plain run too: the line goes to standard error, so
+            // the task's standard output keeps its exact bytes, and a denied
+            // connection must never pass in silence.
             let _ = terminal.line(Target::Err, &styled_status(YELLOW, "Sandbox", message));
         })
     }
@@ -220,34 +234,46 @@ impl Reporter {
         let index = event.position();
         self.tally.record(event);
 
-        match event {
-            RunEvent::Output { stream, line, .. } => return self.output(index, *stream, line),
-            // A plain run relays the captured streams of its one task instead.
-            RunEvent::Finished { output, .. } if self.layout == Layout::Plain => {
-                return self.terminal.captured(output);
+        if let RunEvent::Output { stream, line, .. } = event {
+            return self.output(index, *stream, line);
+        }
+        match &mut self.layout {
+            Layout::Plain => {
+                // A plain run relays the captured streams of its one task,
+                // and keeps its status lines to the log.
+                return match event {
+                    RunEvent::Finished { output, .. } => self.terminal.captured(output),
+                    _ => Ok(()),
+                };
             }
             // A stream layout shows a running task as a spinner row, not a line.
-            RunEvent::Started { .. } if self.layout == Layout::Stream => {
-                self.start_spinner(index);
-                return Ok(());
+            Layout::Stream { spinners, style } => {
+                if matches!(event, RunEvent::Started { .. }) {
+                    let prefix = prefix(&self.labels, index);
+                    start_spinner(&self.terminal, spinners, style, index, prefix);
+                    return Ok(());
+                }
+                // Every other event ends the task, so its spinner goes.
+                stop_spinner(&self.terminal, spinners, index);
             }
-            RunEvent::Started { .. } => {}
-            // Every other event ends the task, so its spinner goes.
-            _ => self.stop_spinner(index),
-        }
-        // The status line closes the task, so its collected output comes first.
-        if self.layout == Layout::Grouped && matches!(event, RunEvent::Finished { .. }) {
-            let buffer = self.buffers.get(index).cloned().unwrap_or_default();
-            self.terminal.bytes(Target::Out, &buffer)?;
+            // The status line closes the task, so its collected output comes
+            // first. A task finishes once, so its buffer goes with it.
+            Layout::Grouped { buffers } => {
+                if matches!(event, RunEvent::Finished { .. }) {
+                    let buffer = buffers.get_mut(index).map(std::mem::take);
+                    self.terminal
+                        .bytes(Target::Out, &buffer.unwrap_or_default())?;
+                }
+            }
         }
 
-        let Some((verb, message)) =
+        let Some((state, message)) =
             TaskOutcome::of(event).map(|outcome| outcome.status(&self.labels.get(index)))
         else {
             return Ok(());
         };
         // The event wrote this line to the run log already.
-        self.show(style_of(verb), verb, &message)
+        self.show(style_of(state), state.verb(), &message)
     }
 
     /// Prints the closing summary of a decorated run, then writes its record.
@@ -266,36 +292,23 @@ impl Reporter {
         self.show(style, "Summary", &message)
     }
 
-    /// Shows one running task as a spinner row of its own.
-    fn start_spinner(&mut self, index: usize) {
-        let prefix = self.prefix(index);
-        if let (Some(bars), Some(slot)) = (&self.terminal.bars, self.spinners.get_mut(index)) {
-            let bar = bars.add(ProgressBar::new_spinner().with_style(self.spinner.clone()));
-            bar.set_prefix(prefix);
-            bar.set_message("running");
-            // Without a steady tick the spinner moves only when a line arrives.
-            bar.enable_steady_tick(Duration::from_millis(80));
-            *slot = Some(bar);
-        }
-    }
-
     fn output(&mut self, index: usize, stream: OutputStream, line: &[u8]) -> io::Result<()> {
-        match self.layout {
+        match &mut self.layout {
             // Plain relays the captured streams once the task ends.
             Layout::Plain => Ok(()),
-            Layout::Grouped => {
-                let rendered = self.grouped_line(line);
-                if let Some(buffer) = self.buffers.get_mut(index) {
+            Layout::Grouped { buffers } => {
+                let rendered = grouped_line(&self.terminal, line);
+                if let Some(buffer) = buffers.get_mut(index) {
                     buffer.extend_from_slice(rendered.as_bytes());
                 }
                 Ok(())
             }
-            Layout::Stream => {
+            Layout::Stream { .. } => {
                 // Unstyled, so a task keeps the colours it chose.
                 let text = String::from_utf8_lossy(trim_newline(line));
                 let line = format!(
                     "{} {} {text}",
-                    self.prefix(index),
+                    prefix(&self.labels, index),
                     paint(DIM, stream_mark(stream))
                 );
                 self.terminal.line(Target::Out, &line)
@@ -303,48 +316,67 @@ impl Reporter {
         }
     }
 
-    /// Renders one line for its task's block, with its own newline. A blank
-    /// line stays blank, to keep trailing spaces out of a log.
-    fn grouped_line(&self, line: &[u8]) -> String {
-        if is_blank(line) {
-            return "\n".to_owned();
-        }
-        let text = String::from_utf8_lossy(trim_newline(line));
-        format!("{}{BLOCK_INDENT}{text}\n", self.terminal.stamp())
-    }
-
     /// Shows one status line on the terminal, for a line the log already holds.
     ///
     /// A plain run keeps its terminal free of Beez's lines, so there the line
     /// reaches the log alone.
     fn show(&self, style: Style, verb: &str, message: &str) -> io::Result<()> {
-        if self.layout == Layout::Plain {
+        if matches!(self.layout, Layout::Plain) {
             return Ok(());
         }
 
         self.terminal
             .line(Target::Err, &styled_status(style, verb, message))
     }
+}
 
-    fn stop_spinner(&mut self, index: usize) {
-        if let Some(slot) = self.spinners.get_mut(index)
-            && let Some(bar) = slot.take()
-        {
-            bar.finish_and_clear();
-            if let Some(bars) = &self.terminal.bars {
-                bars.remove(&bar);
-            }
+/// Shows one running task as a spinner row of its own.
+fn start_spinner(
+    terminal: &Terminal,
+    spinners: &mut [Option<ProgressBar>],
+    style: &ProgressStyle,
+    index: usize,
+    prefix: String,
+) {
+    if let (Some(bars), Some(slot)) = (&terminal.bars, spinners.get_mut(index)) {
+        let bar = bars.add(ProgressBar::new_spinner().with_style(style.clone()));
+        bar.set_prefix(prefix);
+        bar.set_message("running");
+        // Without a steady tick the spinner moves only when a line arrives.
+        bar.enable_steady_tick(Duration::from_millis(80));
+        *slot = Some(bar);
+    }
+}
+
+fn stop_spinner(terminal: &Terminal, spinners: &mut [Option<ProgressBar>], index: usize) {
+    if let Some(slot) = spinners.get_mut(index)
+        && let Some(bar) = slot.take()
+    {
+        bar.finish_and_clear();
+        if let Some(bars) = &terminal.bars {
+            bars.remove(&bar);
         }
     }
+}
 
-    fn prefix(&self, index: usize) -> String {
-        let width = self.labels.width();
-        let color = *PALETTE
-            .get(index % PALETTE.len())
-            .unwrap_or(&AnsiColor::Cyan);
-        let style = Style::new().fg_color(Some(Color::Ansi(color))).bold();
-        paint(style, &format!("{:<width$}", self.labels.get(index)))
+/// Renders one line for its task's block, with its own newline. A blank
+/// line stays blank, to keep trailing spaces out of a log.
+fn grouped_line(terminal: &Terminal, line: &[u8]) -> String {
+    if is_blank(line) {
+        return "\n".to_owned();
     }
+    let text = String::from_utf8_lossy(trim_newline(line));
+    format!("{}{BLOCK_INDENT}{text}\n", terminal.stamp())
+}
+
+/// The label of one task, padded to the widest and in the task's colour.
+fn prefix(labels: &Labels, index: usize) -> String {
+    let width = labels.width();
+    let color = *PALETTE
+        .get(index % PALETTE.len())
+        .unwrap_or(&AnsiColor::Cyan);
+    let style = Style::new().fg_color(Some(Color::Ansi(color))).bold();
+    paint(style, &format!("{:<width$}", labels.get(index)))
 }
 
 impl Terminal {
@@ -398,7 +430,7 @@ impl Terminal {
         self.log(|log| log.status(verb, message));
     }
 
-    /// Writes to the run log, and warns once when the log closes.
+    /// Writes to the run log, and warns once on its first failed write.
     fn log(&self, action: impl FnOnce(&mut RunRecorder) -> io::Result<()>) {
         let Ok(mut log) = self.log.lock() else {
             return;
@@ -445,11 +477,16 @@ impl Streams {
 }
 
 /// Names the directory of the run log, or why there is none.
-fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<String>) {
+fn announce(
+    terminal: &Terminal,
+    directory: Option<&Path>,
+    failure: Option<String>,
+    working_directory: &Path,
+) {
     if let Some(directory) = directory {
         let _ = terminal.line(
             Target::Err,
-            &styled_status(CYAN, "Logging", &display(directory)),
+            &styled_status(CYAN, "Logging", &display(directory, working_directory)),
         );
     }
     if let Some(failure) = failure {
@@ -457,11 +494,11 @@ fn announce(terminal: &Terminal, directory: Option<&Path>, failure: Option<Strin
     }
 }
 
-/// A run directory as it is written in a status line.
-fn display(directory: &Path) -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|working_directory| directory.strip_prefix(working_directory).ok())
+/// A run directory as it is written in a status line, relative to the
+/// working directory when it lies inside it.
+fn display(directory: &Path, working_directory: &Path) -> String {
+    directory
+        .strip_prefix(working_directory)
         .unwrap_or(directory)
         .display()
         .to_string()
@@ -472,13 +509,13 @@ fn is_blank(line: &[u8]) -> bool {
         .all(|byte| matches!(byte, b'\n' | b'\r' | b' ' | b'\t'))
 }
 
-/// The colour of one status word an event carries.
-fn style_of(verb: &str) -> Style {
-    match verb {
-        "Finished" => GREEN,
-        "Failed" => RED,
-        "Blocked" => YELLOW,
-        _ => CYAN,
+/// The colour of the status word for one task state.
+fn style_of(state: TaskState) -> Style {
+    match state {
+        TaskState::Finished => GREEN,
+        TaskState::Failed => RED,
+        TaskState::Blocked => YELLOW,
+        TaskState::Pending | TaskState::Running => CYAN,
     }
 }
 
@@ -504,8 +541,13 @@ fn resolve_layout(mode: OutputMode, tasks: usize) -> Layout {
         return Layout::Plain;
     }
     match mode {
-        OutputMode::Stream => Layout::Stream,
-        OutputMode::Grouped => Layout::Grouped,
+        OutputMode::Stream => Layout::Stream {
+            spinners: vec![None; tasks],
+            style: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
+        },
+        OutputMode::Grouped => Layout::Grouped {
+            buffers: vec![Vec::new(); tasks],
+        },
     }
 }
 

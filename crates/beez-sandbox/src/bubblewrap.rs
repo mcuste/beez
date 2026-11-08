@@ -1,23 +1,32 @@
 //! Linux backend: bubblewrap namespaces with the proxies bridged over Unix sockets.
 
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::net::TcpStream;
+use std::num::NonZeroU16;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::init::relay_argument;
-use crate::proxy::loopback;
-use crate::resolve::ResolvedSandbox;
+use crate::mask_marker::{MARKER_PREFIX, marker_owner};
+use crate::proxy::{ProxyPorts, loopback};
+use crate::relay::Relay;
+use crate::resolve::{Execution, PathSet, ResolvedSandbox};
+use crate::sandbox::Wrapped;
 use crate::server::{Server, UnixPathListener, forward};
 
 /// Loopback port of the HTTP proxy inside the sandbox.
-pub(crate) const HTTP_PORT: u16 = 3128;
+const HTTP_PORT: NonZeroU16 = NonZeroU16::new(3128).unwrap();
 /// Loopback port of the SOCKS5 proxy inside the sandbox.
-pub(crate) const SOCKS_PORT: u16 = 1080;
+const SOCKS_PORT: NonZeroU16 = NonZeroU16::new(1080).unwrap();
+
+/// Loopback ports of the proxies inside the sandbox.
+const SANDBOX_PORTS: ProxyPorts = ProxyPorts {
+    http: HTTP_PORT.get(),
+    socks: SOCKS_PORT.get(),
+};
 
 static BRIDGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -45,7 +54,7 @@ const KEPT_RUN_PATHS: [&str; 4] = [
 /// The sandbox has no network namespace of its own, so these sockets are the
 /// only way out. They are bind-mounted into the sandbox.
 #[derive(Debug)]
-pub(crate) struct Bridge {
+struct Bridge {
     // The servers stop before the guard removes the sockets they listen on.
     _servers: [Server; 2],
     directory: SocketDirectory,
@@ -55,7 +64,7 @@ pub(crate) struct Bridge {
 }
 
 impl Bridge {
-    pub(crate) fn start(http_port: u16, socks_port: u16) -> io::Result<Self> {
+    fn start(ports: ProxyPorts) -> io::Result<Self> {
         let sequence = BRIDGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("beez-sandbox-{}-{sequence}", std::process::id()));
@@ -66,8 +75,8 @@ impl Bridge {
         fs::create_dir(&empty)?;
         let http_socket = directory.path().join("http.sock");
         let socks_socket = directory.path().join("socks.sock");
-        let http = forward_socket(&http_socket, http_port)?;
-        let socks = forward_socket(&socks_socket, socks_port)?;
+        let http = forward_socket(&http_socket, ports.http)?;
+        let socks = forward_socket(&socks_socket, ports.socks)?;
 
         Ok(Self {
             _servers: [http, socks],
@@ -109,8 +118,34 @@ fn forward_socket(socket: &Path, port: u16) -> io::Result<Server> {
     }))
 }
 
+/// What a run keeps alive until its program has ended.
+#[derive(Debug)]
+pub(crate) struct Guard {
+    // The bridge goes first, then the mask directories are given back.
+    _bridge: Bridge,
+    _masks: HeldMasks,
+}
+
+/// Wraps the program in `bwrap` with the proxies bridged into the sandbox.
+pub(crate) fn wrap(
+    resolved: &ResolvedSandbox,
+    ports: ProxyPorts,
+    arguments: &[OsString],
+) -> io::Result<Wrapped> {
+    let bridge = Bridge::start(ports)?;
+    let (command, masks) = command(resolved, &bridge, arguments)?;
+    Ok(Wrapped {
+        command,
+        ports: SANDBOX_PORTS,
+        guard: Guard {
+            _bridge: bridge,
+            _masks: masks,
+        },
+    })
+}
+
 /// Wraps the program in `bwrap`, entered through `beez sandbox-init`.
-pub(crate) fn command(
+fn command(
     resolved: &ResolvedSandbox,
     bridge: &Bridge,
     arguments: &[OsString],
@@ -129,9 +164,6 @@ pub(crate) fn command(
     Ok((command, plan.hold()))
 }
 
-/// Marks a mask directory as needed by a running sandbox.
-const MARKER_PREFIX: &str = ".beez-mask-";
-
 const MARK_ATTEMPTS: u32 = 4;
 
 static MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -140,14 +172,32 @@ static MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 ///
 /// `bwrap` creates a mount point that is missing, inside a directory bound
 /// from the host, so it would stay there after the sandbox ends.
+///
+/// The plan holds the mask lock from the moment it looks at the paths until
+/// [`MaskPlan::hold`] has marked the directories it needs.
 #[derive(Debug)]
 struct MaskPlan {
     /// Each masked path with the directories it needs, deepest first.
     masks: Vec<(PathBuf, Vec<PathBuf>)>,
+    /// The writable directories whose lock this plan holds.
+    roots: Vec<PathBuf>,
+    _lock: MaskLock,
 }
 
 impl MaskPlan {
     fn of(resolved: &ResolvedSandbox) -> Self {
+        let roots = resolved
+            .write_allow
+            .iter()
+            .filter(|root| {
+                resolved
+                    .write_deny
+                    .iter()
+                    .any(|path| path.starts_with(root) && path != *root)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let lock = MaskLock::acquire(&roots);
         let masks = resolved
             .write_deny
             .iter()
@@ -156,7 +206,11 @@ impl MaskPlan {
             .filter(|(_, directories)| !directories.is_empty())
             .collect();
 
-        Self { masks }
+        Self {
+            masks,
+            roots,
+            _lock: lock,
+        }
     }
 
     /// True when an empty directory masks `path`.
@@ -186,6 +240,42 @@ impl MaskPlan {
         HeldMasks {
             markers,
             directories,
+            roots: self.roots,
+        }
+    }
+}
+
+/// Keeps the mask work of runs that share a writable directory apart.
+///
+/// A mask directory that exists without a marker looks like real content. A
+/// run that plans its masks while another run is between creating a directory
+/// and marking it, or between removing its marker and the directory, would
+/// bind that directory onto itself and fail when it goes away. So planning,
+/// marking, and giving masks back happen under an exclusive `flock` on every
+/// writable directory that holds a denied path. The lock is taken on the
+/// directory itself, so it leaves no file behind, and it is let go before the
+/// task starts, so sandboxed tasks still run side by side.
+///
+/// Runs take the locks in path order, so no two runs wait on each other in a
+/// cycle. A directory that cannot be opened or locked stays unlocked.
+#[derive(Debug)]
+struct MaskLock {
+    /// The locked directories; closing them lets the locks go.
+    _directories: Vec<File>,
+}
+
+impl MaskLock {
+    fn acquire(roots: &[PathBuf]) -> Self {
+        let directories = roots
+            .iter()
+            .filter_map(|root| {
+                let directory = File::open(root).ok()?;
+                directory.lock().ok()?;
+                Some(directory)
+            })
+            .collect();
+        Self {
+            _directories: directories,
         }
     }
 }
@@ -253,13 +343,13 @@ fn mark_in_use(directories: &[PathBuf], name: &str) -> Option<Vec<PathBuf>> {
 /// Removes the markers of runs that ended without giving their masks back.
 fn remove_dead_markers(directory: &Path) {
     for marker in markers(directory) {
-        let owner = marker
+        // A marker without a process ID belongs to no live run.
+        let live = marker
             .file_name()
             .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_prefix(MARKER_PREFIX))
-            .and_then(|name| name.split('-').next())
-            .unwrap_or_default();
-        if !Path::new("/proc").join(owner).exists() {
+            .and_then(marker_owner)
+            .is_some_and(|owner| Path::new("/proc").join(owner.to_string()).exists());
+        if !live {
             let _ = fs::remove_file(&marker);
         }
     }
@@ -267,19 +357,23 @@ fn remove_dead_markers(directory: &Path) {
 
 /// Gives back the mask directories of one run when it ends.
 #[derive(Debug)]
-pub(crate) struct HeldMasks {
+struct HeldMasks {
     markers: Vec<PathBuf>,
     directories: Vec<PathBuf>,
+    /// The writable directories to lock while giving the masks back.
+    roots: Vec<PathBuf>,
 }
 
 impl Drop for HeldMasks {
     fn drop(&mut self) {
+        let _lock = MaskLock::acquire(&self.roots);
         for marker in &self.markers {
             let _ = fs::remove_file(marker);
         }
         for directory in &self.directories {
-            // Only an empty directory goes away: another run's marker, or
-            // any real content, keeps it.
+            remove_dead_markers(directory);
+            // Only an empty directory goes away: another live run's marker,
+            // or any real content, keeps it.
             let _ = fs::remove_dir(directory);
         }
     }
@@ -321,16 +415,21 @@ fn sandbox_init(
     program_arguments: &[OsString],
 ) -> Vec<OsString> {
     let mut command = vec![beez.into(), OsString::from("sandbox-init")];
-    for (port, socket) in [
-        (HTTP_PORT, &bridge.http_socket),
-        (SOCKS_PORT, &bridge.socks_socket),
+    for relay in [
+        Relay::new(HTTP_PORT, bridge.http_socket.clone()),
+        Relay::new(SOCKS_PORT, bridge.socks_socket.clone()),
     ] {
         command.push(OsString::from("--relay"));
-        command.push(relay_argument(port, socket));
+        command.push(OsString::from(&relay));
     }
-    for path in resolved.executables.iter().flatten() {
-        command.push(OsString::from("--exec"));
-        command.push(path.into());
+    match &resolved.execution {
+        Execution::Unrestricted => command.push(OsString::from("--unrestricted-exec")),
+        Execution::Only(allowlist) => {
+            for path in allowlist {
+                command.push(OsString::from("--exec"));
+                command.push(path.into());
+            }
+        }
     }
     command.push(OsString::from("--"));
     command.push(resolved.program().into());
@@ -427,7 +526,7 @@ impl Bwrap {
 
     /// Hides denied directories behind an empty tmpfs and denied files behind
     /// `/dev/null`.
-    fn read_denies(mut self, paths: &[PathBuf]) -> Self {
+    fn read_denies(mut self, paths: &PathSet) -> Self {
         for path in paths {
             self = if path.is_dir() {
                 self.tmpfs(path)
@@ -498,18 +597,21 @@ mod tests {
 
     use beez_test_support::{TemporaryDirectory, text};
 
-    use super::{Bridge, Bwrap, HTTP_PORT, MaskPlan, SOCKS_PORT, bwrap_arguments};
-    use crate::resolve::ResolvedSandbox;
+    use super::{
+        Bridge, Bwrap, MARKER_PREFIX, MaskPlan, SANDBOX_PORTS, bwrap_arguments, remove_dead_markers,
+    };
+    use crate::proxy::ProxyPorts;
+    use crate::resolve::{ExecAllowlist, Execution, PathSet, ResolvedSandbox};
 
     /// A policy that may write `work` and must not write `.git/hooks` in it.
     fn resolved(work: &Path) -> ResolvedSandbox {
         ResolvedSandbox {
             allowed_domains: Vec::new(),
             localhost: false,
-            read_deny: Vec::new(),
-            write_allow: vec![work.to_path_buf()],
-            write_deny: vec![work.join(".git/hooks")],
-            executables: None,
+            read_deny: PathSet::default(),
+            write_allow: PathSet::from([work.to_path_buf()]),
+            write_deny: PathSet::from([work.join(".git/hooks")]),
+            execution: Execution::Unrestricted,
             environment: Vec::new(),
             working_directory: work.to_path_buf(),
             program: PathBuf::from("/bin/bash"),
@@ -517,7 +619,7 @@ mod tests {
     }
 
     fn bridge() -> Bridge {
-        Bridge::start(0, 0).unwrap()
+        Bridge::start(ProxyPorts { http: 0, socks: 0 }).unwrap()
     }
 
     fn arguments(resolved: &ResolvedSandbox, bridge: &Bridge) -> Vec<String> {
@@ -554,7 +656,7 @@ mod tests {
 
         let sut = arguments(&resolved(&work), &bridge);
 
-        let work = work.to_string_lossy().into_owned();
+        let work = text(&work);
         assert!(has_run(&sut, &["--bind", &work, &work]), "{sut:?}");
         let hooks = format!("{work}/.git/hooks");
         assert!(has_run(&sut, &["--ro-bind", &hooks, &hooks]), "{sut:?}");
@@ -601,8 +703,8 @@ mod tests {
 
         let sut = arguments(&resolved(&work), &bridge);
 
-        let empty = bridge.empty_directory().to_string_lossy().into_owned();
-        let hooks = format!("{}/.git/hooks", work.to_string_lossy());
+        let empty = text(bridge.empty_directory());
+        let hooks = format!("{}/.git/hooks", text(&work));
         assert!(has_run(&sut, &["--ro-bind", &empty, &hooks]), "{sut:?}");
     }
 
@@ -612,13 +714,13 @@ mod tests {
         let work = directory.join("work");
         fs::create_dir(&work).unwrap();
         let mut policy = resolved(&work);
-        policy.write_deny = vec![directory.join("elsewhere/.claude")];
+        policy.write_deny = PathSet::from([directory.join("elsewhere/.claude")]);
         let bridge = bridge();
 
         let sut = arguments(&policy, &bridge);
 
         let denied = directory.join("elsewhere/.claude");
-        let denied = denied.to_string_lossy().into_owned();
+        let denied = text(&denied);
         assert!(!sut.contains(&denied), "{sut:?}");
     }
 
@@ -628,7 +730,7 @@ mod tests {
         let work = directory.join("work");
         fs::create_dir(&work).unwrap();
         let mut writable_tmp = resolved(&work);
-        writable_tmp.write_allow.push(PathBuf::from("/tmp"));
+        writable_tmp.write_allow.extend([PathBuf::from("/tmp")]);
         let bridge = bridge();
 
         let sut = arguments(&writable_tmp, &bridge);
@@ -644,7 +746,7 @@ mod tests {
         let work = directory.join("work");
         fs::create_dir(&work).unwrap();
         let mut policy = resolved(&work);
-        policy.write_allow.push(PathBuf::from("/tmp"));
+        policy.write_allow.extend([PathBuf::from("/tmp")]);
         policy.program = PathBuf::from("/tmp/tools/claude");
         let bridge = bridge();
 
@@ -748,6 +850,61 @@ mod tests {
     }
 
     #[test]
+    fn masks_every_deny_while_other_runs_hold_and_give_back_the_same_masks() {
+        let directory = TemporaryDirectory::new("bwrap-mask-concurrent").unwrap();
+        let work = directory.join("work");
+        fs::create_dir(&work).unwrap();
+        let mut policy = resolved(&work);
+        policy.write_deny = (0..20)
+            .map(|index| work.join(format!(".deny-{index}/inner")))
+            .collect();
+
+        // Nothing in `work` is real content, so a deny that a run does not
+        // mask would be bound onto itself, and a mask directory another run
+        // removes before the sandbox starts makes `bwrap` fail.
+        let unmasked = std::thread::scope(|scope| {
+            let runs = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..200)
+                            .filter(|_| {
+                                let plan = MaskPlan::of(&policy);
+                                let unmasked =
+                                    policy.write_deny.iter().any(|path| !plan.covers(path));
+                                drop(plan.hold());
+                                unmasked
+                            })
+                            .count()
+                    })
+                })
+                .collect::<Vec<_>>();
+            runs.into_iter()
+                .map(|run| run.join().unwrap())
+                .sum::<usize>()
+        });
+
+        assert_eq!(unmasked, 0);
+        assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn removes_markers_of_ended_runs_and_markers_without_an_owner() {
+        let directory = TemporaryDirectory::new("bwrap-dead-markers").unwrap();
+        let live = directory.join(&format!("{MARKER_PREFIX}{}-0", std::process::id()));
+        let nameless = directory.join(&format!("{MARKER_PREFIX}-0"));
+        let empty = directory.join(MARKER_PREFIX);
+        for marker in [&live, &nameless, &empty] {
+            fs::write(marker, b"").unwrap();
+        }
+
+        remove_dead_markers(directory.path());
+
+        assert!(live.exists());
+        assert!(!nameless.exists());
+        assert!(!empty.exists());
+    }
+
+    #[test]
     fn plans_no_mask_for_a_deny_that_exists_already() {
         let directory = TemporaryDirectory::new("bwrap-mask-existing").unwrap();
         let work = directory.join("work");
@@ -768,13 +925,13 @@ mod tests {
         fs::create_dir(&keys).unwrap();
         fs::write(&netrc, "secret").unwrap();
         let mut policy = resolved(&work);
-        policy.read_deny = vec![keys.clone(), netrc.clone()];
+        policy.read_deny = PathSet::from([keys.clone(), netrc.clone()]);
         let bridge = bridge();
 
         let sut = arguments(&policy, &bridge);
 
-        let keys = keys.to_string_lossy().into_owned();
-        let netrc = netrc.to_string_lossy().into_owned();
+        let keys = text(&keys);
+        let netrc = text(&netrc);
         assert!(has_run(&sut, &["--tmpfs", &keys]), "{sut:?}");
         assert!(
             has_run(&sut, &["--ro-bind", "/dev/null", &netrc]),
@@ -791,8 +948,8 @@ mod tests {
 
         let sut = arguments(&resolved(&work), &bridge);
 
-        let http = format!("{HTTP_PORT}={}", bridge.http_socket.to_string_lossy());
-        let socks = format!("{SOCKS_PORT}={}", bridge.socks_socket.to_string_lossy());
+        let http = format!("{}={}", SANDBOX_PORTS.http, text(&bridge.http_socket));
+        let socks = format!("{}={}", SANDBOX_PORTS.socks, text(&bridge.socks_socket));
         assert!(has_run(&sut, &["--relay", &http]), "{sut:?}");
         assert!(has_run(&sut, &["--relay", &socks]), "{sut:?}");
     }
@@ -803,15 +960,41 @@ mod tests {
         let work = directory.join("work");
         fs::create_dir(&work).unwrap();
         let mut restricted = resolved(&work);
-        restricted.executables = Some(vec![PathBuf::from("/bin/bash"), PathBuf::from("/usr/bin")]);
+        restricted.execution = Execution::Only(ExecAllowlist::new(
+            PathBuf::from("/bin/bash"),
+            [PathBuf::from("/usr/bin")],
+        ));
         let bridge = bridge();
 
         let unrestricted = arguments(&resolved(&work), &bridge);
         let sut = arguments(&restricted, &bridge);
 
         assert!(!unrestricted.iter().any(|argument| argument == "--exec"));
+        assert!(
+            unrestricted
+                .iter()
+                .any(|argument| argument == "--unrestricted-exec")
+        );
+        assert!(!sut.iter().any(|argument| argument == "--unrestricted-exec"));
         assert!(has_run(&sut, &["--exec", "/bin/bash"]), "{sut:?}");
         assert!(has_run(&sut, &["--exec", "/usr/bin"]), "{sut:?}");
+    }
+
+    #[test]
+    fn always_passes_an_exec_option_when_execution_is_restricted() {
+        let directory = TemporaryDirectory::new("bwrap-exec-program").unwrap();
+        let work = directory.join("work");
+        fs::create_dir(&work).unwrap();
+        let mut restricted = resolved(&work);
+        restricted.execution = Execution::Only(ExecAllowlist::new(PathBuf::from("/bin/bash"), []));
+        let bridge = bridge();
+
+        let sut = arguments(&restricted, &bridge);
+
+        let init = run_at(&sut, &["/usr/local/bin/beez", "sandbox-init"]).unwrap();
+        let program = run_at(&sut, &["--", "/bin/bash", "-c"]).unwrap();
+        let exec = run_at(&sut, &["--exec", "/bin/bash"]).unwrap();
+        assert!(init < exec && exec < program, "{sut:?}");
     }
 
     #[test]
@@ -832,6 +1015,61 @@ mod tests {
     }
 
     #[test]
+    fn mounts_nested_paths_parents_first_and_denies_after_writes() {
+        let directory = TemporaryDirectory::new("bwrap-nested-order").unwrap();
+        let work = directory.join("work");
+        let sub = work.join("sub");
+        for path in [work.join("b"), sub.join("a/hooks"), work.join("keys")] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(sub.join(".netrc"), "secret").unwrap();
+        let mut policy = resolved(&work);
+        policy.write_allow = PathSet::from([work.clone(), sub.clone()]);
+        policy.write_deny = PathSet::from([work.join("b"), sub.join("a/hooks")]);
+        policy.read_deny = PathSet::from([work.join("keys"), sub.join(".netrc")]);
+        let bridge = bridge();
+
+        let sut = arguments(&policy, &bridge);
+
+        let [work, sub, a, b, hooks, keys, netrc] = [
+            work.clone(),
+            sub.clone(),
+            sub.join("a"),
+            work.join("b"),
+            sub.join("a/hooks"),
+            work.join("keys"),
+            sub.join(".netrc"),
+        ]
+        .map(|path| text(&path));
+        let expected = [
+            "--bind",
+            &work,
+            &work,
+            "--bind",
+            &sub,
+            &sub,
+            "--bind",
+            &sub,
+            &sub,
+            "--bind",
+            &a,
+            &a,
+            "--ro-bind",
+            &b,
+            &b,
+            "--ro-bind",
+            &hooks,
+            &hooks,
+            "--tmpfs",
+            &keys,
+            "--ro-bind",
+            "/dev/null",
+            &netrc,
+        ];
+        assert!(has_run(&sut, &expected), "{sut:?}");
+    }
+
+    #[test]
     fn changes_to_the_working_directory() {
         let directory = TemporaryDirectory::new("bwrap-chdir").unwrap();
         let work = directory.join("work");
@@ -840,7 +1078,7 @@ mod tests {
 
         let sut = arguments(&resolved(&work), &bridge);
 
-        let work = work.to_string_lossy().into_owned();
+        let work = text(&work);
         assert!(has_run(&sut, &["--chdir", &work]), "{sut:?}");
     }
 }

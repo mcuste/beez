@@ -517,13 +517,9 @@ fn applies_a_workflow_sandbox_to_every_task_unless_a_task_opts_out() {
     let test = workflow.tasks().get(1).unwrap();
 
     let expected = SandboxPolicy::new(
-        NetworkPolicy::new(
-            None,
-            vec![DomainGroup::Github],
-            Vec::new(),
-            vec!["registry.internal:443".parse().unwrap()],
-            None,
-        ),
+        NetworkPolicy::default()
+            .with_groups(vec![DomainGroup::Github])
+            .with_allow(vec!["registry.internal:443".parse().unwrap()]),
         FilesystemPolicy::default(),
         None,
     );
@@ -586,20 +582,17 @@ fn adds_task_sandbox_sections_to_the_workflow_sections() {
     let task = workflow.tasks().first().unwrap();
 
     let expected = SandboxPolicy::new(
-        NetworkPolicy::new(
-            Some(false),
-            vec![DomainGroup::Github],
-            Vec::new(),
-            Vec::new(),
-            Some(true),
+        NetworkPolicy::default()
+            .with_defaults(Some(false))
+            .with_groups(vec![DomainGroup::Github])
+            .with_localhost(Some(true)),
+        FilesystemPolicy::default().with_write_allow(vec!["/data".parse().unwrap()]),
+        Some(
+            ExecutablePolicy::default()
+                .with_groups(vec![ExecutableGroup::Rust])
+                .with_disable(vec![ExecutableGroup::Net])
+                .with_allow(vec!["~/.local/share/mise".parse().unwrap()]),
         ),
-        FilesystemPolicy::new(None, Vec::new(), vec!["/data".parse().unwrap()], Vec::new()),
-        Some(ExecutablePolicy::new(
-            None,
-            vec![ExecutableGroup::Rust],
-            vec![ExecutableGroup::Net],
-            vec!["~/.local/share/mise".parse().unwrap()],
-        )),
     );
     assert_eq!(task.sandbox(), Some(&expected));
 }
@@ -619,12 +612,10 @@ fn loads_a_json_sandbox() {
 
     let expected = SandboxPolicy::new(
         NetworkPolicy::default(),
-        FilesystemPolicy::new(
-            Some(false),
-            vec!["~/.secrets".parse().unwrap()],
-            vec![".".parse().unwrap()],
-            Vec::new(),
-        ),
+        FilesystemPolicy::default()
+            .with_defaults(Some(false))
+            .with_read_deny(vec!["~/.secrets".parse().unwrap()])
+            .with_write_allow(vec![".".parse().unwrap()]),
         None,
     );
     assert_eq!(task.sandbox(), Some(&expected));
@@ -660,7 +651,7 @@ fn rejects_unknown_sandbox_groups_and_fields() {
     ));
     assert!(matches!(
         load(&unknown_field),
-        Err(ManifestError::Invalid(_))
+        Err(ManifestError::Invalid(error)) if error.contains("unknown field") && error.contains("domains")
     ));
     assert!(matches!(
         load(&bad_rule),
@@ -755,7 +746,7 @@ fn loads_a_manifest_without_a_schedule() {
         )
         .unwrap();
 
-    assert!(load(&manifest).unwrap().schedules().is_empty());
+    assert_eq!(load(&manifest).unwrap().schedules(), []);
 }
 
 #[test]
@@ -853,4 +844,119 @@ fn rejects_a_list_of_schedules_that_does_not_name_each_one() {
         load(&repeated),
         Err(ManifestError::Invalid(error)) if error == "schedule name nightly is used twice"
     ));
+}
+
+/// Loads a manifest and returns its error message, or `None` when it is not invalid.
+fn invalid_manifest_error(label: &str, file: &str, source: &str) -> Option<String> {
+    let directory = TemporaryDirectory::new(label).ok()?;
+    let manifest = directory.write(file, source).ok()?;
+    match load(&manifest) {
+        Err(ManifestError::Invalid(error)) => Some(error),
+        _ => None,
+    }
+}
+
+/// Asserts the error names `problem` rather than a generic shape mismatch.
+fn assert_names_the_problem(error: &str, problems: &[&str]) {
+    for problem in problems {
+        assert!(error.contains(problem), "{error:?} lacks {problem:?}");
+    }
+    assert!(!error.contains("did not match any variant"), "{error:?}");
+}
+
+#[test]
+fn reports_the_specific_mistake_inside_a_sandbox_table() {
+    let yaml_unknown = invalid_manifest_error(
+        "manifest-sandbox-colour-yaml",
+        "workflow.yaml",
+        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      colour: red\n",
+    )
+    .unwrap();
+    let json_unknown = invalid_manifest_error(
+        "manifest-sandbox-colour-json",
+        "workflow.json",
+        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"colour":"red"}}]}"#,
+    )
+    .unwrap();
+    let yaml_wrong_type = invalid_manifest_error(
+        "manifest-sandbox-type-yaml",
+        "workflow.yaml",
+        "tasks:\n  - id: test\n    command: [cargo, test]\n    sandbox:\n      network:\n        localhost: [yes]\n",
+    )
+    .unwrap();
+    let json_wrong_type = invalid_manifest_error(
+        "manifest-sandbox-type-json",
+        "workflow.json",
+        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":{"network":{"localhost":"maybe"}}}]}"#,
+    )
+    .unwrap();
+    let json_wrong_shape = invalid_manifest_error(
+        "manifest-sandbox-shape-json",
+        "workflow.json",
+        r#"{"tasks":[{"id":"test","command":["cargo","test"],"sandbox":"on"}]}"#,
+    )
+    .unwrap();
+
+    assert_names_the_problem(&yaml_unknown, &["unknown field", "colour"]);
+    assert_names_the_problem(&json_unknown, &["unknown field", "colour"]);
+    assert_names_the_problem(&yaml_wrong_type, &["localhost", "expected bool"]);
+    assert_names_the_problem(&json_wrong_type, &["invalid type", "maybe"]);
+    assert_names_the_problem(&json_wrong_shape, &["true, false, or a sandbox table"]);
+}
+
+#[test]
+fn reports_the_specific_mistake_inside_a_schedule_table() {
+    let yaml_unknown = invalid_manifest_error(
+        "manifest-schedule-colour-yaml",
+        "workflow.yaml",
+        "schedule:\n  cron: \"0 3 * * *\"\n  colour: red\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+    let json_unknown = invalid_manifest_error(
+        "manifest-schedule-colour-json",
+        "workflow.json",
+        r#"{"schedule":{"cron":"0 3 * * *","colour":"red"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+    let yaml_overlap = invalid_manifest_error(
+        "manifest-schedule-overlap-yaml",
+        "workflow.yaml",
+        "schedule:\n  cron: \"0 3 * * *\"\n  on_overlap: sometimes\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+    let json_cron_type = invalid_manifest_error(
+        "manifest-schedule-cron-type-json",
+        "workflow.json",
+        r#"{"schedule":{"cron":5},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+    let yaml_list_entry = invalid_manifest_error(
+        "manifest-schedule-list-yaml",
+        "workflow.yaml",
+        "schedule:\n  - name: early\n    cron: \"0 3 * * *\"\n  - name: late\n    cron: \"0 5 * * *\"\n    on_overlap: sometimes\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+    )
+    .unwrap();
+    let json_list_entry = invalid_manifest_error(
+        "manifest-schedule-list-json",
+        "workflow.json",
+        r#"{"schedule":[{"name":"early","cron":"0 3 * * *"},{"name":"late","cron":"0 5 * * *","colour":"red"}],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+    let json_wrong_shape = invalid_manifest_error(
+        "manifest-schedule-shape-json",
+        "workflow.json",
+        r#"{"schedule":"0 3 * * *","tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    )
+    .unwrap();
+
+    assert_names_the_problem(&yaml_unknown, &["unknown field", "colour"]);
+    assert_names_the_problem(&json_unknown, &["unknown field", "colour"]);
+    assert_names_the_problem(&yaml_overlap, &["unknown variant", "sometimes"]);
+    assert_names_the_problem(&json_cron_type, &["invalid type: integer `5`"]);
+    assert_names_the_problem(&yaml_list_entry, &["unknown variant", "sometimes"]);
+    assert_names_the_problem(&json_list_entry, &["unknown field", "colour"]);
+    assert_names_the_problem(
+        &json_wrong_shape,
+        &["a schedule table or a list of schedule tables"],
+    );
 }

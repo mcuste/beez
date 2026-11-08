@@ -9,10 +9,10 @@ pub fn loopback_listener() -> io::Result<(TcpListener, u16)> {
 }
 
 /// A loopback listener that never accepts, to check that nothing reaches it.
-pub fn unused_origin() -> io::Result<(u16, TcpListener)> {
+pub fn unused_origin() -> io::Result<(TcpListener, u16)> {
     let (listener, port) = loopback_listener()?;
     listener.set_nonblocking(true)?;
-    Ok((port, listener))
+    Ok((listener, port))
 }
 
 /// Checks that nothing connected to `origin`.

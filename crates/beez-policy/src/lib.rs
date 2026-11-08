@@ -25,4 +25,4 @@ pub(crate) use parse::parse_valid;
 pub use path::{SandboxPath, SandboxPathError};
 pub use profile::HarnessProfile;
 pub use sandbox::SandboxPolicy;
-pub(crate) use selection::{GroupSelection, extend};
+pub(crate) use selection::{GroupSelection, Override, extend};

@@ -5,5 +5,5 @@ mod template;
 mod workflow;
 
 pub use task::{Task, TaskDefinition, TaskId, TaskIdError, TaskIndex, TaskRequest};
-pub use template::{OutputReference, TaskOutput, Template, TemplateError};
+pub use template::{OutputReference, TaskOutput, TemplateError};
 pub use workflow::{Completion, ExecutionError, Workflow, WorkflowError, WorkflowExecution};

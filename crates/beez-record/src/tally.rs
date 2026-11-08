@@ -5,7 +5,7 @@ use std::time::Duration;
 use beez_runner::RunEvent;
 
 use crate::format::{counts, seconds};
-use crate::outcome::TaskOutcome;
+use crate::outcome::{TaskOutcome, TaskState};
 
 /// How many tasks of one run passed, failed and never ran.
 ///
@@ -27,12 +27,12 @@ impl RunTally {
     }
 
     /// Counts one outcome. An outcome that does not end a task changes nothing.
-    pub fn add(&mut self, outcome: TaskOutcome) {
-        match outcome {
-            TaskOutcome::Finished { .. } if outcome.succeeded() => self.passed += 1,
-            TaskOutcome::Finished { .. } | TaskOutcome::Failed { .. } => self.failed += 1,
-            TaskOutcome::Blocked => self.blocked += 1,
-            TaskOutcome::Started => {}
+    pub(crate) fn add(&mut self, outcome: TaskOutcome) {
+        match outcome.state() {
+            TaskState::Finished => self.passed += 1,
+            TaskState::Failed => self.failed += 1,
+            TaskState::Blocked => self.blocked += 1,
+            TaskState::Pending | TaskState::Running => {}
         }
     }
 

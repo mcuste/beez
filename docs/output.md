@@ -42,7 +42,11 @@ killed loses what it had collected. Prefer `stream` in CI.
 
 A workflow with one task, `beez run command`, and the single-prompt harness
 commands pass the output through unchanged. Use one of those when a later step
-needs the exact bytes.
+needs the exact bytes. Standard output holds exactly what the task wrote to
+standard output. Standard error holds what the task wrote to standard error.
+The only lines Beez adds there are a `Warning` about the saved files, a
+`Sandbox` note, and the error when a run cannot start. There is no `Logging`,
+`Running`, `Finished`, or `Summary` line. Those lines still reach the run log.
 
 Beez keeps its own lines apart from task output:
 

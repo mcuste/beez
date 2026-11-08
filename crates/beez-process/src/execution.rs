@@ -1,6 +1,3 @@
-use std::ffi::OsString;
-use std::path::PathBuf;
-
 use beez_policy::HeadlessHarness;
 
 use crate::harness::HarnessCall;
@@ -25,10 +22,10 @@ impl ExecutionRequest {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
+    pub(crate) fn into_process_call(self) -> ProcessCall {
         match self {
-            Self::Harness(call) => call.into_parts(),
-            Self::Command(call) => call.into_parts(),
+            Self::Harness(call) => call.into(),
+            Self::Command(call) => call,
         }
     }
 }

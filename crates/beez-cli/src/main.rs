@@ -1,11 +1,9 @@
 //! Beez's user-facing command-line interface.
 
 use std::ffi::OsString;
-use std::io;
-use std::net::SocketAddr;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
-use beez_daemon::{DaemonPaths, Request, Response};
 use beez_manifest::load;
 use beez_policy::{
     DomainRule, FilesystemPolicy, HarnessOptions, HeadlessHarness, NetworkPolicy, SandboxPath,
@@ -17,9 +15,12 @@ use beez_runner::Runner;
 use clap::{Args, Parser, Subcommand};
 
 mod report;
+mod sandbox;
 mod schedule;
 
 use report::{RenderOptions, Reporter};
+use sandbox::{SandboxInit, SandboxRelay};
+use schedule::{DaemonCommand, ScheduleCommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "beez", version)]
@@ -31,23 +32,26 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run a supported coding harness, workflow, or direct process.
-    Run(Run),
+    Run {
+        #[command(subcommand)]
+        command: RunCommand,
+    },
     /// Run workflows on the schedules their manifests declare.
-    Daemon(DaemonArgs),
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     /// Manage the manifests the daemon watches.
-    Schedule(ScheduleArgs),
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
     /// Internal: first process inside a Linux sandbox.
     #[command(hide = true)]
     SandboxInit(SandboxInit),
     /// Internal: forwards loopback connections to a Unix socket inside a Linux sandbox.
     #[command(hide = true)]
     SandboxRelay(SandboxRelay),
-}
-
-#[derive(Debug, Args)]
-struct Run {
-    #[command(subcommand)]
-    command: RunCommand,
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,94 +68,6 @@ enum RunCommand {
     Codex(HarnessRun),
     /// Run a program without a shell.
     Command(Process),
-}
-
-#[derive(Debug, Args)]
-struct DaemonArgs {
-    #[command(subcommand)]
-    command: DaemonCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum DaemonCommand {
-    /// Run the daemon in this terminal.
-    Run(DaemonRun),
-    /// Start the daemon in the background.
-    Start(DaemonRun),
-    /// Stop the daemon once its running runs end.
-    Stop(RootArgs),
-    /// Report the daemon and every job it holds.
-    Status(RootArgs),
-    /// Read every watched manifest again.
-    Reload(RootArgs),
-}
-
-#[derive(Debug, Args)]
-struct DaemonRun {
-    #[command(flatten)]
-    root: RootArgs,
-    /// How many runs the daemon starts at the same time.
-    #[arg(long, value_name = "COUNT", default_value_t = beez_daemon::DEFAULT_RUN_LIMIT)]
-    limit: usize,
-    /// How many runs to keep in the Beez root. Zero keeps every run.
-    #[arg(long, value_name = "COUNT", default_value_t = beez_daemon::DEFAULT_KEPT_RUNS)]
-    keep_runs: usize,
-}
-
-#[derive(Debug, Args)]
-struct ScheduleArgs {
-    #[command(subcommand)]
-    command: ScheduleCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum ScheduleCommand {
-    /// Watch one more manifest, so its schedules fire.
-    Add(ManifestArgs),
-    /// Stop watching one manifest.
-    Remove(ManifestArgs),
-    /// Report every job.
-    List(RootArgs),
-    /// Run one job now, beside its schedule.
-    Trigger(JobArgs),
-    /// Hold one job back until it resumes.
-    Pause(JobArgs),
-    /// Let a paused job fire again.
-    Resume(JobArgs),
-}
-
-#[derive(Debug, Args)]
-struct ManifestArgs {
-    /// Path of the workflow manifest.
-    manifest: PathBuf,
-    #[command(flatten)]
-    root: RootArgs,
-}
-
-#[derive(Debug, Args)]
-struct JobArgs {
-    /// Job ID, as `beez schedule list` prints it.
-    job: String,
-    #[command(flatten)]
-    root: RootArgs,
-}
-
-#[derive(Debug, Args)]
-struct RootArgs {
-    /// Directory that holds the daemon's own files and the runs it starts.
-    ///
-    /// Beez uses `~/.beez` by default, so one daemon serves every repository.
-    #[arg(long, value_name = "PATH", env = "BEEZ_ROOT")]
-    root: Option<PathBuf>,
-}
-
-impl RootArgs {
-    fn paths(&self) -> io::Result<DaemonPaths> {
-        match &self.root {
-            Some(root) => Ok(DaemonPaths::new(root)),
-            None => DaemonPaths::user(),
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -204,9 +120,10 @@ struct LogArgs {
 
 impl LogArgs {
     fn settings(&self) -> LogSettings<'_> {
-        LogSettings {
-            enabled: !self.no_log,
-            directory: self.log_dir.as_deref(),
+        match (self.no_log, self.log_dir.as_deref()) {
+            (true, _) => LogSettings::Disabled,
+            (false, None) => LogSettings::Resolved,
+            (false, Some(directory)) => LogSettings::At(directory),
         }
     }
 }
@@ -232,8 +149,8 @@ impl SandboxArgs {
         }
         let allow = parse_values::<DomainRule>(&self.allow_domain)?;
         let write_allow = parse_values::<SandboxPath>(&self.allow_write)?;
-        let network = NetworkPolicy::new(None, Vec::new(), Vec::new(), allow, None);
-        let filesystem = FilesystemPolicy::new(None, Vec::new(), write_allow, Vec::new());
+        let network = NetworkPolicy::default().with_allow(allow);
+        let filesystem = FilesystemPolicy::default().with_write_allow(write_allow);
         Ok(Some(SandboxPolicy::new(network, filesystem, None)))
     }
 }
@@ -247,34 +164,12 @@ where
     parse_all(values).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
-#[derive(Debug, Args)]
-struct SandboxInit {
-    /// Loopback port and Unix socket pair to bridge, as PORT=SOCKET.
-    #[arg(long = "relay", value_name = "PORT=SOCKET")]
-    relays: Vec<OsString>,
-    /// File or directory that may execute. Absent means unrestricted.
-    #[arg(long = "exec", value_name = "PATH")]
-    executables: Vec<PathBuf>,
-    /// Program and arguments to replace this process with.
-    #[arg(last = true, required = true)]
-    command: Vec<OsString>,
-}
-
-#[derive(Debug, Args)]
-struct SandboxRelay {
-    /// Loopback address to listen on.
-    #[arg(long)]
-    listen: SocketAddr,
-    /// Unix socket that receives each connection.
-    #[arg(long)]
-    socket: PathBuf,
-}
-
 fn main() {
     let status = match run(Cli::parse()) {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("{error}");
+            // Standard error may be closed. The status still says Beez failed.
+            let _ = writeln!(io::stderr(), "{error}");
             2
         }
     };
@@ -282,20 +177,19 @@ fn main() {
 }
 
 fn run(cli: Cli) -> io::Result<i32> {
-    let command = match cli.command {
-        Command::Run(Run { command }) => command,
-        Command::Daemon(DaemonArgs { command }) => return daemon(command),
-        Command::Schedule(ScheduleArgs { command }) => return schedule(command),
-        Command::SandboxInit(init) => return sandbox_init(&init),
-        Command::SandboxRelay(relay) => return sandbox_relay(&relay),
-    };
-    match command {
-        RunCommand::Workflow(file) => run_workflow(file),
-        RunCommand::Pi(run) => run_harness(HeadlessHarness::Pi, run),
-        RunCommand::Omp(run) => run_harness(HeadlessHarness::Omp, run),
-        RunCommand::Claude(run) => run_harness(HeadlessHarness::Claude, run),
-        RunCommand::Codex(run) => run_harness(HeadlessHarness::Codex, run),
-        RunCommand::Command(process) => run_command(process),
+    match cli.command {
+        Command::Run { command } => match command {
+            RunCommand::Workflow(file) => run_workflow(file),
+            RunCommand::Pi(run) => run_harness(HeadlessHarness::Pi, run),
+            RunCommand::Omp(run) => run_harness(HeadlessHarness::Omp, run),
+            RunCommand::Claude(run) => run_harness(HeadlessHarness::Claude, run),
+            RunCommand::Codex(run) => run_harness(HeadlessHarness::Codex, run),
+            RunCommand::Command(process) => run_command(process),
+        },
+        Command::Daemon { command } => schedule::daemon(command),
+        Command::Schedule { command } => schedule::schedule(command),
+        Command::SandboxInit(init) => sandbox::init(&init),
+        Command::SandboxRelay(relay) => sandbox::relay(&relay),
     }
 }
 
@@ -323,7 +217,7 @@ fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
         log,
     } = run;
     let request = ExecutionRequest::Harness(
-        HarnessCall::new(harness, prompt).options(&HarnessOptions::new(model, effort)),
+        HarnessCall::new(harness, prompt).options(HarnessOptions::new(model, effort)),
     );
 
     run_request(harness.name(), request, &sandbox, &log)
@@ -374,114 +268,71 @@ fn run_reported(
     beez_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
 
     let status = run(&Runner::new(&working_directory), &mut reporter);
-    reporter.finish(status.as_ref().ok().copied())?;
+    let finished = reporter.finish(status.as_ref().ok().copied());
+    settle(status, finished, |error| {
+        // Standard error may be what failed, so this is best effort.
+        let _ = writeln!(io::stderr(), "{error}");
+    })
+}
+
+/// The result of a run, once its report has closed.
+///
+/// The run's own status or error decides how Beez exits. A report that
+/// could not close goes to `report` instead, so it cannot hide that a run
+/// passed or why it failed.
+fn settle(
+    status: io::Result<i32>,
+    finished: io::Result<()>,
+    report: impl FnOnce(&io::Error),
+) -> io::Result<i32> {
+    if let Err(error) = finished {
+        report(&error);
+    }
     status
 }
 
-fn daemon(command: DaemonCommand) -> io::Result<i32> {
-    match command {
-        DaemonCommand::Run(run) => {
-            beez_daemon::run(&run.root.paths()?, run.limit, run.keep_runs)?;
-            Ok(0)
-        }
-        DaemonCommand::Start(run) => Ok(answer(beez_daemon::start(
-            &run.root.paths()?,
-            run.limit,
-            run.keep_runs,
-        )?)),
-        DaemonCommand::Stop(root) => send(&root, Request::Stop),
-        DaemonCommand::Status(root) => report_jobs(&root),
-        DaemonCommand::Reload(root) => send(&root, Request::Reload),
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::settle;
+
+    fn closed() -> io::Error {
+        io::Error::from(io::ErrorKind::BrokenPipe)
     }
-}
 
-fn schedule(command: ScheduleCommand) -> io::Result<i32> {
-    match command {
-        ScheduleCommand::Add(args) => Ok(answer(beez_daemon::add(
-            &args.root.paths()?,
-            &args.manifest,
-        )?)),
-        ScheduleCommand::Remove(args) => send(
-            &args.root,
-            Request::Remove {
-                manifest: args.manifest,
-            },
-        ),
-        ScheduleCommand::List(root) => report_jobs(&root),
-        ScheduleCommand::Trigger(args) => send(&args.root, Request::Trigger { job: args.job }),
-        ScheduleCommand::Pause(args) => send(&args.root, Request::Pause { job: args.job }),
-        ScheduleCommand::Resume(args) => send(&args.root, Request::Resume { job: args.job }),
-    }
-}
+    #[test]
+    fn keeps_the_run_status_when_the_report_cannot_close() {
+        for status in [0, 1, 23] {
+            let mut reported = None;
+            let settled = settle(Ok(status), Err(closed()), |error| {
+                reported = Some(error.kind());
+            });
 
-/// Gives one command, whether the daemon runs or not, and prints its answer.
-fn send(root: &RootArgs, request: Request) -> io::Result<i32> {
-    Ok(answer(beez_daemon::command(&root.paths()?, request)?))
-}
-
-/// Prints the daemon and every job it holds.
-fn report_jobs(root: &RootArgs) -> io::Result<i32> {
-    schedule::status(&beez_daemon::status(&root.paths()?)?)?;
-
-    Ok(0)
-}
-
-/// Prints what a command answered, and returns the status for it.
-fn answer(response: Response) -> i32 {
-    match response {
-        Response::Done { message } => {
-            println!("{message}");
-            0
-        }
-        Response::Error { message } => {
-            eprintln!("{message}");
-            1
-        }
-        Response::Status { .. } => {
-            eprintln!("unexpected answer from the daemon");
-            2
+            assert_eq!(settled.ok(), Some(status));
+            assert_eq!(reported, Some(io::ErrorKind::BrokenPipe));
         }
     }
-}
 
-#[cfg(target_os = "linux")]
-fn sandbox_init(init: &SandboxInit) -> io::Result<i32> {
-    let relays = init
-        .relays
-        .iter()
-        .map(|relay| beez_sandbox::parse_relay(relay))
-        .collect::<io::Result<Vec<_>>>()?;
-    let executables = (!init.executables.is_empty()).then_some(init.executables.as_slice());
-    let Some((program, arguments)) = init.command.split_first() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "sandbox-init needs a program",
-        ));
-    };
-    beez_sandbox::init(&relays, executables, program.as_ref(), arguments)?;
-    Ok(0)
-}
+    #[test]
+    fn keeps_the_run_error_when_the_report_cannot_close() {
+        let settled = settle(
+            Err(io::Error::new(io::ErrorKind::NotFound, "no program")),
+            Err(closed()),
+            |_| {},
+        );
 
-#[cfg(not(target_os = "linux"))]
-fn sandbox_init(_init: &SandboxInit) -> io::Result<i32> {
-    Err(unsupported_sandbox_helper())
-}
+        let error = settled.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "no program");
+    }
 
-#[cfg(target_os = "linux")]
-fn sandbox_relay(relay: &SandboxRelay) -> io::Result<i32> {
-    beez_sandbox::relay(relay.listen, &relay.socket)?;
-    Ok(0)
-}
+    #[test]
+    fn returns_the_run_status_when_the_report_closes() {
+        let mut reported = false;
+        let settled = settle(Ok(4), Ok(()), |_| reported = true);
 
-#[cfg(not(target_os = "linux"))]
-fn sandbox_relay(_relay: &SandboxRelay) -> io::Result<i32> {
-    Err(unsupported_sandbox_helper())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn unsupported_sandbox_helper() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "sandbox helper commands run only inside a Linux sandbox",
-    )
+        assert_eq!(settled.ok(), Some(4));
+        assert!(!reported);
+    }
 }

@@ -33,7 +33,6 @@ fn echo_origin() -> io::Result<(u16, JoinHandle<io::Result<Vec<u8>>>)> {
     Ok((port, handle))
 }
 
-/// A listener that never accepts, to check the proxy does not connect to it.
 /// A proxy that allows `texts`, and local addresses when `localhost` is set.
 fn proxy(texts: &[&str], localhost: bool) -> io::Result<Proxy> {
     let rules = texts
@@ -131,7 +130,7 @@ fn tunnels_bytes_that_arrive_with_the_connect_request() {
 
 #[test]
 fn refuses_connect_requests_to_other_hosts() {
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let proxy = proxy(&["example.com"], true).unwrap();
 
     let response = exchange(
@@ -146,7 +145,7 @@ fn refuses_connect_requests_to_other_hosts() {
 
 #[test]
 fn honours_the_port_of_a_rule() {
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let proxy = proxy(&["localhost:1"], true).unwrap();
 
     let response = exchange(
@@ -170,7 +169,7 @@ fn matches_wildcard_rules_against_subdomains_only() {
 
 #[test]
 fn refuses_an_allowed_host_that_resolves_to_a_local_address() {
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let proxy = proxy(&[&format!("localhost:{origin_port}")], false).unwrap();
 
     let response = exchange(
@@ -227,7 +226,7 @@ fn sends_plain_http_to_the_checked_host_whatever_host_header_it_had() {
 
 #[test]
 fn allows_only_the_web_ports_for_a_rule_without_a_port() {
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let proxy = proxy(&["localhost"], true).unwrap();
 
     let tunnel = exchange(
@@ -294,7 +293,7 @@ fn serves_socks5_connections_to_allowed_domains() {
 
 #[test]
 fn refuses_socks5_connections_to_other_domains() {
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let proxy = proxy(&["example.com"], true).unwrap();
     let (mut client, _) = socks_client(proxy.socks_port()).unwrap();
 
@@ -324,7 +323,7 @@ fn refuses_socks5_connections_to_literal_addresses() {
 
 #[test]
 fn refuses_socks5_connections_to_a_local_address() {
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let proxy = proxy(&[&format!("localhost:{origin_port}")], false).unwrap();
     let (mut client, _) = socks_client(proxy.socks_port()).unwrap();
 

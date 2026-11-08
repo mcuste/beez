@@ -4,7 +4,7 @@
 
 use std::error::Error;
 use std::fs;
-use std::process::Output;
+use std::process::{Command, Output};
 
 use beez_test_support::{TemporaryDirectory, extended_path, fake_harness};
 
@@ -26,7 +26,7 @@ fn passes_the_model_and_effort_to_claude() {
     let directory = TemporaryDirectory::new("cli-claude-options").unwrap();
     fake_harness(&directory, "claude", 0).unwrap();
 
-    let output = common::beez()
+    let output = beez_with_harnesses(&directory)
         .args([
             "run",
             "claude",
@@ -36,9 +36,6 @@ fn passes_the_model_and_effort_to_claude() {
             "high",
             "inspect the repository",
         ])
-        .env("PATH", extended_path(directory.path()))
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -58,7 +55,7 @@ fn passes_the_effort_to_codex_as_a_config_override() {
     let directory = TemporaryDirectory::new("cli-codex-options").unwrap();
     fake_harness(&directory, "codex", 0).unwrap();
 
-    let output = common::beez()
+    let output = beez_with_harnesses(&directory)
         .args([
             "run",
             "codex",
@@ -68,9 +65,6 @@ fn passes_the_effort_to_codex_as_a_config_override() {
             "high",
             "inspect the repository",
         ])
-        .env("PATH", extended_path(directory.path()))
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -108,16 +102,14 @@ fn rejects_a_prompt_that_starts_with_a_hyphen_without_a_separator() {
     let directory = TemporaryDirectory::new("cli-unquoted-hyphen").unwrap();
     fake_harness(&directory, "pi", 0).unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "pi", "--print me"])
         .env("PATH", directory.path())
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         std::str::from_utf8(&output.stderr)
             .unwrap()
@@ -136,12 +128,9 @@ fn runs_a_workflow_codex_task_with_a_model_and_effort() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_with_harnesses(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .env("PATH", extended_path(directory.path()))
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -167,12 +156,9 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_with_harnesses(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .env("PATH", extended_path(directory.path()))
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -190,9 +176,10 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
 #[test]
 fn passes_the_output_of_a_task_into_a_prompt_file() {
     let directory = TemporaryDirectory::new("cli-workflow-task-output").unwrap();
-    let harness = fake_harness(&directory, "claude", 0).unwrap();
     // Echo to stdout only: grouped output merges streams and would interleave two copies.
-    fs::write(&harness, "#!/bin/sh\nprintf '[%s]' \"$@\"\n").unwrap();
+    directory
+        .executable("claude", "#!/bin/sh\nprintf '[%s]' \"$@\"\n")
+        .unwrap();
     directory
         .write(
             "review.md",
@@ -206,12 +193,9 @@ fn passes_the_output_of_a_task_into_a_prompt_file() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_with_harnesses(&directory)
         .args(["run", "workflow", "--output", "grouped", "--color", "never"])
         .arg(workflow)
-        .env("PATH", extended_path(directory.path()))
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -231,7 +215,7 @@ fn rejects_an_unsupported_harness() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         std::str::from_utf8(&output.stderr)
             .unwrap()
@@ -249,16 +233,14 @@ fn rejects_an_unsupported_workflow_harness() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert_eq!(
         output.stderr,
         b"unknown headless harness \"cursor\"; expected one of pi, omp, claude, codex\n"
@@ -269,17 +251,15 @@ fn rejects_an_unsupported_workflow_harness() {
 fn reports_when_a_harness_cannot_start() {
     let directory = TemporaryDirectory::new("cli-missing-harness").unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "pi", "inspect the repository"])
         .env("PATH", directory.path())
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(!output.stderr.is_empty());
+    assert_eq!(output.stdout, b"");
+    assert_ne!(output.stderr, b"");
 }
 
 #[test]
@@ -324,11 +304,9 @@ fn runs_a_yaml_workflow_in_dependency_order() {
         ))
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -354,11 +332,9 @@ fn prefixes_every_line_of_every_task_that_runs_together() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -393,11 +369,9 @@ fn returns_a_failed_workflow_status_and_blocks_dependents() {
         ))
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -426,11 +400,9 @@ fn runs_a_json_workflow() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -440,7 +412,7 @@ fn runs_a_json_workflow() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"json");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
 }
 
 #[test]
@@ -453,16 +425,14 @@ fn reports_invalid_workflow_manifests() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert_eq!(
         output.stderr,
         b"task test depends on unknown task prepare\n"
@@ -474,16 +444,14 @@ fn rejects_a_workflow_without_tasks() {
     let directory = TemporaryDirectory::new("cli-empty-workflow").unwrap();
     let workflow = directory.write("workflow.yaml", "tasks: []\n").unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert_eq!(output.stderr, b"workflow must define at least one task\n");
 }
 
@@ -497,11 +465,9 @@ fn groups_each_task_behind_a_status_line() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -534,11 +500,9 @@ fn prefixes_every_line_with_its_task_in_stream_mode() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--output", "stream", "--color", "never"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -574,11 +538,9 @@ fn reports_a_blocked_task_and_counts_it_in_the_summary() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -603,11 +565,9 @@ fn relays_a_single_task_workflow_without_decoration() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -617,7 +577,7 @@ fn relays_a_single_task_workflow_without_decoration() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"solo");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
 }
 
 #[test]
@@ -635,11 +595,9 @@ fn closes_each_grouped_task_with_its_status_line() {
 
     // Both streams share one file description, so the file keeps the order
     // Beez wrote them, the way a terminal shows it.
-    let status = common::beez()
+    let status = beez_in(&directory)
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .stdout(stdout)
         .stderr(stderr)
         .status()
@@ -688,11 +646,9 @@ fn keeps_a_grouped_block_off_the_status_line() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -718,7 +674,7 @@ fn stamps_a_grouped_line_when_it_arrives() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args([
             "run",
             "workflow",
@@ -729,8 +685,6 @@ fn stamps_a_grouped_line_when_it_arrives() {
             "never",
         ])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -770,11 +724,9 @@ fn stamps_every_line_with_a_utc_date_and_time() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = beez_in(&directory)
         .args(["run", "workflow", "--timestamps", "--color", "never"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 
@@ -801,16 +753,29 @@ fn stamps_every_line_with_a_utc_date_and_time() {
     }
 }
 
+/// `beez` run from `directory`, logging into its `logs` subdirectory.
+fn beez_in(directory: &TemporaryDirectory) -> Command {
+    let mut command = common::beez();
+    command
+        .current_dir(directory.path())
+        .env("BEEZ_LOG_DIR", directory.join("logs"));
+    command
+}
+
+/// [`beez_in`] with `directory` first on `PATH`, so its harness stubs run.
+fn beez_with_harnesses(directory: &TemporaryDirectory) -> Command {
+    let mut command = beez_in(directory);
+    command.env("PATH", extended_path(directory.path()));
+    command
+}
+
 fn run_harness(name: &str, arguments: &[&str]) -> Result<Output, Box<dyn Error>> {
     let directory = TemporaryDirectory::new(&format!("cli-{name}"))?;
     fake_harness(&directory, name, 17)?;
 
-    common::beez()
+    beez_with_harnesses(&directory)
         .args(["run", name])
         .args(arguments)
-        .env("PATH", extended_path(directory.path()))
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .map_err(Into::into)
 }

@@ -11,10 +11,10 @@ const MULTI_PROVIDER_GROUPS: [DomainGroup; 4] = [
 /// What a harness needs from the sandbox to run at all.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessProfile {
-    required_domain_groups: Vec<DomainGroup>,
-    default_domain_groups: Vec<DomainGroup>,
+    required_domain_groups: &'static [DomainGroup],
+    default_domain_groups: &'static [DomainGroup],
     state_paths: Vec<SandboxPath>,
-    environment: Vec<(&'static str, &'static str)>,
+    environment: &'static [(&'static str, &'static str)],
 }
 
 impl HarnessProfile {
@@ -22,11 +22,9 @@ impl HarnessProfile {
     #[must_use]
     pub fn for_harness(harness: HeadlessHarness) -> Self {
         let (required_domain_groups, default_domain_groups) = match harness {
-            HeadlessHarness::Claude => (vec![DomainGroup::Anthropic], Vec::new()),
-            HeadlessHarness::Codex => (vec![DomainGroup::OpenAi], Vec::new()),
-            HeadlessHarness::Pi | HeadlessHarness::Omp => {
-                (Vec::new(), MULTI_PROVIDER_GROUPS.to_vec())
-            }
+            HeadlessHarness::Claude => (&[DomainGroup::Anthropic][..], &[][..]),
+            HeadlessHarness::Codex => (&[DomainGroup::OpenAi][..], &[][..]),
+            HeadlessHarness::Pi | HeadlessHarness::Omp => (&[][..], &MULTI_PROVIDER_GROUPS[..]),
         };
 
         Self {
@@ -40,13 +38,13 @@ impl HarnessProfile {
     /// Domain groups the harness cannot run without.
     #[must_use]
     pub fn required_domain_groups(&self) -> &[DomainGroup] {
-        &self.required_domain_groups
+        self.required_domain_groups
     }
 
     /// Domain groups the harness may use, which a task can disable.
     #[must_use]
     pub fn default_domain_groups(&self) -> &[DomainGroup] {
-        &self.default_domain_groups
+        self.default_domain_groups
     }
 
     /// Paths the harness reads and writes for its own configuration and state.
@@ -58,7 +56,7 @@ impl HarnessProfile {
     /// Environment variables that keep the harness working inside the sandbox.
     #[must_use]
     pub fn environment(&self) -> &[(&'static str, &'static str)] {
-        &self.environment
+        self.environment
     }
 }
 
@@ -72,15 +70,15 @@ fn state_group(harness: HeadlessHarness) -> PathGroup {
     }
 }
 
-fn environment(harness: HeadlessHarness) -> Vec<(&'static str, &'static str)> {
+fn environment(harness: HeadlessHarness) -> &'static [(&'static str, &'static str)] {
     match harness {
         // Optional traffic must not retry against a closed network.
-        HeadlessHarness::Claude => vec![
+        HeadlessHarness::Claude => &[
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
             ("DISABLE_AUTOUPDATER", "1"),
             ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
         ],
-        HeadlessHarness::Codex | HeadlessHarness::Pi | HeadlessHarness::Omp => Vec::new(),
+        HeadlessHarness::Codex | HeadlessHarness::Pi | HeadlessHarness::Omp => &[],
     }
 }
 

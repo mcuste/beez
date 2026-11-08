@@ -12,7 +12,7 @@ use std::time::Duration;
 use beez_core::{TaskDefinition, TaskIndex, TaskRequest, Workflow};
 use beez_process::{ExecutionRequest, OutputStream, ProcessCall};
 use beez_runner::{RunEvent, Runner};
-use beez_test_support::TemporaryDirectory;
+use beez_test_support::{TemporaryDirectory, text};
 
 macro_rules! assert_ok {
     ($result:expr) => {{
@@ -241,7 +241,7 @@ fn reports_siblings_that_completed_when_a_task_cannot_start() {
         assert_ok!(command_task(
             "missing",
             &[],
-            &missing_program.to_string_lossy(),
+            &text(&missing_program),
             Vec::new(),
         )),
         assert_ok!(command_task(
@@ -282,6 +282,48 @@ fn reports_siblings_that_completed_when_a_task_cannot_start() {
 }
 
 #[test]
+fn reports_dependents_of_a_task_that_cannot_start_as_blocked() {
+    let directory = assert_ok!(TemporaryDirectory::new("runner-missing-program-dependents"));
+    let missing_program = directory.path().join("missing-program");
+    let marker = directory.path().join("blocked-task-ran");
+    let workflow = assert_ok!(Workflow::try_from(vec![
+        assert_ok!(command_task(
+            "missing",
+            &[],
+            &text(&missing_program),
+            Vec::new(),
+        )),
+        assert_ok!(marker_task("verify", &["missing"], &marker)),
+        assert_ok!(marker_task("publish", &["verify"], &marker)),
+    ]));
+    let mut events = Vec::new();
+
+    let error = assert_err!(
+        Runner::here()
+            .unwrap()
+            .run_workflow(&workflow, &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            })
+    );
+
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(!marker.exists());
+    assert_eq!(
+        events,
+        vec![
+            RecordedEvent::Started { task: Some(0) },
+            RecordedEvent::Failed {
+                task: Some(0),
+                error_kind: io::ErrorKind::NotFound,
+            },
+            RecordedEvent::Blocked { task: 1 },
+            RecordedEvent::Blocked { task: 2 },
+        ]
+    );
+}
+
+#[test]
 fn reports_direct_start_failures_as_terminal_events() {
     let directory = assert_ok!(TemporaryDirectory::new("runner-direct-missing-program"));
     let mut events = Vec::new();
@@ -317,7 +359,7 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
             .argument("-c")
             .argument("printf ran > \"$1\"")
             .argument("beez")
-            .argument(marker.to_string_lossy().into_owned()),
+            .argument(text(&marker)),
     );
 
     let error = assert_err!(
@@ -546,7 +588,7 @@ fn marker_task(
             "-c".to_owned(),
             "printf ran > \"$1\"".to_owned(),
             "beez".to_owned(),
-            marker.to_string_lossy().into_owned(),
+            text(marker),
         ],
     )
 }
@@ -625,8 +667,8 @@ fn waiting_task(
             "-c".to_owned(),
             "printf ready > \"$1\"; read _ < \"$2\"".to_owned(),
             "beez".to_owned(),
-            ready.to_string_lossy().into_owned(),
-            release.to_string_lossy().into_owned(),
+            text(ready),
+            text(release),
         ],
     )
 }
@@ -698,10 +740,11 @@ fn runs_sandboxed_tasks_inside_the_sandbox() {
 
     let directory = assert_ok!(TemporaryDirectory::new("runner-sandbox"));
     let outside = directory.join("outside.txt");
-    let filesystem =
-        assert_ok!(".".parse().map(|work| {
-            FilesystemPolicy::new(Some(false), Vec::new(), vec![work], Vec::new())
-        }));
+    let filesystem = assert_ok!(".".parse().map(|work| {
+        FilesystemPolicy::default()
+            .with_defaults(Some(false))
+            .with_write_allow(vec![work])
+    }));
     let policy = SandboxPolicy::new(NetworkPolicy::default(), filesystem, None);
     let workflow = assert_ok!(Workflow::try_from(vec![
         assert_ok!(command_task(

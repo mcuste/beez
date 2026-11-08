@@ -1,4 +1,4 @@
-use crate::{DomainGroup, DomainRule, GroupSelection, HarnessProfile, extend};
+use crate::{DomainGroup, DomainRule, GroupSelection, HarnessProfile, Override, extend};
 
 /// Which remote hosts sandboxed processes may reach.
 ///
@@ -8,24 +8,45 @@ use crate::{DomainGroup, DomainRule, GroupSelection, HarnessProfile, extend};
 pub struct NetworkPolicy {
     groups: GroupSelection<DomainGroup>,
     allow: Vec<DomainRule>,
-    localhost: Option<bool>,
+    localhost: Override<bool>,
 }
 
 impl NetworkPolicy {
-    /// Builds network rules.
+    /// Sets whether the harness's default domain groups apply; `None` leaves
+    /// it unset.
     #[must_use]
-    pub fn new(
-        defaults: Option<bool>,
-        groups: Vec<DomainGroup>,
-        disable: Vec<DomainGroup>,
-        allow: Vec<DomainRule>,
-        localhost: Option<bool>,
-    ) -> Self {
-        Self {
-            groups: GroupSelection::new(defaults, groups, disable),
-            allow,
-            localhost,
-        }
+    pub fn with_defaults(mut self, defaults: Option<bool>) -> Self {
+        self.groups = self.groups.with_defaults(defaults);
+        self
+    }
+
+    /// Sets the domain groups the policy adds.
+    #[must_use]
+    pub fn with_groups(mut self, groups: Vec<DomainGroup>) -> Self {
+        self.groups = self.groups.with_groups(groups);
+        self
+    }
+
+    /// Sets the default domain groups the policy disables.
+    #[must_use]
+    pub fn with_disable(mut self, disable: Vec<DomainGroup>) -> Self {
+        self.groups = self.groups.with_disable(disable);
+        self
+    }
+
+    /// Sets the host rules the policy adds.
+    #[must_use]
+    pub fn with_allow(mut self, allow: Vec<DomainRule>) -> Self {
+        self.allow = allow;
+        self
+    }
+
+    /// Sets whether processes may reach the loopback interface; `None` leaves
+    /// it unset.
+    #[must_use]
+    pub fn with_localhost(mut self, localhost: Option<bool>) -> Self {
+        self.localhost = localhost.into();
+        self
     }
 
     /// Adds the rules of `other` to these rules.
@@ -36,14 +57,14 @@ impl NetworkPolicy {
     pub fn merge(mut self, other: Self) -> Self {
         self.groups = self.groups.merge(other.groups);
         extend(&mut self.allow, other.allow);
-        self.localhost = other.localhost.or(self.localhost);
+        self.localhost = self.localhost.merge(other.localhost);
         self
     }
 
     /// True when processes may connect to services on the loopback interface.
     #[must_use]
     pub fn localhost(&self) -> bool {
-        self.localhost.unwrap_or(false)
+        self.localhost.get_or(false)
     }
 
     /// Every host rule the policy grants for a harness.
@@ -90,13 +111,10 @@ mod tests {
 
     #[test]
     fn disables_a_default_harness_group() {
-        let sut = NetworkPolicy::new(
-            Some(true),
-            Vec::new(),
-            vec![DomainGroup::OpenAi, DomainGroup::Anthropic],
-            Vec::new(),
-            Some(false),
-        );
+        let sut = NetworkPolicy::default()
+            .with_defaults(Some(true))
+            .with_disable(vec![DomainGroup::OpenAi, DomainGroup::Anthropic])
+            .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Pi);
 
         let domains = sut.allowed_domains(Some(&profile));
@@ -109,13 +127,10 @@ mod tests {
 
     #[test]
     fn keeps_a_required_harness_group_a_task_tries_to_disable() {
-        let sut = NetworkPolicy::new(
-            Some(true),
-            Vec::new(),
-            vec![DomainGroup::Anthropic],
-            Vec::new(),
-            Some(false),
-        );
+        let sut = NetworkPolicy::default()
+            .with_defaults(Some(true))
+            .with_disable(vec![DomainGroup::Anthropic])
+            .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Claude);
 
         let domains = sut.allowed_domains(Some(&profile));
@@ -125,25 +140,25 @@ mod tests {
 
     #[test]
     fn keeps_a_required_harness_group_without_defaults() {
-        let sut = NetworkPolicy::new(Some(false), Vec::new(), Vec::new(), Vec::new(), Some(false));
+        let sut = NetworkPolicy::default()
+            .with_defaults(Some(false))
+            .with_localhost(Some(false));
 
         let claude =
             sut.allowed_domains(Some(&HarnessProfile::for_harness(HeadlessHarness::Claude)));
         let pi = sut.allowed_domains(Some(&HarnessProfile::for_harness(HeadlessHarness::Pi)));
 
         assert!(claude.contains(&rule("api.anthropic.com")));
-        assert!(pi.is_empty());
+        assert_eq!(pi, Vec::<DomainRule>::new());
     }
 
     #[test]
     fn grants_a_group_the_task_both_asks_for_and_disables() {
-        let sut = NetworkPolicy::new(
-            Some(true),
-            vec![DomainGroup::Anthropic],
-            vec![DomainGroup::Anthropic],
-            Vec::new(),
-            Some(false),
-        );
+        let sut = NetworkPolicy::default()
+            .with_defaults(Some(true))
+            .with_groups(vec![DomainGroup::Anthropic])
+            .with_disable(vec![DomainGroup::Anthropic])
+            .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Pi);
 
         let domains = sut.allowed_domains(Some(&profile));
@@ -153,13 +168,11 @@ mod tests {
 
     #[test]
     fn adds_groups_and_rules_without_defaults() {
-        let sut = NetworkPolicy::new(
-            Some(false),
-            vec![DomainGroup::Github],
-            Vec::new(),
-            vec![rule("registry.internal:443")],
-            Some(false),
-        );
+        let sut = NetworkPolicy::default()
+            .with_defaults(Some(false))
+            .with_groups(vec![DomainGroup::Github])
+            .with_allow(vec![rule("registry.internal:443")])
+            .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Codex);
 
         let domains = sut.allowed_domains(Some(&profile));
@@ -171,20 +184,13 @@ mod tests {
 
     #[test]
     fn joins_the_rules_of_both_policies_on_merge() {
-        let workflow = NetworkPolicy::new(
-            None,
-            vec![DomainGroup::Crates],
-            Vec::new(),
-            vec![rule("registry.internal:443")],
-            Some(true),
-        );
-        let task = NetworkPolicy::new(
-            None,
-            vec![DomainGroup::Github, DomainGroup::Crates],
-            Vec::new(),
-            vec![rule("registry.internal:443")],
-            None,
-        );
+        let workflow = NetworkPolicy::default()
+            .with_groups(vec![DomainGroup::Crates])
+            .with_allow(vec![rule("registry.internal:443")])
+            .with_localhost(Some(true));
+        let task = NetworkPolicy::default()
+            .with_groups(vec![DomainGroup::Github, DomainGroup::Crates])
+            .with_allow(vec![rule("registry.internal:443")]);
 
         let sut = workflow.merge(task);
 
@@ -203,20 +209,25 @@ mod tests {
 
     #[test]
     fn takes_the_settings_the_merged_policy_names() {
-        let workflow = NetworkPolicy::new(None, Vec::new(), Vec::new(), Vec::new(), Some(true));
-        let task = NetworkPolicy::new(Some(false), Vec::new(), Vec::new(), Vec::new(), Some(false));
+        let workflow = NetworkPolicy::default().with_localhost(Some(true));
+        let task = NetworkPolicy::default()
+            .with_defaults(Some(false))
+            .with_localhost(Some(false));
 
         let sut = workflow.merge(task);
 
         let profile = HarnessProfile::for_harness(HeadlessHarness::Pi);
         assert!(!sut.localhost());
-        assert!(sut.allowed_domains(Some(&profile)).is_empty());
+        assert_eq!(
+            sut.allowed_domains(Some(&profile)),
+            Vec::<DomainRule>::new()
+        );
     }
 
     #[test]
     fn grants_no_domains_to_a_command_without_rules() {
         let sut = NetworkPolicy::default();
 
-        assert!(sut.allowed_domains(None).is_empty());
+        assert_eq!(sut.allowed_domains(None), Vec::<DomainRule>::new());
     }
 }

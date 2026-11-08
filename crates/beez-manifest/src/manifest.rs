@@ -6,7 +6,6 @@ use beez_core::{TaskDefinition, TaskId, TaskRequest, Workflow};
 use beez_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy, parse_all};
 use serde::Deserialize;
 
-use crate::message;
 use crate::sandbox::{ManifestSandbox, SandboxSetting};
 use crate::schedule::{JobSchedule, ScheduleSetting};
 
@@ -108,7 +107,7 @@ impl fmt::Display for ManifestError {
 
 impl ManifestError {
     fn invalid(error: impl fmt::Display) -> Self {
-        Self::Invalid(message(error))
+        Self::Invalid(error.to_string())
     }
 }
 
@@ -122,52 +121,69 @@ impl std::error::Error for ManifestError {
 }
 
 impl ManifestTask {
-    /// Moves the contents of `prompt_file`, relative to `directory`, into `prompt`.
-    fn read_prompt_file(&mut self, directory: &Path) -> Result<(), ManifestError> {
-        let Some(file) = self.prompt_file.take() else {
-            return Ok(());
-        };
-        if self.prompt.is_some() {
-            return Err(ManifestError::Invalid(
-                "task must define either prompt or prompt_file, not both".into(),
-            ));
-        }
-        let path = directory.join(file);
-        let prompt =
-            fs::read_to_string(&path).map_err(|error| ManifestError::PromptFile { path, error })?;
-        self.prompt = Some(prompt);
-        Ok(())
-    }
-
-    /// Builds the task, with the sandbox resolved from the workflow and the task.
-    fn into_definition(self, workflow: Option<&SandboxPolicy>) -> Result<TaskDefinition, String> {
-        let sandbox = crate::sandbox::resolve(workflow, self.sandbox)?;
-        let id = self.id.parse::<TaskId>().map_err(message)?;
-        let depends_on = parse_all::<TaskId>(&self.depends_on)?;
+    /// Builds the task, with its prompt file read relative to `directory` and
+    /// the sandbox resolved from the workflow and the task.
+    fn into_definition(
+        self,
+        directory: &Path,
+        workflow: Option<&SandboxPolicy>,
+    ) -> Result<TaskDefinition, ManifestError> {
+        let prompt = prompt(self.prompt, self.prompt_file, directory)?;
+        let sandbox =
+            crate::sandbox::resolve(workflow, self.sandbox).map_err(ManifestError::Invalid)?;
+        let id = self.id.parse::<TaskId>().map_err(ManifestError::invalid)?;
+        let depends_on = parse_all::<TaskId>(&self.depends_on).map_err(ManifestError::Invalid)?;
         let options = HarnessOptions::new(self.model, self.effort);
-        let request = match (self.harness, self.prompt, self.command) {
+        let request = match (self.harness, prompt, self.command) {
             (Some(harness), Some(prompt), None) => {
-                let harness = harness.parse::<HeadlessHarness>().map_err(message)?;
+                let harness = harness
+                    .parse::<HeadlessHarness>()
+                    .map_err(ManifestError::invalid)?;
                 TaskRequest::harness(harness, prompt, options)
             }
             (None, None, Some(command)) => {
                 if !options.is_empty() {
-                    return Err("model and effort require a harness task".into());
+                    return Err(ManifestError::Invalid(
+                        "model and effort require a harness task".into(),
+                    ));
                 }
                 let mut command = command.into_iter();
                 let Some(program) = command.next() else {
-                    return Err("command must contain a program".into());
+                    return Err(ManifestError::Invalid(
+                        "command must contain a program".into(),
+                    ));
                 };
                 TaskRequest::command(program, command.collect())
             }
             _ => {
-                return Err(
+                return Err(ManifestError::Invalid(
                     "task must define either harness with prompt or prompt_file, or command".into(),
-                );
+                ));
             }
         };
         Ok(TaskDefinition::new(id, depends_on, request).sandboxed(sandbox))
     }
+}
+
+/// The prompt a task writes inline, or the contents of its `file`, relative to
+/// `directory`.
+fn prompt(
+    prompt: Option<String>,
+    file: Option<PathBuf>,
+    directory: &Path,
+) -> Result<Option<String>, ManifestError> {
+    let Some(file) = file else {
+        return Ok(prompt);
+    };
+    if prompt.is_some() {
+        return Err(ManifestError::Invalid(
+            "task must define either prompt or prompt_file, not both".into(),
+        ));
+    }
+    let path = directory.join(file);
+    fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|error| ManifestError::PromptFile { path, error })
 }
 
 /// Loads and validates a workflow manifest.
@@ -188,11 +204,7 @@ pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
     let definitions = document
         .tasks
         .into_iter()
-        .map(|mut task| {
-            task.read_prompt_file(directory)?;
-            task.into_definition(sandbox.as_ref())
-                .map_err(ManifestError::Invalid)
-        })
+        .map(|task| task.into_definition(directory, sandbox.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
     let workflow = Workflow::try_from(definitions).map_err(ManifestError::invalid)?;
 

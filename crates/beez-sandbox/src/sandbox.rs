@@ -5,8 +5,14 @@ use std::process::Command;
 
 use beez_policy::{HeadlessHarness, SandboxPolicy};
 
-use crate::proxy::Proxy;
+#[cfg(target_os = "linux")]
+use crate::bubblewrap as backend;
+use crate::proxy::{Proxy, ProxyPorts};
 use crate::resolve::ResolvedSandbox;
+#[cfg(target_os = "macos")]
+use crate::seatbelt as backend;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+use unsupported as backend;
 
 /// Variables that point a program at a host socket the sandbox hides or refuses.
 ///
@@ -19,16 +25,25 @@ const HOST_SOCKET_VARIABLES: [&str; 4] = [
     "DBUS_SYSTEM_BUS_ADDRESS",
 ];
 
+/// A program wrapped by a sandbox backend, before the proxy settings go in.
+#[derive(Debug)]
+pub(crate) struct Wrapped {
+    /// The command that runs the program inside the sandbox.
+    pub(crate) command: Command,
+    /// The proxy ports as the program inside the sandbox reaches them.
+    pub(crate) ports: ProxyPorts,
+    /// What the backend keeps alive until the program has ended.
+    pub(crate) guard: backend::Guard,
+}
+
 /// A program wrapped in the platform sandbox, with its proxy kept alive.
 #[derive(Debug)]
 pub struct SandboxedCommand {
     command: Command,
     _proxy: Proxy,
-    #[cfg(target_os = "linux")]
-    _bridge: crate::bubblewrap::Bridge,
-    // The guard gives the mask directories back once the child has ended.
-    #[cfg(target_os = "linux")]
-    _masks: crate::bubblewrap::HeldMasks,
+    // Dropped last, once the child has ended. On Linux it stops the bridge
+    // before removing its sockets, then gives the mask directories back.
+    _guard: backend::Guard,
 }
 
 impl SandboxedCommand {
@@ -54,49 +69,17 @@ impl SandboxedCommand {
             ResolvedSandbox::resolve(policy, harness, program, working_directory, &home)?;
         let proxy = Proxy::start(resolved.allowed_domains.clone(), resolved.localhost)?;
 
-        #[cfg(target_os = "macos")]
-        {
-            let mut command = crate::seatbelt::command(
-                &resolved,
-                proxy.http_port(),
-                proxy.socks_port(),
-                arguments,
-            );
-            configure(
-                &mut command,
-                &resolved,
-                proxy.http_port(),
-                proxy.socks_port(),
-            );
-            Ok(Self {
-                command,
-                _proxy: proxy,
-            })
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            use crate::bubblewrap::{Bridge, HTTP_PORT, SOCKS_PORT};
-
-            let bridge = Bridge::start(proxy.http_port(), proxy.socks_port())?;
-            let (mut command, masks) = crate::bubblewrap::command(&resolved, &bridge, arguments)?;
-            configure(&mut command, &resolved, HTTP_PORT, SOCKS_PORT);
-            Ok(Self {
-                command,
-                _proxy: proxy,
-                _bridge: bridge,
-                _masks: masks,
-            })
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            let _ = (resolved, proxy, arguments);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "sandbox is supported on macOS and Linux only",
-            ))
-        }
+        let Wrapped {
+            mut command,
+            ports,
+            guard,
+        } = backend::wrap(&resolved, proxy.ports(), arguments)?;
+        configure(&mut command, &resolved, ports);
+        Ok(Self {
+            command,
+            _proxy: proxy,
+            _guard: guard,
+        })
     }
 
     /// The wrapped command, for adjusting stdio before running it.
@@ -106,10 +89,9 @@ impl SandboxedCommand {
 }
 
 /// Points every common HTTP client at the proxies and applies the harness environment.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn configure(command: &mut Command, resolved: &ResolvedSandbox, http_port: u16, socks_port: u16) {
-    let http = format!("http://127.0.0.1:{http_port}");
-    let socks = format!("socks5h://127.0.0.1:{socks_port}");
+fn configure(command: &mut Command, resolved: &ResolvedSandbox, ports: ProxyPorts) {
+    let http = format!("http://127.0.0.1:{}", ports.http);
+    let socks = format!("socks5h://127.0.0.1:{}", ports.socks);
     for name in HOST_SOCKET_VARIABLES {
         command.env_remove(name);
     }
@@ -130,4 +112,29 @@ fn configure(command: &mut Command, resolved: &ResolvedSandbox, http_port: u16, 
                 .iter()
                 .map(|(name, value)| (name, value)),
         );
+}
+
+/// The backend of platforms without a sandbox.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+mod unsupported {
+    use std::ffi::OsString;
+    use std::io;
+
+    use super::Wrapped;
+    use crate::proxy::ProxyPorts;
+    use crate::resolve::ResolvedSandbox;
+
+    /// Nothing to keep alive.
+    pub(crate) type Guard = ();
+
+    pub(crate) fn wrap(
+        _resolved: &ResolvedSandbox,
+        _ports: ProxyPorts,
+        _arguments: &[OsString],
+    ) -> io::Result<Wrapped> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "sandbox is supported on macOS and Linux only",
+        ))
+    }
 }

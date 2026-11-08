@@ -16,18 +16,33 @@ const DEFAULT_EXECUTABLE_GROUPS: [ExecutableGroup; 4] = [
 ];
 
 impl ExecutablePolicy {
-    /// Builds execution rules.
+    /// Sets whether Beez's default executable groups apply; `None` leaves it
+    /// unset.
     #[must_use]
-    pub fn new(
-        defaults: Option<bool>,
-        groups: Vec<ExecutableGroup>,
-        disable: Vec<ExecutableGroup>,
-        allow: Vec<SandboxPath>,
-    ) -> Self {
-        Self {
-            groups: GroupSelection::new(defaults, groups, disable),
-            allow,
-        }
+    pub fn with_defaults(mut self, defaults: Option<bool>) -> Self {
+        self.groups = self.groups.with_defaults(defaults);
+        self
+    }
+
+    /// Sets the executable groups the policy adds.
+    #[must_use]
+    pub fn with_groups(mut self, groups: Vec<ExecutableGroup>) -> Self {
+        self.groups = self.groups.with_groups(groups);
+        self
+    }
+
+    /// Sets the default executable groups the policy disables.
+    #[must_use]
+    pub fn with_disable(mut self, disable: Vec<ExecutableGroup>) -> Self {
+        self.groups = self.groups.with_disable(disable);
+        self
+    }
+
+    /// Sets the program names, files, or directories the policy adds.
+    #[must_use]
+    pub fn with_allow(mut self, allow: Vec<SandboxPath>) -> Self {
+        self.allow = allow;
+        self
     }
 
     /// Adds the rules of `other` to these rules.
@@ -67,12 +82,10 @@ mod tests {
 
     #[test]
     fn resolves_executable_groups() {
-        let sut = ExecutablePolicy::new(
-            Some(true),
-            vec![ExecutableGroup::Rust],
-            vec![ExecutableGroup::Net],
-            Vec::new(),
-        );
+        let sut = ExecutablePolicy::default()
+            .with_defaults(Some(true))
+            .with_groups(vec![ExecutableGroup::Rust])
+            .with_disable(vec![ExecutableGroup::Net]);
 
         assert_eq!(
             sut.groups(),
@@ -87,42 +100,30 @@ mod tests {
 
     #[test]
     fn keeps_only_explicit_executable_groups_without_defaults() {
-        let sut = ExecutablePolicy::new(
-            Some(false),
-            vec![ExecutableGroup::Node],
-            Vec::new(),
-            Vec::new(),
-        );
+        let sut = ExecutablePolicy::default()
+            .with_defaults(Some(false))
+            .with_groups(vec![ExecutableGroup::Node]);
 
         assert_eq!(sut.groups(), [ExecutableGroup::Node]);
     }
 
     #[test]
     fn grants_a_group_the_task_both_asks_for_and_disables() {
-        let sut = ExecutablePolicy::new(
-            Some(true),
-            vec![ExecutableGroup::Net],
-            vec![ExecutableGroup::Net],
-            Vec::new(),
-        );
+        let sut = ExecutablePolicy::default()
+            .with_defaults(Some(true))
+            .with_groups(vec![ExecutableGroup::Net])
+            .with_disable(vec![ExecutableGroup::Net]);
 
         assert!(sut.groups().contains(&ExecutableGroup::Net));
     }
 
     #[test]
     fn joins_the_groups_of_both_policies_on_merge() {
-        let workflow = ExecutablePolicy::new(
-            Some(false),
-            vec![ExecutableGroup::Coreutils],
-            Vec::new(),
-            Vec::new(),
-        );
-        let task = ExecutablePolicy::new(
-            None,
-            vec![ExecutableGroup::Rust, ExecutableGroup::Coreutils],
-            Vec::new(),
-            Vec::new(),
-        );
+        let workflow = ExecutablePolicy::default()
+            .with_defaults(Some(false))
+            .with_groups(vec![ExecutableGroup::Coreutils]);
+        let task = ExecutablePolicy::default()
+            .with_groups(vec![ExecutableGroup::Rust, ExecutableGroup::Coreutils]);
 
         let sut = workflow.merge(task);
 
@@ -146,6 +147,6 @@ mod tests {
                 ExecutableGroup::Net,
             ]
         );
-        assert!(sut.allow().is_empty());
+        assert_eq!(sut.allow(), Vec::<crate::SandboxPath>::new());
     }
 }

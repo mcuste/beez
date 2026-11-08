@@ -16,7 +16,7 @@ const STDERR_MARK: &str = "\u{250a}";
 
 /// One of Beez's own lines: the status word in its own column, then the message.
 #[must_use]
-pub fn status_line(verb: &str, message: &str) -> String {
+pub(crate) fn status_line(verb: &str, message: &str) -> String {
     format!("{verb:<VERB_WIDTH$}  {message}")
 }
 

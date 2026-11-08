@@ -12,12 +12,13 @@ use beez_record::{LogSettings, OpenLog, RunRecorder, RunTally, RunTarget};
 use beez_runner::Runner;
 use beez_schedule::format_instant;
 
+use crate::control::JobId;
 use crate::report;
 
 /// What one job needs to run.
 #[derive(Clone, Debug)]
 pub(crate) struct JobRun {
-    pub(crate) id: String,
+    pub(crate) id: JobId,
     pub(crate) manifest: PathBuf,
     pub(crate) working_directory: PathBuf,
     /// Beez root that holds the artifacts of every run the daemon starts.
@@ -31,12 +32,11 @@ pub(crate) struct JobRun {
 pub(crate) struct RunOutcome {
     /// Directory name of the run, inside `.beez/runs`.
     pub(crate) directory: Option<String>,
-    /// Status the workflow ended with. `None` means it could not run.
-    pub(crate) status: Option<i32>,
+    /// Status the workflow ended with, or why the run could not start or
+    /// finish.
+    pub(crate) result: Result<i32, String>,
     /// The counts and the time, as the run log writes them.
     pub(crate) summary: String,
-    /// Why the run could not start or finish.
-    pub(crate) error: Option<String>,
 }
 
 /// Runs one job to the end.
@@ -53,10 +53,7 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
     };
     // Every run the daemon starts lands in its own root, so one directory
     // holds them all, even when a job runs in another repository.
-    let settings = LogSettings {
-        enabled: true,
-        directory: Some(&job.log_directory),
-    };
+    let settings = LogSettings::At(&job.log_directory);
     let (mut log, failure) = OpenLog::open(settings, &target, &job.working_directory);
     if let Some(failure) = failure {
         warn(&job.id, &failure);
@@ -96,9 +93,8 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
 
     RunOutcome {
         directory,
-        status,
+        result: outcome.map_err(|error| error.to_string()),
         summary,
-        error: outcome.err().map(|error| error.to_string()),
     }
 }
 
@@ -106,22 +102,21 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
 fn record(
     log: &mut OpenLog,
     action: impl FnOnce(&mut RunRecorder) -> std::io::Result<()>,
-    job: &str,
+    job: &JobId,
 ) {
     if let Some(failure) = log.write(action) {
         warn(job, &failure);
     }
 }
 
-fn warn(job: &str, failure: &str) {
+fn warn(job: &JobId, failure: &str) {
     report::line("Warning", &format!("{job}: {failure}"));
 }
 
 fn failure(error: &str) -> RunOutcome {
     RunOutcome {
         directory: None,
-        status: None,
+        result: Err(error.to_owned()),
         summary: "0 passed".to_owned(),
-        error: Some(error.to_owned()),
     }
 }

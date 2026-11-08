@@ -3,8 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
-use super::{HANDSHAKE_TIMEOUT, PLAIN_HTTP_PORT, Rules, TLS_PORT, connect, open_tunnel};
-use crate::stream::pipe;
+use super::{Access, ConnectError, HANDSHAKE_TIMEOUT, Rules, Target, connect, relay, tunnel};
 
 /// Bounds the buffer when a client never ends its request head.
 const HEAD_LIMIT: usize = 64 * 1024;
@@ -36,7 +35,7 @@ fn read_head(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Splits `host:port` or `[v6]:port`, defaulting to `default_port`.
-fn split_authority(authority: &str, default_port: u16) -> Option<(String, u16)> {
+fn split_authority(authority: &str, default_port: u16) -> Option<Target> {
     let authority = authority
         .rsplit_once('@')
         .map_or(authority, |(_, rest)| rest);
@@ -46,12 +45,19 @@ fn split_authority(authority: &str, default_port: u16) -> Option<(String, u16)> 
             Some(port) => port.parse().ok()?,
             None => default_port,
         };
-        return Some((host.to_owned(), port));
+        return Some(Target {
+            host: host.to_owned(),
+            port,
+        });
     }
-    match authority.rsplit_once(':') {
-        Some((host, port)) => Some((host.to_owned(), port.parse().ok()?)),
-        None => Some((authority.to_owned(), default_port)),
-    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse().ok()?),
+        None => (authority, default_port),
+    };
+    Some(Target {
+        host: host.to_owned(),
+        port,
+    })
 }
 
 fn respond(stream: &mut TcpStream, status: &str) -> io::Result<()> {
@@ -62,11 +68,28 @@ fn respond(stream: &mut TcpStream, status: &str) -> io::Result<()> {
     stream.flush()
 }
 
-/// The target a request names, and the head to forward when it is not a tunnel.
-struct Request {
-    host: String,
-    port: u16,
-    forward: Option<String>,
+/// What a request asks the proxy to do.
+#[derive(Debug, Eq, PartialEq)]
+enum Request {
+    /// A `CONNECT` tunnel to the target.
+    Tunnel(Target),
+    /// A plain request, with the head to forward to the target.
+    Plain { target: Target, head: String },
+}
+
+impl Request {
+    fn target(&self) -> &Target {
+        match self {
+            Self::Tunnel(target) | Self::Plain { target, .. } => target,
+        }
+    }
+
+    fn access(&self) -> Access {
+        match self {
+            Self::Tunnel(_) => Access::Tunnel,
+            Self::Plain { .. } => Access::PlainHttp,
+        }
+    }
 }
 
 /// Reads the target out of a request head, or `None` when the head is malformed.
@@ -78,19 +101,14 @@ fn parse_request(head: &[u8]) -> Option<Request> {
     let target = parts.next()?;
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        let (host, port) = split_authority(target, TLS_PORT)?;
-        return Some(Request {
-            host,
-            port,
-            forward: None,
-        });
+        return split_authority(target, Access::Tunnel.default_port()).map(Request::Tunnel);
     }
     let version = parts.next()?;
     let rest = target
         .strip_prefix("http://")
         .or_else(|| target.strip_prefix("HTTP://"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let (host, port) = split_authority(authority, PLAIN_HTTP_PORT)?;
+    let checked = split_authority(authority, Access::PlainHttp.default_port())?;
     let path = rest
         .strip_prefix(authority)
         .unwrap_or_default()
@@ -105,32 +123,43 @@ fn parse_request(head: &[u8]) -> Option<Request> {
     let forward = rewrite_head(
         head,
         &format!("{method} {path} {version}"),
-        &host_header(&host, port),
+        &host_header(&checked),
     );
-    Some(Request {
-        host,
-        port,
-        forward: Some(forward),
+    Some(Request::Plain {
+        target: checked,
+        head: forward,
     })
 }
 
 /// The `Host` header for a checked target, with the port when it is not 80.
-fn host_header(host: &str, port: u16) -> String {
+fn host_header(target: &Target) -> String {
+    let Target { host, port } = target;
     let host = if host.contains(':') {
         format!("[{host}]")
     } else {
-        host.to_owned()
+        host.clone()
     };
-    if port == PLAIN_HTTP_PORT {
+    if *port == Access::PlainHttp.default_port() {
         host
     } else {
         format!("{host}:{port}")
     }
 }
 
+/// The status line answering a connection that failed.
+///
+/// Only a policy refusal is a 403. Any other failure, including an operating
+/// system that refuses the connection, is the gateway's.
+fn connect_failure_status(error: &ConnectError) -> &'static str {
+    match error {
+        ConnectError::Denied => "403 Forbidden",
+        ConnectError::Unresolved | ConnectError::Io(_) => "502 Bad Gateway",
+    }
+}
+
 pub(super) fn serve_http(mut client: TcpStream, rules: &Rules) -> io::Result<()> {
     client.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let (head, mut early_body) = match read_head(&mut client) {
+    let (head, early_body) = match read_head(&mut client) {
         Ok(parts) => parts,
         Err(error) => {
             let _ = respond(&mut client, "400 Bad Request");
@@ -141,39 +170,30 @@ pub(super) fn serve_http(mut client: TcpStream, rules: &Rules) -> io::Result<()>
         return respond(&mut client, "400 Bad Request");
     };
 
-    let default_port = if request.forward.is_some() {
-        PLAIN_HTTP_PORT
-    } else {
-        TLS_PORT
-    };
-    if !rules.permits(&request.host, request.port, default_port) {
+    if !rules.permits(request.target(), request.access()) {
         return respond(&mut client, "403 Forbidden");
     }
-    let mut upstream = match connect(rules, &request.host, request.port) {
+    let mut upstream = match connect(rules, request.target()) {
         Ok(upstream) => upstream,
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            return respond(&mut client, "403 Forbidden");
+        Err(ConnectError::Denied) => {
+            return respond(&mut client, connect_failure_status(&ConnectError::Denied));
         }
         Err(error) => {
-            let _ = respond(&mut client, "502 Bad Gateway");
-            return Err(error);
+            let _ = respond(&mut client, connect_failure_status(&error));
+            return Err(error.into_io(request.target()));
         }
     };
-    if let Some(head) = &request.forward {
-        upstream.write_all(head.as_bytes())?;
-    } else {
-        client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
-        client.flush()?;
-        let Some(received) =
-            open_tunnel(rules, &mut client, &request.host, request.port, early_body)?
-        else {
-            return Ok(());
-        };
-        early_body = received;
+    match request {
+        Request::Plain { head, .. } => {
+            upstream.write_all(head.as_bytes())?;
+            relay(client, upstream, &early_body)
+        }
+        Request::Tunnel(target) => {
+            client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+            client.flush()?;
+            tunnel(rules, client, upstream, &target, early_body)
+        }
     }
-    client.set_read_timeout(None)?;
-    upstream.write_all(&early_body)?;
-    pipe(client, upstream)
 }
 
 /// Headers the proxy drops and writes again itself.
@@ -213,8 +233,26 @@ mod tests {
     use std::net::{Ipv4Addr, TcpStream};
     use std::thread;
 
-    use super::{host_header, parse_request, read_head, rewrite_head, split_authority};
-    use crate::proxy::loopback_listener;
+    use super::{
+        Request, connect_failure_status, host_header, parse_request, read_head, rewrite_head,
+        split_authority,
+    };
+    use crate::proxy::{ConnectError, Target, loopback_listener};
+
+    fn target(host: &str, port: u16) -> Target {
+        Target {
+            host: host.to_owned(),
+            port,
+        }
+    }
+
+    /// The head a plain request forwards, or `None` for a tunnel.
+    fn forwarded(request: &Request) -> Option<&str> {
+        match request {
+            Request::Plain { head, .. } => Some(head),
+            Request::Tunnel(_) => None,
+        }
+    }
 
     /// A connected loopback pair, client end first.
     fn socket_pair() -> io::Result<(TcpStream, TcpStream)> {
@@ -260,34 +298,32 @@ mod tests {
     fn splits_authorities_with_and_without_ports() {
         assert_eq!(
             split_authority("example.com:8443", 443),
-            Some(("example.com".into(), 8443))
+            Some(target("example.com", 8443))
         );
         assert_eq!(
             split_authority("example.com", 80),
-            Some(("example.com".into(), 80))
+            Some(target("example.com", 80))
         );
         assert_eq!(
             split_authority("user:secret@example.com", 80),
-            Some(("example.com".into(), 80))
+            Some(target("example.com", 80))
         );
-        assert_eq!(
-            split_authority("[::1]:3000", 80),
-            Some(("::1".into(), 3000))
-        );
-        assert_eq!(split_authority("[::1]", 80), Some(("::1".into(), 80)));
+        assert_eq!(split_authority("[::1]:3000", 80), Some(target("::1", 3000)));
+        assert_eq!(split_authority("[::1]", 80), Some(target("::1", 80)));
         assert_eq!(split_authority("example.com:http", 80), None);
     }
 
     #[test]
     fn parses_tunnel_and_plain_targets_and_rejects_the_rest() {
         let tunnel = parse_request(b"CONNECT example.com:8443 HTTP/1.1\r\n\r\n").unwrap();
-        assert_eq!((tunnel.host.as_str(), tunnel.port), ("example.com", 8443));
-        assert!(tunnel.forward.is_none());
+        assert_eq!(tunnel, Request::Tunnel(target("example.com", 8443)));
+        let default_tunnel = parse_request(b"CONNECT example.com HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(default_tunnel, Request::Tunnel(target("example.com", 443)));
 
         let plain = parse_request(b"GET http://example.com/a?b#c HTTP/1.1\r\n\r\n").unwrap();
-        assert_eq!((plain.host.as_str(), plain.port), ("example.com", 80));
+        assert_eq!(plain.target(), &target("example.com", 80));
         assert_eq!(
-            plain.forward.as_deref(),
+            forwarded(&plain),
             Some("GET /a?b HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
         );
 
@@ -316,22 +352,40 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            request.forward.as_deref(),
+            forwarded(&request),
             Some("GET /v1 HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n")
         );
     }
 
     #[test]
     fn writes_the_port_and_brackets_into_the_host_header() {
-        assert_eq!(host_header("example.com", 80), "example.com");
-        assert_eq!(host_header("example.com", 8080), "example.com:8080");
-        assert_eq!(host_header("::1", 3000), "[::1]:3000");
+        assert_eq!(host_header(&target("example.com", 80)), "example.com");
         assert_eq!(
-            parse_request(b"GET http://example.com:8080 HTTP/1.1\r\n\r\n")
-                .unwrap()
-                .forward
-                .as_deref(),
+            host_header(&target("example.com", 8080)),
+            "example.com:8080"
+        );
+        assert_eq!(host_header(&target("::1", 3000)), "[::1]:3000");
+        assert_eq!(
+            forwarded(&parse_request(b"GET http://example.com:8080 HTTP/1.1\r\n\r\n").unwrap()),
             Some("GET / HTTP/1.1\r\nHost: example.com:8080\r\nConnection: close\r\n\r\n")
+        );
+    }
+
+    #[test]
+    fn answers_only_a_policy_refusal_with_forbidden() {
+        let refused_by_the_system = io::Error::from(io::ErrorKind::PermissionDenied);
+
+        assert_eq!(
+            connect_failure_status(&ConnectError::Denied),
+            "403 Forbidden"
+        );
+        assert_eq!(
+            connect_failure_status(&ConnectError::Unresolved),
+            "502 Bad Gateway"
+        );
+        assert_eq!(
+            connect_failure_status(&ConnectError::Io(refused_by_the_system)),
+            "502 Bad Gateway"
         );
     }
 }

@@ -353,7 +353,7 @@ fn runs_a_program_from_an_enabled_executable_group() {
     let output = run_workflow(&directory, &work, &manifest(sandbox, "uname")).unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    assert!(!output.stdout.is_empty());
+    assert_ne!(output.stdout, b"");
 }
 
 /// Accepts one connection and answers a fixed HTTP response.
@@ -423,7 +423,7 @@ fn reaches_an_allowed_host_through_the_socks_proxy() {
 #[test]
 fn refuses_local_connections_directly_and_through_the_proxy() {
     let (directory, work) = working_directory("cli-sandbox-local-network").unwrap();
-    let (origin_port, origin) = unused_origin().unwrap();
+    let (origin, origin_port) = unused_origin().unwrap();
     let sandbox = network(false, origin_port);
 
     let direct = run_workflow(
@@ -453,6 +453,10 @@ fn refuses_local_connections_directly_and_through_the_proxy() {
         "{stderr}"
     );
     assert!(!contains(&proxied.stdout, b"Sandbox"), "{proxied:?}");
+    // A one-task run is plain: notes, but no status decoration.
+    for decoration in ["Logging", "Running", "Failed", "Summary"] {
+        assert!(!stderr.contains(decoration), "{stderr}");
+    }
 }
 
 #[test]
@@ -460,7 +464,13 @@ fn applies_the_harness_environment_inside_the_sandbox() {
     let directory = TemporaryDirectory::new("cli-sandbox-harness-environment").unwrap();
     let work = directory.join("work");
     fs::create_dir(&work).unwrap();
-    write_harness_stub(&directory).unwrap();
+    // A `claude` stub that prints the harness environment it received.
+    directory
+        .executable(
+            "claude",
+            "#!/bin/sh\nprintf %s \"$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-$ENABLE_CLAUDEAI_MCP_SERVERS\"\n",
+        )
+        .unwrap();
     let manifest = directory
         .write(
             "workflow.yaml",
@@ -478,16 +488,4 @@ fn applies_the_harness_environment_inside_the_sandbox() {
         .unwrap();
 
     assert_eq!(output.stdout, b"1-false", "{output:?}");
-}
-
-/// Writes a `claude` stub that prints the harness environment it received.
-fn write_harness_stub(directory: &TemporaryDirectory) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let program = directory.join("claude");
-    fs::write(
-        &program,
-        "#!/bin/sh\nprintf %s \"$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-$ENABLE_CLAUDEAI_MCP_SERVERS\"\n",
-    )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
 }

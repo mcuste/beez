@@ -7,6 +7,7 @@ use std::io;
 use std::time::Duration;
 
 use beez_runner::RunEvent;
+use serde::Serialize;
 
 use crate::format::{seconds, status_text};
 
@@ -72,43 +73,66 @@ impl TaskOutcome {
         )
     }
 
-    /// How the outcome reads as a status line: the status word, then the
-    /// message.
+    /// How the outcome reads as a status line: the state, whose verb is the
+    /// status word, then the message.
     #[must_use]
-    pub fn status(self, label: &str) -> (&'static str, String) {
-        match self {
-            Self::Started => ("Running", label.to_owned()),
-            Self::Blocked => ("Blocked", label.to_owned()),
+    pub fn status(self, label: &str) -> (TaskState, String) {
+        let message = match self {
+            Self::Started | Self::Blocked => label.to_owned(),
             Self::Finished {
                 exit_status,
                 elapsed,
-            } => {
-                let verb = if self.succeeded() {
-                    "Finished"
-                } else {
-                    "Failed"
-                };
-                let message = format!(
-                    "{label} in {} ({})",
-                    seconds(elapsed),
-                    status_text(exit_status)
-                );
-                (verb, message)
-            }
-            Self::Failed { error, elapsed } => (
-                "Failed",
-                format!("{label} in {} ({error})", seconds(elapsed)),
+            } => format!(
+                "{label} in {} ({})",
+                seconds(elapsed),
+                status_text(exit_status)
             ),
-        }
+            Self::Failed { error, elapsed } => {
+                format!("{label} in {} ({error})", seconds(elapsed))
+            }
+        };
+
+        (self.state(), message)
     }
 
-    /// The state the run record names for the task.
-    pub(crate) fn state(self) -> &'static str {
+    /// The state the task is in after this outcome.
+    #[must_use]
+    pub fn state(self) -> TaskState {
         match self {
-            Self::Started => "running",
-            Self::Finished { .. } if self.succeeded() => "finished",
-            Self::Finished { .. } | Self::Failed { .. } => "failed",
-            Self::Blocked => "blocked",
+            Self::Started => TaskState::Running,
+            Self::Finished { .. } if self.succeeded() => TaskState::Finished,
+            Self::Finished { .. } | Self::Failed { .. } => TaskState::Failed,
+            Self::Blocked => TaskState::Blocked,
+        }
+    }
+}
+
+/// Where one task of a run stands, as the run record names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskState {
+    /// The task has not started yet.
+    Pending,
+    /// The task has started and not ended yet.
+    Running,
+    /// The task ran to the end and exited with status zero.
+    Finished,
+    /// The task exited with another status, or could not start at all.
+    Failed,
+    /// The task never ran, because a dependency failed.
+    Blocked,
+}
+
+impl TaskState {
+    /// The status word a status line shows for the state.
+    #[must_use]
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Running => "Running",
+            Self::Finished => "Finished",
+            Self::Failed => "Failed",
+            Self::Blocked => "Blocked",
         }
     }
 }
@@ -118,7 +142,7 @@ mod tests {
     use std::io;
     use std::time::Duration;
 
-    use super::TaskOutcome;
+    use super::{TaskOutcome, TaskState};
 
     #[test]
     fn names_a_task_that_ran_to_the_end_by_its_status() {
@@ -133,13 +157,16 @@ mod tests {
 
         assert_eq!(
             ok.status("build"),
-            ("Finished", "build in 1.5s (ok)".into())
+            (TaskState::Finished, "build in 1.5s (ok)".into())
         );
         assert_eq!(
             failed.status("build"),
-            ("Failed", "build in 1.5s (exit 3)".into())
+            (TaskState::Failed, "build in 1.5s (exit 3)".into())
         );
-        assert_eq!((ok.state(), failed.state()), ("finished", "failed"));
+        assert_eq!(
+            (TaskState::Finished.verb(), TaskState::Failed.verb()),
+            ("Finished", "Failed")
+        );
     }
 
     #[test]
@@ -150,11 +177,20 @@ mod tests {
             elapsed: Duration::from_millis(200),
         };
 
-        assert_eq!(blocked.status("test"), ("Blocked", "test".into()));
+        assert_eq!(blocked.status("test"), (TaskState::Blocked, "test".into()));
         assert_eq!(
             failed.status("test"),
-            ("Failed", "test in 0.2s (entity not found)".into())
+            (TaskState::Failed, "test in 0.2s (entity not found)".into())
         );
-        assert_eq!((blocked.state(), failed.state()), ("blocked", "failed"));
+        assert_eq!(TaskState::Blocked.verb(), "Blocked");
+    }
+
+    #[test]
+    fn names_a_running_task() {
+        assert_eq!(
+            TaskOutcome::Started.status("lint"),
+            (TaskState::Running, "lint".into())
+        );
+        assert_eq!(TaskState::Running.verb(), "Running");
     }
 }

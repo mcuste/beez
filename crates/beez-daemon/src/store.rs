@@ -14,6 +14,8 @@ use std::time::SystemTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::control::JobId;
+use crate::message::Watch;
 use crate::paths::DaemonPaths;
 
 /// Layout version of the files.
@@ -73,13 +75,17 @@ impl Registry {
 
     /// Adds a manifest, replacing an entry for the same file.
     ///
-    /// Returns false when the daemon already watched the manifest.
-    pub(crate) fn add(&mut self, watched: Watched) -> bool {
-        let added = !self.watches(&watched.path);
+    /// Says whether the daemon already watched the manifest.
+    pub(crate) fn add(&mut self, watched: Watched) -> Watch {
+        let watch = if self.watches(&watched.path) {
+            Watch::Again
+        } else {
+            Watch::New
+        };
         self.manifests.retain(|entry| entry.path != watched.path);
         self.manifests.push(watched);
 
-        added
+        watch
     }
 
     /// Removes a manifest and reports whether it was there.
@@ -101,7 +107,7 @@ impl Registry {
 #[serde(default)]
 pub(crate) struct States {
     schema: u32,
-    jobs: BTreeMap<String, JobState>,
+    jobs: BTreeMap<JobId, JobState>,
 }
 
 /// What already happened to one job.
@@ -138,18 +144,38 @@ impl States {
 
     /// The state of one job, or the default for a job that never ran.
     #[must_use]
-    pub(crate) fn get(&self, job: &str) -> JobState {
+    pub(crate) fn get(&self, job: &JobId) -> JobState {
         self.jobs.get(job).cloned().unwrap_or_default()
     }
 
     /// Replaces the state of one job.
-    pub(crate) fn set(&mut self, job: &str, state: JobState) {
-        self.jobs.insert(job.to_owned(), state);
+    pub(crate) fn set(&mut self, job: &JobId, state: JobState) {
+        self.jobs.insert(job.clone(), state);
     }
 
-    /// Drops the state of every job that is no longer there.
-    pub(crate) fn keep_only(&mut self, jobs: &[String]) {
-        self.jobs.retain(|id, _| jobs.iter().any(|job| job == id));
+    /// Drops the state of every job no manifest of `registry` may hold, and
+    /// says whether any went.
+    ///
+    /// Ownership follows the stem of each watched manifest, not the jobs it
+    /// holds right now: a manifest that does not load holds only the job
+    /// named by its stem, and the state of its named schedules must outlast
+    /// the mistake.
+    ///
+    /// Stems are not unique: `admit` refuses only an equal job ID, so
+    /// `a/nightly.yaml` and `b/nightly.yaml` may both be watched with
+    /// differently named schedules. The state of a removed manifest whose
+    /// stem another watched manifest shares stays until that one goes too.
+    pub(crate) fn keep_watched(&mut self, registry: &Registry) -> bool {
+        let stems: Vec<String> = registry
+            .manifests()
+            .iter()
+            .map(|watched| crate::job::stem(&watched.path))
+            .collect();
+        let before = self.jobs.len();
+        self.jobs
+            .retain(|id, _| stems.iter().any(|stem| id.belongs_to(stem)));
+
+        before != self.jobs.len()
     }
 
     /// Writes the state.
@@ -178,6 +204,88 @@ pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> 
     drop(file);
 
     fs::rename(temporary, path)
+}
+
+/// A Beez root that watches three manifests, for tests of what removing one
+/// keeps.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::PathBuf;
+
+    use beez_test_support::TemporaryDirectory;
+
+    use super::{JobState, Registry, States, Watched};
+    use crate::control::JobId;
+    use crate::paths::DaemonPaths;
+
+    const TASKS: &str = "tasks:\n  - id: mark\n    sandbox: false\n    command: [\"true\"]\n";
+
+    /// The manifests [`watch_three`] writes.
+    pub(crate) struct Watching {
+        /// A manifest with the named schedule `a`, the one tests remove.
+        pub(crate) weekly: PathBuf,
+    }
+
+    /// Watches three manifests and gives each job paused state:
+    ///
+    /// - `nightly.yaml` no longer loads, so it holds the job `nightly`, yet
+    ///   its schedule `nightly:docs` has state from when it loaded.
+    /// - `weekly.yaml` holds `weekly:a`, and `weekly` has state from before
+    ///   the schedule had a name.
+    /// - `monthly.yaml` holds `monthly`.
+    pub(crate) fn watch_three(directory: &TemporaryDirectory, paths: &DaemonPaths) -> Watching {
+        let broken = format!("schedule:\n  cron: \"not a cron\"\n{TASKS}");
+        let named = format!(
+            "schedule:\n  - name: a\n    cron: \"0 3 * * *\"\n    allow_unsandboxed: true\n{TASKS}"
+        );
+        let single =
+            format!("schedule:\n  cron: \"0 3 1 * *\"\n  allow_unsandboxed: true\n{TASKS}");
+        let mut registry = Registry::default();
+        let mut weekly = PathBuf::new();
+        for (file, text) in [
+            ("nightly.yaml", broken),
+            ("weekly.yaml", named),
+            ("monthly.yaml", single),
+        ] {
+            let path = directory.write(file, text).unwrap();
+            if file == "weekly.yaml" {
+                weekly.clone_from(&path);
+            }
+            registry.add(Watched {
+                path,
+                working_directory: directory.path().to_path_buf(),
+            });
+        }
+        let mut states = States::default();
+        for id in ["nightly:docs", "weekly", "weekly:a", "monthly"] {
+            states.set(&id_of(id), paused());
+        }
+        paths.create().unwrap();
+        registry.save(&paths.manifests()).unwrap();
+        states.save(&paths.state()).unwrap();
+
+        Watching { weekly }
+    }
+
+    /// Asserts that `states` lost the state of `weekly.yaml` and kept the rest.
+    pub(crate) fn assert_only_weekly_dropped(states: &States) {
+        let kept: Vec<String> = states.jobs.keys().map(JobId::to_string).collect();
+
+        assert_eq!(kept, ["monthly", "nightly:docs"]);
+        assert!(states.get(&id_of("nightly:docs")).paused);
+        assert!(states.get(&id_of("monthly")).paused);
+    }
+
+    fn id_of(text: &str) -> JobId {
+        JobId::from(text.to_owned())
+    }
+
+    fn paused() -> JobState {
+        JobState {
+            paused: true,
+            ..JobState::default()
+        }
+    }
 }
 
 /// Reads and writes an instant as a UTC date and time.
@@ -218,8 +326,13 @@ mod instant {
 #[cfg(test)]
 mod tests {
     use super::{JobState, Registry, States, Watched};
+    use crate::control::JobId;
     use beez_schedule::parse_instant;
     use beez_test_support::TemporaryDirectory;
+
+    fn id(text: &str) -> JobId {
+        JobId::from(text.to_owned())
+    }
 
     #[test]
     fn reads_a_missing_file_as_an_empty_one() {
@@ -234,7 +347,7 @@ mod tests {
         assert!(
             !States::load(&directory.join("state.json"))
                 .unwrap()
-                .get("nightly")
+                .get(&id("nightly"))
                 .paused
         );
     }
@@ -274,7 +387,7 @@ mod tests {
         let path = directory.join("state.json");
         let mut states = States::default();
         states.set(
-            "nightly",
+            &id("nightly"),
             JobState {
                 paused: true,
                 last_fire: Some(parse_instant("2026-09-10T03:00:00Z").unwrap()),
@@ -284,7 +397,7 @@ mod tests {
         );
         states.save(&path).unwrap();
 
-        let read = States::load(&path).unwrap().get("nightly");
+        let read = States::load(&path).unwrap().get(&id("nightly"));
 
         assert!(read.paused);
         assert_eq!(read.last_status, Some(0));
@@ -295,21 +408,28 @@ mod tests {
     }
 
     #[test]
-    fn drops_the_state_of_a_job_that_is_gone() {
+    fn drops_the_state_of_every_job_of_a_manifest_that_is_gone() {
+        let mut registry = Registry::default();
+        registry.add(Watched {
+            path: "/work/weekly.yaml".into(),
+            working_directory: "/work".into(),
+        });
         let mut states = States::default();
-        states.set("nightly", JobState::default());
-        states.set("weekly", JobState::default());
-        states.set(
-            "weekly",
-            JobState {
-                paused: true,
-                ..JobState::default()
-            },
-        );
+        for job in ["nightly", "nightly:docs", "weekly", "weekly:a"] {
+            states.set(
+                &id(job),
+                JobState {
+                    paused: true,
+                    ..JobState::default()
+                },
+            );
+        }
 
-        states.keep_only(&["weekly".to_owned()]);
+        assert!(states.keep_watched(&registry));
+        assert!(!states.keep_watched(&registry));
 
-        assert!(states.get("weekly").paused);
-        assert!(!states.get("nightly").paused);
+        let kept: Vec<String> = states.jobs.keys().map(JobId::to_string).collect();
+        assert_eq!(kept, ["weekly", "weekly:a"]);
+        assert!(states.get(&id("weekly:a")).paused);
     }
 }

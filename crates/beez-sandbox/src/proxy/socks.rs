@@ -3,8 +3,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
-use super::{HANDSHAKE_TIMEOUT, Rules, TLS_PORT, connect, open_tunnel};
-use crate::stream::pipe;
+use super::{Access, ConnectError, HANDSHAKE_TIMEOUT, Rules, Target, connect, tunnel};
 
 const SOCKS_VERSION: u8 = 5;
 const SOCKS_NO_AUTH: u8 = 0;
@@ -62,7 +61,7 @@ fn negotiate_auth(client: &mut TcpStream) -> io::Result<bool> {
 }
 
 /// Reads the requested host and port. `None` means the client already got a refusal.
-fn read_target(client: &mut TcpStream) -> io::Result<Option<(String, u16)>> {
+fn read_target(client: &mut TcpStream) -> io::Result<Option<Target>> {
     let [_, command, _, address_type] = read_exact::<4>(client)?;
     if command != SOCKS_CONNECT {
         socks_reply(client, SOCKS_COMMAND_UNSUPPORTED)?;
@@ -94,7 +93,7 @@ fn read_target(client: &mut TcpStream) -> io::Result<Option<(String, u16)>> {
         }
     };
     let port = u16::from_be_bytes(read_exact::<2>(client)?);
-    Ok(Some((host, port)))
+    Ok(Some(Target { host, port }))
 }
 
 pub(super) fn serve_socks(mut client: TcpStream, rules: &Rules) -> io::Result<()> {
@@ -102,30 +101,60 @@ pub(super) fn serve_socks(mut client: TcpStream, rules: &Rules) -> io::Result<()
     if !negotiate_auth(&mut client)? {
         return Ok(());
     }
-    let Some((host, port)) = read_target(&mut client)? else {
+    let Some(target) = read_target(&mut client)? else {
         return Ok(());
     };
 
-    if !rules.permits(&host, port, TLS_PORT) {
+    if !rules.permits(&target, Access::Tunnel) {
         return socks_reply(&mut client, SOCKS_NOT_ALLOWED);
     }
-    let mut upstream = match connect(rules, &host, port) {
+    let upstream = match connect(rules, &target) {
         Ok(upstream) => upstream,
         Err(error) => {
-            let status = match error.kind() {
-                io::ErrorKind::NotFound => SOCKS_HOST_UNREACHABLE,
-                io::ErrorKind::PermissionDenied => SOCKS_NOT_ALLOWED,
-                _ => SOCKS_GENERAL_FAILURE,
-            };
-            let _ = socks_reply(&mut client, status);
-            return Err(error);
+            let _ = socks_reply(&mut client, connect_failure_status(&error));
+            return Err(error.into_io(&target));
         }
     };
     socks_reply(&mut client, SOCKS_SUCCEEDED)?;
-    let Some(received) = open_tunnel(rules, &mut client, &host, port, Vec::new())? else {
-        return Ok(());
+    tunnel(rules, client, upstream, &target, Vec::new())
+}
+
+/// The reply status for a connection that failed.
+///
+/// Only a policy refusal is "not allowed". Any other failure, including an
+/// operating system that refuses the connection, is a general failure.
+fn connect_failure_status(error: &ConnectError) -> u8 {
+    match error {
+        ConnectError::Denied => SOCKS_NOT_ALLOWED,
+        ConnectError::Unresolved => SOCKS_HOST_UNREACHABLE,
+        ConnectError::Io(_) => SOCKS_GENERAL_FAILURE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::{
+        SOCKS_GENERAL_FAILURE, SOCKS_HOST_UNREACHABLE, SOCKS_NOT_ALLOWED, connect_failure_status,
     };
-    client.set_read_timeout(None)?;
-    upstream.write_all(&received)?;
-    pipe(client, upstream)
+    use crate::proxy::ConnectError;
+
+    #[test]
+    fn answers_only_a_policy_refusal_with_not_allowed() {
+        let refused_by_the_system = io::Error::from(io::ErrorKind::PermissionDenied);
+
+        assert_eq!(
+            connect_failure_status(&ConnectError::Denied),
+            SOCKS_NOT_ALLOWED
+        );
+        assert_eq!(
+            connect_failure_status(&ConnectError::Unresolved),
+            SOCKS_HOST_UNREACHABLE
+        );
+        assert_eq!(
+            connect_failure_status(&ConnectError::Io(refused_by_the_system)),
+            SOCKS_GENERAL_FAILURE
+        );
+    }
 }

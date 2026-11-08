@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
-use std::io;
+use std::fmt;
+use std::io::{self, Write};
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream, ToSocketAddrs};
@@ -9,6 +10,7 @@ use std::time::Duration;
 use beez_policy::DomainRule;
 
 use crate::server::Server;
+use crate::stream::pipe;
 
 mod http;
 mod socks;
@@ -26,6 +28,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const TLS_PORT: u16 = 443;
 /// The port a rule without a port allows for plain HTTP requests.
 const PLAIN_HTTP_PORT: u16 = 80;
+
+/// How many distinct denials are remembered so each is reported once.
+///
+/// Past this many, a new denial is still reported but no longer remembered,
+/// so a task that tries endless targets cannot grow the set without bound.
+const REPORTED_LIMIT: usize = 1024;
 
 /// Cloud metadata services outside the loopback and link-local ranges.
 ///
@@ -50,8 +58,7 @@ const METADATA_ADDRESSES: [IpAddr; 5] = [
 /// and a line on Beez's stderr.
 #[derive(Debug)]
 pub struct Proxy {
-    http_port: u16,
-    socks_port: u16,
+    ports: ProxyPorts,
     _http: Server,
     _socks: Server,
 }
@@ -79,8 +86,10 @@ impl Proxy {
         });
 
         Ok(Self {
-            http_port,
-            socks_port,
+            ports: ProxyPorts {
+                http: http_port,
+                socks: socks_port,
+            },
             _http: http,
             _socks: socks,
         })
@@ -89,14 +98,28 @@ impl Proxy {
     /// Port of the HTTP proxy, which also accepts `CONNECT`.
     #[must_use]
     pub fn http_port(&self) -> u16 {
-        self.http_port
+        self.ports.http
     }
 
     /// Port of the SOCKS5 proxy, which requires domain-name targets.
     #[must_use]
     pub fn socks_port(&self) -> u16 {
-        self.socks_port
+        self.ports.socks
     }
+
+    /// Both ports, as the sandbox backends take them.
+    pub(crate) fn ports(&self) -> ProxyPorts {
+        self.ports
+    }
+}
+
+/// The loopback ports of the HTTP and SOCKS5 proxies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProxyPorts {
+    /// The HTTP proxy, which also accepts `CONNECT`.
+    pub(crate) http: u16,
+    /// The SOCKS5 proxy.
+    pub(crate) socks: u16,
 }
 
 /// A listener on an ephemeral loopback port, with the port it got.
@@ -104,6 +127,38 @@ pub(crate) fn loopback_listener() -> io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     Ok((listener, port))
+}
+
+/// A host and port a client asks the proxy to reach.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Target {
+    host: String,
+    port: u16,
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{}", self.host, self.port)
+    }
+}
+
+/// How a client uses a connection, which sets the port a rule without a port allows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Access {
+    /// A tunnel that carries any bytes, from `CONNECT` or SOCKS5.
+    Tunnel,
+    /// A plain HTTP request the proxy forwards.
+    PlainHttp,
+}
+
+impl Access {
+    /// The port a rule without a port allows for this access.
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Tunnel => TLS_PORT,
+            Self::PlainHttp => PLAIN_HTTP_PORT,
+        }
+    }
 }
 
 /// The allowlist plus the targets already reported as denied.
@@ -116,16 +171,17 @@ struct Rules {
 impl Rules {
     /// True when a rule allows the target. Reports each denied target once.
     ///
-    /// A rule without a port allows `default_port`.
-    fn permits(&self, host: &str, port: u16, default_port: u16) -> bool {
+    /// A rule without a port allows the default port of `access`.
+    fn permits(&self, target: &Target, access: Access) -> bool {
+        let default_port = access.default_port();
         if self
             .domains
             .iter()
-            .any(|rule| rule.matches(host, port, default_port))
+            .any(|rule| rule.matches(&target.host, target.port, default_port))
         {
             return true;
         }
-        self.report(&format!("denied connection to {host}:{port}"));
+        self.report(&format!("denied connection to {target}"));
         false
     }
 
@@ -139,18 +195,50 @@ impl Rules {
     }
 
     /// Writes each message once on Beez's stderr.
+    ///
+    /// Only the first [`REPORTED_LIMIT`] messages are remembered; later new
+    /// ones are written every time.
     fn report(&self, message: &str) {
-        let first_time = self
-            .reported
-            .lock()
-            .map_or(true, |mut reported| reported.insert(message.to_owned()));
+        let first_time = self.reported.lock().map_or(true, |mut reported| {
+            if reported.contains(message) {
+                false
+            } else {
+                if reported.len() < REPORTED_LIMIT {
+                    reported.insert(message.to_owned());
+                }
+                true
+            }
+        });
         if first_time {
             crate::diagnostic::report(message);
         }
     }
 }
 
-/// Reads the start of a tunnel to `host` and decides whether it may go on.
+/// Checks the start of a tunnel to `target`, then copies bytes both ways.
+///
+/// `received` holds the bytes the client sent before the tunnel opened.
+fn tunnel(
+    rules: &Rules,
+    mut client: TcpStream,
+    upstream: TcpStream,
+    target: &Target,
+    received: Vec<u8>,
+) -> io::Result<()> {
+    let Some(received) = open_tunnel(rules, &mut client, target, received)? else {
+        return Ok(());
+    };
+    relay(client, upstream, &received)
+}
+
+/// Ends the handshake: sends `early` bytes upstream and copies bytes both ways.
+fn relay(client: TcpStream, mut upstream: TcpStream, early: &[u8]) -> io::Result<()> {
+    client.set_read_timeout(None)?;
+    upstream.write_all(early)?;
+    pipe(client, upstream)
+}
+
+/// Reads the start of a tunnel to `target` and decides whether it may go on.
 ///
 /// A tunnel to port 443 must open with a TLS `ClientHello` that names `host`.
 /// Shared hosting serves many sites on one address and picks the site from
@@ -163,36 +251,53 @@ impl Rules {
 fn open_tunnel(
     rules: &Rules,
     client: &mut TcpStream,
-    host: &str,
-    port: u16,
+    target: &Target,
     received: Vec<u8>,
 ) -> io::Result<Option<Vec<u8>>> {
-    if port != TLS_PORT {
+    if target.port != TLS_PORT {
         return Ok(Some(received));
     }
     let received = tls::read_first_record(client, received)?;
-    let refusal = match tls::parse(&received) {
-        Hello::Other => format!("denied a tunnel to {host}:{port} that did not start TLS"),
+    match tunnel_verdict(&tls::parse(&received), target) {
+        Ok(()) => Ok(Some(received)),
+        Err(refusal) => {
+            rules.report(&refusal);
+            Ok(None)
+        }
+    }
+}
+
+/// Whether a TLS tunnel to `target` that starts with `hello` may go on.
+///
+/// The error is the refusal to report.
+fn tunnel_verdict(hello: &Hello, target: &Target) -> Result<(), String> {
+    let host = target.host.as_str();
+    match hello {
+        Hello::Other => Err(format!(
+            "denied a tunnel to {target} that did not start TLS"
+        )),
         Hello::Tls {
             encrypted: true, ..
-        } => format!("denied an encrypted TLS hello through a tunnel to {host}:{port}"),
+        } => Err(format!(
+            "denied an encrypted TLS hello through a tunnel to {target}"
+        )),
         Hello::Tls {
             server_name: None, ..
-        } if host.parse::<IpAddr>().is_ok() => return Ok(Some(received)),
+        } if host.parse::<IpAddr>().is_ok() => Ok(()),
         Hello::Tls {
             server_name: None, ..
-        } => format!("denied TLS without a server name through a tunnel to {host}:{port}"),
+        } => Err(format!(
+            "denied TLS without a server name through a tunnel to {target}"
+        )),
         Hello::Tls {
             server_name: Some(name),
             ..
-        } if same_host(&name, host) => return Ok(Some(received)),
+        } if same_host(name, host) => Ok(()),
         Hello::Tls {
             server_name: Some(name),
             ..
-        } => format!("denied TLS to {name} through a tunnel to {host}:{port}"),
-    };
-    rules.report(&refusal);
-    Ok(None)
+        } => Err(format!("denied TLS to {name} through a tunnel to {target}")),
+    }
 }
 
 /// True when two DNS names name the same host.
@@ -246,23 +351,51 @@ fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
     }
 }
 
-/// Connects to the first allowed address of `host`.
-///
-/// A `PermissionDenied` error means the policy refused every address, which
-/// the proxies answer with a refusal rather than a gateway error.
-fn connect(rules: &Rules, host: &str, port: u16) -> io::Result<TcpStream> {
-    let mut last_error = io::Error::new(io::ErrorKind::NotFound, format!("{host} did not resolve"));
-    for address in (host, port).to_socket_addrs()? {
-        if !rules.permits_address(host, address.ip()) {
-            last_error = io::Error::new(
+/// Why [`connect`] reached no address.
+#[derive(Debug)]
+enum ConnectError {
+    /// The policy refused the last address tried.
+    Denied,
+    /// The host resolved to no address.
+    Unresolved,
+    /// Resolving, or connecting to the last address tried, failed.
+    Io(io::Error),
+}
+
+impl ConnectError {
+    /// The error for the proxy's own result, naming `target`.
+    fn into_io(self, target: &Target) -> io::Error {
+        match self {
+            Self::Denied => io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("{host} resolves to local address {}", address.ip()),
-            );
+                format!("{} resolves to a local address", target.host),
+            ),
+            Self::Unresolved => io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} did not resolve", target.host),
+            ),
+            Self::Io(error) => error,
+        }
+    }
+}
+
+/// Connects to the first allowed address of `target`.
+///
+/// When every address fails, the error is the outcome of the last one tried.
+fn connect(rules: &Rules, target: &Target) -> Result<TcpStream, ConnectError> {
+    let host = target.host.as_str();
+    let mut last_error = ConnectError::Unresolved;
+    for address in (host, target.port)
+        .to_socket_addrs()
+        .map_err(ConnectError::Io)?
+    {
+        if !rules.permits_address(host, address.ip()) {
+            last_error = ConnectError::Denied;
             continue;
         }
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
             Ok(stream) => return Ok(stream),
-            Err(error) => last_error = error,
+            Err(error) => last_error = ConnectError::Io(error),
         }
     }
     Err(last_error)
@@ -281,8 +414,11 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, TcpStream};
     use std::sync::Mutex;
 
+    use super::tls::Hello;
     use super::tls::tests::{client_hello, encrypted_hello_extension, server_name_extension};
-    use super::{Rules, is_local, loopback_listener, open_tunnel};
+    use super::{
+        REPORTED_LIMIT, Rules, Target, is_local, loopback_listener, open_tunnel, tunnel_verdict,
+    };
 
     fn rules() -> Rules {
         Rules {
@@ -294,12 +430,88 @@ mod tests {
 
     /// Runs `open_tunnel` for `host:port` on a client that sends `bytes`.
     fn open(host: &str, port: u16, bytes: &[u8]) -> Option<Vec<u8>> {
+        open_reporting(host, port, bytes).0
+    }
+
+    /// Like [`open`], with the messages the refusal reported.
+    fn open_reporting(host: &str, port: u16, bytes: &[u8]) -> (Option<Vec<u8>>, Vec<String>) {
         let (listener, listen_port) = loopback_listener().unwrap();
         let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, listen_port)).unwrap();
         client.write_all(bytes).unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
         let (mut server, _) = listener.accept().unwrap();
-        open_tunnel(&rules(), &mut server, host, port, Vec::new()).unwrap()
+        let target = Target {
+            host: host.to_owned(),
+            port,
+        };
+        let rules = rules();
+        let opened = open_tunnel(&rules, &mut server, &target, Vec::new()).unwrap();
+        let reported = rules.reported.into_inner().unwrap().into_iter().collect();
+        (opened, reported)
+    }
+
+    #[test]
+    fn decides_every_kind_of_tls_tunnel_start() {
+        let named = |name: &str| client_hello(&[server_name_extension(name)]);
+        let encrypted_named = client_hello(&[
+            server_name_extension("api.example.com"),
+            encrypted_hello_extension(),
+        ]);
+        let encrypted_nameless = client_hello(&[encrypted_hello_extension()]);
+        let nameless = client_hello(&[]);
+        let plain = b"GET / HTTP/1.1\r\n\r\n".to_vec();
+        // Host, first bytes, and the refusal, or `None` when the tunnel opens.
+        let cases: [(&str, Vec<u8>, Option<&str>); 10] = [
+            (
+                "api.example.com",
+                plain,
+                Some("denied a tunnel to api.example.com:443 that did not start TLS"),
+            ),
+            (
+                "api.example.com",
+                encrypted_named,
+                Some("denied an encrypted TLS hello through a tunnel to api.example.com:443"),
+            ),
+            (
+                "10.0.0.5",
+                encrypted_nameless,
+                Some("denied an encrypted TLS hello through a tunnel to 10.0.0.5:443"),
+            ),
+            ("10.0.0.5", nameless.clone(), None),
+            ("::1", nameless.clone(), None),
+            (
+                "api.example.com",
+                nameless,
+                Some("denied TLS without a server name through a tunnel to api.example.com:443"),
+            ),
+            ("api.example.com", named("api.example.com"), None),
+            ("api.example.com.", named("API.Example.com"), None),
+            (
+                "api.example.com",
+                named("evil.example"),
+                Some("denied TLS to evil.example through a tunnel to api.example.com:443"),
+            ),
+            (
+                "10.0.0.5",
+                named("evil.example"),
+                Some("denied TLS to evil.example through a tunnel to 10.0.0.5:443"),
+            ),
+        ];
+
+        for (host, bytes, refusal) in cases {
+            let (opened, reported) = open_reporting(host, 443, &bytes);
+
+            match refusal {
+                None => {
+                    assert_eq!(opened, Some(bytes), "{host}");
+                    assert!(reported.is_empty(), "{host}: {reported:?}");
+                }
+                Some(refusal) => {
+                    assert_eq!(opened, None, "{host}");
+                    assert_eq!(reported, [refusal], "{host}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -350,6 +562,92 @@ mod tests {
     #[test]
     fn leaves_tunnels_to_other_ports_unread() {
         assert_eq!(open("github.com", 22, b"SSH-2.0-x\r\n"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn judges_a_tls_hello_against_the_tunnel_host() {
+        let tls = |server_name: Option<&str>, encrypted| Hello::Tls {
+            server_name: server_name.map(str::to_owned),
+            encrypted,
+        };
+        let target = |host: &str| Target {
+            host: host.to_owned(),
+            port: 443,
+        };
+        let cases = [
+            (
+                Hello::Other,
+                "a.example",
+                Err("denied a tunnel to a.example:443 that did not start TLS"),
+            ),
+            (
+                tls(Some("a.example"), true),
+                "a.example",
+                Err("denied an encrypted TLS hello through a tunnel to a.example:443"),
+            ),
+            (
+                tls(None, true),
+                "10.0.0.5",
+                Err("denied an encrypted TLS hello through a tunnel to 10.0.0.5:443"),
+            ),
+            (tls(None, false), "10.0.0.5", Ok(())),
+            (tls(None, false), "::1", Ok(())),
+            (
+                tls(None, false),
+                "a.example",
+                Err("denied TLS without a server name through a tunnel to a.example:443"),
+            ),
+            (tls(Some("A.Example."), false), "a.example", Ok(())),
+            (
+                tls(Some("b.example"), false),
+                "a.example",
+                Err("denied TLS to b.example through a tunnel to a.example:443"),
+            ),
+            (
+                tls(Some("b.example"), false),
+                "10.0.0.5",
+                Err("denied TLS to b.example through a tunnel to 10.0.0.5:443"),
+            ),
+        ];
+
+        for (hello, host, expected) in cases {
+            assert_eq!(
+                tunnel_verdict(&hello, &target(host)),
+                expected.map_err(str::to_owned),
+                "{hello:?} to {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_a_denial_once() {
+        let sut = rules();
+
+        sut.report("denied connection to a:1");
+        sut.report("denied connection to a:1");
+
+        assert_eq!(sut.reported.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stops_remembering_denials_past_the_limit() {
+        let sut = rules();
+
+        for index in 0..=REPORTED_LIMIT {
+            sut.report(&format!("denied connection to host{index}:443"));
+        }
+
+        assert_eq!(sut.reported.lock().unwrap().len(), REPORTED_LIMIT);
+    }
+
+    #[test]
+    fn writes_a_target_as_host_and_port() {
+        let target = Target {
+            host: "::1".to_owned(),
+            port: 3000,
+        };
+
+        assert_eq!(target.to_string(), "::1:3000");
     }
 
     fn local(text: &str) -> bool {

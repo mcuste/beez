@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -48,7 +47,8 @@ pub enum RunEvent {
         /// Time until the request failed.
         elapsed: Duration,
     },
-    /// A workflow task never ran, because a dependency failed.
+    /// A workflow task never ran, because a dependency failed or another task
+    /// could not start.
     Blocked {
         /// Workflow task that stays pending.
         task: TaskIndex,
@@ -56,30 +56,20 @@ pub enum RunEvent {
 }
 
 impl RunEvent {
-    /// The workflow task this event belongs to, when it belongs to one.
-    #[must_use]
-    pub fn task(&self) -> Option<TaskIndex> {
-        match self {
-            Self::Started { task }
-            | Self::Output { task, .. }
-            | Self::Finished { task, .. }
-            | Self::Failed { task, .. } => *task,
-            Self::Blocked { task } => Some(*task),
-        }
-    }
-
     /// The position of the task this event belongs to.
     ///
     /// A direct request has one task of its own, at position zero.
     #[must_use]
     pub fn position(&self) -> usize {
-        position(self.task())
+        let task = match self {
+            Self::Started { task }
+            | Self::Output { task, .. }
+            | Self::Finished { task, .. }
+            | Self::Failed { task, .. } => *task,
+            Self::Blocked { task } => Some(*task),
+        };
+        task.map_or(0, TaskIndex::position)
     }
-}
-
-/// The position of a workflow task, or zero for a direct request.
-fn position(task: Option<TaskIndex>) -> usize {
-    task.map_or(0, TaskIndex::position)
 }
 
 /// Runs direct requests and validated workflows in one working directory.
@@ -110,16 +100,16 @@ impl Runner {
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
         on_event(&RunEvent::Started { task: None })?;
-        let mut outcomes = run_requests_concurrently(
-            &self.processes,
-            vec![(None, request, sandbox.cloned())],
-            on_event,
-        )?;
-        let Some((_, outcome)) = outcomes.pop() else {
+        let job = Job {
+            task: None,
+            request,
+            sandbox,
+        };
+        let mut outcomes = run_requests_concurrently(&self.processes, vec![job], on_event)?;
+        let Some(outcome) = outcomes.pop() else {
             return Err(io::Error::other("request produced no result"));
         };
-        let status = task_status(&outcome);
-        outcome.map(|_| status)
+        outcome.map(|output| exit_status(&output))
     }
 
     /// Runs ready workflow tasks concurrently until completion.
@@ -128,42 +118,126 @@ impl Runner {
         workflow: &Workflow,
         on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
     ) -> io::Result<i32> {
-        let mut execution = workflow.execution();
-        let mut outputs = HashMap::new();
-        let mut exit_status = 0;
-        while execution.has_pending() {
-            let tasks = start_ready_tasks(&mut execution, on_event)?;
+        let mut run = WorkflowRun::new(workflow);
+        while run.execution.has_pending() {
+            let tasks = run.start_ready(on_event)?;
 
             // Tasks stay pending only when a dependency failed, which already set the status.
             if tasks.is_empty() {
-                for index in execution.pending() {
-                    on_event(&RunEvent::Blocked { task: index })?;
-                }
-                return Ok(exit_status);
+                run.block_pending(on_event)?;
+                return Ok(run.exit_status);
             }
 
-            let jobs = tasks
-                .into_iter()
-                .map(|task| {
-                    let request = render_request(task.task, &outputs)?;
-                    Ok((
-                        Some(task.index),
-                        execution_request(request),
-                        task.task.sandbox().cloned(),
-                    ))
-                })
-                .collect::<io::Result<Vec<_>>>()?;
+            let jobs = run.jobs(&tasks)?;
             let outcomes = run_requests_concurrently(&self.processes, jobs, on_event)?;
+            let finished = tasks
+                .iter()
+                .zip(outcomes)
+                .map(|(task, outcome)| FinishedTask {
+                    index: task.index,
+                    outcome,
+                })
+                .collect();
 
-            record_outcomes(
-                &mut execution,
-                outcomes,
-                workflow,
-                &mut outputs,
-                &mut exit_status,
-            )?;
+            // The run stops here, so no pending task will ever start.
+            if let Err(error) = run.record(finished) {
+                return run.block_pending(on_event).and(Err(error));
+            }
         }
-        Ok(exit_status)
+        Ok(run.exit_status)
+    }
+}
+
+/// The state of one workflow run.
+struct WorkflowRun<'workflow> {
+    workflow: &'workflow Workflow,
+    execution: WorkflowExecution<'workflow>,
+    /// Captured output of finished tasks that a later task reads.
+    outputs: HashMap<TaskIndex, ProcessOutput>,
+    /// The status of the first failing task, in declaration order.
+    exit_status: i32,
+}
+
+impl<'workflow> WorkflowRun<'workflow> {
+    fn new(workflow: &'workflow Workflow) -> Self {
+        Self {
+            workflow,
+            execution: workflow.execution(),
+            outputs: HashMap::new(),
+            exit_status: 0,
+        }
+    }
+
+    /// Marks ready tasks as running and returns them.
+    fn start_ready(
+        &mut self,
+        on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
+    ) -> io::Result<Vec<StartedTask<'workflow>>> {
+        self.execution
+            .ready()
+            .into_iter()
+            .map(|index| {
+                let task = self.execution.start(index).map_err(io::Error::other)?;
+                on_event(&RunEvent::Started { task: Some(index) })?;
+                Ok(StartedTask { index, task })
+            })
+            .collect()
+    }
+
+    /// The requests of started tasks, with their output placeholders filled.
+    fn jobs(&self, tasks: &[StartedTask<'workflow>]) -> io::Result<Vec<Job<'workflow>>> {
+        tasks
+            .iter()
+            .map(|task| {
+                let request = render_request(task.task, &self.outputs)?;
+                Ok(Job {
+                    task: Some(task.index),
+                    request: execution_request(request),
+                    sandbox: task.task.sandbox(),
+                })
+            })
+            .collect()
+    }
+
+    /// Records task outcomes and picks the workflow exit status.
+    ///
+    /// Outcomes are sorted into declaration order, which keeps the reported
+    /// status and error the same from run to run.
+    fn record(&mut self, mut finished: Vec<FinishedTask>) -> io::Result<()> {
+        finished.sort_by_key(|task| task.index);
+        let mut execution_error = None;
+
+        for FinishedTask { index, outcome } in finished {
+            self.execution
+                .complete(index, completion(&outcome))
+                .map_err(io::Error::other)?;
+            match outcome {
+                Ok(output) => {
+                    if !output.succeeded() && self.exit_status == 0 {
+                        self.exit_status = exit_status(&output);
+                    }
+                    if self.workflow.is_read(index) {
+                        self.outputs.insert(index, output);
+                    }
+                }
+                Err(error) => {
+                    execution_error = execution_error.or(Some(error));
+                }
+            }
+        }
+
+        execution_error.map_or(Ok(()), Err)
+    }
+
+    /// Reports every task that has not started as blocked.
+    fn block_pending(
+        &self,
+        on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.execution
+            .pending()
+            .into_iter()
+            .try_for_each(|index| on_event(&RunEvent::Blocked { task: index }))
     }
 }
 
@@ -197,98 +271,115 @@ struct StartedTask<'workflow> {
     task: &'workflow Task,
 }
 
-/// Marks ready tasks as running and returns them.
-fn start_ready_tasks<'workflow>(
-    execution: &mut WorkflowExecution<'workflow>,
-    on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
-) -> io::Result<Vec<StartedTask<'workflow>>> {
-    execution
-        .ready()
-        .into_iter()
-        .map(|index| {
-            let task = execution.start(index).map_err(io::Error::other)?;
-            on_event(&RunEvent::Started { task: Some(index) })?;
-            Ok(StartedTask { index, task })
-        })
-        .collect()
+/// A workflow task's outcome.
+struct FinishedTask {
+    index: TaskIndex,
+    outcome: Outcome,
 }
 
-/// One request to run, with the task it belongs to.
-type Job = (Option<TaskIndex>, ExecutionRequest, Option<SandboxPolicy>);
+/// One request to run.
+struct Job<'policy> {
+    /// Workflow task, if this request belongs to a workflow.
+    task: Option<TaskIndex>,
+    request: ExecutionRequest,
+    sandbox: Option<&'policy SandboxPolicy>,
+}
 
-/// What a task thread sends back while it runs.
+/// What a request thread sends back while it runs.
 enum Message {
     /// One output line of a running request.
-    Line(Option<TaskIndex>, OutputStream, Vec<u8>),
+    Line {
+        task: Option<TaskIndex>,
+        stream: OutputStream,
+        line: Vec<u8>,
+    },
     /// A request ended.
-    Done(Option<TaskIndex>, io::Result<ProcessOutput>, Duration),
+    Done {
+        /// Position of the request's job.
+        job: usize,
+        task: Option<TaskIndex>,
+        outcome: Outcome,
+        elapsed: Duration,
+    },
 }
 
 /// A finished request's captured output, or the error that stopped it.
 type Outcome = io::Result<ProcessOutput>;
 
-/// The status a request counts as. A signal or an execution error counts as 1.
-fn task_status(outcome: &Outcome) -> i32 {
-    outcome
-        .as_ref()
-        .map_or(1, |output| output.status_code().unwrap_or(1))
+/// Whether a task counts as succeeded. A signal or an execution error counts as a failure.
+fn completion(outcome: &Outcome) -> Completion {
+    match outcome {
+        Ok(output) if output.succeeded() => Completion::Succeeded,
+        _ => Completion::Failed,
+    }
+}
+
+/// The status a finished request counts as. A signal counts as 1.
+fn exit_status(output: &ProcessOutput) -> i32 {
+    output.status_code().unwrap_or(1)
 }
 
 /// Runs requests concurrently, reporting each line and each result as it arrives.
 ///
-/// Outcomes come back in completion order, not in the order of `jobs`.
+/// Outcomes come back in the order of `jobs`.
 fn run_requests_concurrently(
     runner: &ProcessRunner,
-    jobs: Vec<Job>,
+    jobs: Vec<Job<'_>>,
     on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
-) -> io::Result<Vec<(Option<TaskIndex>, Outcome)>> {
+) -> io::Result<Vec<Outcome>> {
     let (sender, receiver) = mpsc::channel::<Message>();
+    let mut outcomes = jobs.iter().map(|_| None).collect::<Vec<Option<Outcome>>>();
 
     std::thread::scope(|scope| {
         let handles = jobs
             .into_iter()
-            .map(|(task, request, sandbox)| {
-                // A Sender is not Sync, so the two reader threads share it under a lock.
-                let sender = Mutex::new(sender.clone());
-                scope.spawn(move || {
-                    let started = Instant::now();
-                    let sink = |stream, line: &[u8]| {
-                        if let Ok(sender) = sender.lock() {
-                            let _ = sender.send(Message::Line(task, stream, line.to_vec()));
-                        }
-                    };
-                    let result = runner.run_streaming(request, sandbox.as_ref(), &sink);
-                    // The reader threads have ended, so no line follows this.
-                    if let Ok(sender) = sender.lock() {
-                        let _ = sender.send(Message::Done(task, result, started.elapsed()));
-                    }
-                })
-            })
+            .enumerate()
+            .map(
+                |(
+                    job,
+                    Job {
+                        task,
+                        request,
+                        sandbox,
+                    },
+                )| {
+                    let sender = sender.clone();
+                    scope.spawn(move || {
+                        let started = Instant::now();
+                        let sink = |stream, line: &[u8]| {
+                            let line = line.to_vec();
+                            let _ = sender.send(Message::Line { task, stream, line });
+                        };
+                        let outcome = runner.run_streaming(request, sandbox, &sink);
+                        // The reader threads have ended, so no line follows this.
+                        let _ = sender.send(Message::Done {
+                            job,
+                            task,
+                            outcome,
+                            elapsed: started.elapsed(),
+                        });
+                    })
+                },
+            )
             .collect::<Vec<_>>();
         drop(sender);
 
         // Reporting runs here, because the callback belongs to the caller's thread.
-        let mut outcomes = Vec::new();
         for message in receiver {
             match message {
-                Message::Line(task, stream, line) => {
+                Message::Line { task, stream, line } => {
                     on_event(&RunEvent::Output { task, stream, line })?;
                 }
-                Message::Done(task, Ok(output), elapsed) => {
-                    outcomes.push((task, Ok(output.clone())));
-                    on_event(&RunEvent::Finished {
-                        task,
-                        output,
-                        elapsed,
-                    })?;
-                }
-                Message::Done(task, Err(error), elapsed) => {
-                    on_event(&RunEvent::Failed {
-                        task,
-                        error_kind: error.kind(),
-                        elapsed,
-                    })?;
-                    outcomes.push((task, Err(error)));
+                Message::Done {
+                    job,
+                    task,
+                    outcome,
+                    elapsed,
+                } => {
+                    let outcome = report_done(task, outcome, elapsed, on_event)?;
+                    if let Some(slot) = outcomes.get_mut(job) {
+                        *slot = Some(outcome);
+                    }
                 }
             }
         }
@@ -298,57 +389,44 @@ fn run_requests_concurrently(
                 .join()
                 .map_err(|_| io::Error::other("workflow task execution thread panicked"))?;
         }
-        Ok(outcomes)
-    })
+        io::Result::Ok(())
+    })?;
+
+    outcomes
+        .into_iter()
+        .map(|outcome| outcome.ok_or_else(|| io::Error::other("request produced no result")))
+        .collect()
 }
 
-/// Records task outcomes and picks the workflow exit status.
-///
-/// Outcomes arrive in completion order, so this sorts them into declaration
-/// order. That keeps the reported status the same from run to run.
-fn record_outcomes(
-    execution: &mut WorkflowExecution<'_>,
-    mut outcomes: Vec<(Option<TaskIndex>, Outcome)>,
-    workflow: &Workflow,
-    outputs: &mut HashMap<TaskIndex, ProcessOutput>,
-    exit_status: &mut i32,
-) -> io::Result<()> {
-    outcomes.sort_by_key(|(task, _)| position(*task));
-    let mut execution_error = None;
-
-    for (task, outcome) in outcomes {
-        let Some(index) = task else {
-            continue;
-        };
-        let status = task_status(&outcome);
-        let completion = if status == 0 {
-            Completion::Succeeded
-        } else {
-            Completion::Failed
-        };
-        execution
-            .complete(index, completion)
-            .map_err(io::Error::other)?;
-        match outcome {
-            Ok(output) => {
-                if workflow.is_read(index) {
-                    outputs.insert(index, output);
-                }
-                if status != 0 && *exit_status == 0 {
-                    *exit_status = status;
-                }
-            }
-            Err(error) => {
-                if execution_error.is_none() {
-                    execution_error = Some(error);
-                }
-            }
+/// Reports a request's end and hands its outcome back.
+fn report_done(
+    task: Option<TaskIndex>,
+    outcome: Outcome,
+    elapsed: Duration,
+    on_event: &mut impl FnMut(&RunEvent) -> io::Result<()>,
+) -> io::Result<Outcome> {
+    match outcome {
+        Ok(output) => {
+            let event = RunEvent::Finished {
+                task,
+                output,
+                elapsed,
+            };
+            on_event(&event)?;
+            // Take the output back from the event instead of copying its streams.
+            let RunEvent::Finished { output, .. } = event else {
+                return Err(io::Error::other("finished event changed kind"));
+            };
+            Ok(Ok(output))
         }
-    }
-
-    match execution_error {
-        Some(error) => Err(error),
-        None => Ok(()),
+        Err(error) => {
+            on_event(&RunEvent::Failed {
+                task,
+                error_kind: error.kind(),
+                elapsed,
+            })?;
+            Ok(Err(error))
+        }
     }
 }
 
@@ -358,7 +436,7 @@ fn execution_request(request: TaskRequest) -> ExecutionRequest {
             harness,
             prompt,
             options,
-        } => ExecutionRequest::Harness(HarnessCall::new(harness, prompt).options(&options)),
+        } => ExecutionRequest::Harness(HarnessCall::new(harness, prompt).options(options)),
         TaskRequest::Command { program, arguments } => {
             ExecutionRequest::Command(ProcessCall::new(program).arguments(arguments))
         }

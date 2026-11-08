@@ -20,7 +20,7 @@ mod start;
 mod store;
 
 pub use client::{Status, add, command, status};
-pub use control::{JobReport, Request, Response, is_running};
-pub use daemon::{DEFAULT_KEPT_RUNS, DEFAULT_RUN_LIMIT, run};
+pub use control::{Condition, DaemonStatus, JobId, JobReport, Request, Response, is_running};
+pub use daemon::{DEFAULT_KEPT_RUNS, DEFAULT_RUN_LIMIT, RunLimits, run};
 pub use paths::DaemonPaths;
 pub use start::start;

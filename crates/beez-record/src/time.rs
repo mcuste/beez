@@ -17,7 +17,7 @@ pub fn utc(time: SystemTime) -> String {
 /// Formats `time` as a UTC stamp without separators, for a directory name.
 ///
 /// The stamp sorts by name in the order the runs happened.
-pub fn compact_utc(time: SystemTime) -> String {
+pub(crate) fn compact_utc(time: SystemTime) -> String {
     DateTime::<Utc>::from(time)
         .format("%Y%m%dT%H%M%S%3fZ")
         .to_string()

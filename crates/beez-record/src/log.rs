@@ -13,10 +13,11 @@ use std::time::SystemTime;
 use anstream::adapter::strip_bytes;
 use beez_core::{TaskRequest, Workflow};
 use beez_process::OutputStream;
+use beez_runner::RunEvent;
 use serde::Serialize;
 
 use crate::format::{Labels, stamped_status_line, stream_mark, trim_newline};
-use crate::outcome::TaskOutcome;
+use crate::outcome::{TaskOutcome, TaskState};
 use crate::time::{compact_utc, utc};
 
 const DIRECTORY: &str = ".beez";
@@ -71,54 +72,82 @@ impl RunTarget<'_> {
 
 /// Whether a run writes artifacts, and where.
 #[derive(Clone, Copy, Debug)]
-pub struct LogSettings<'run> {
-    /// False writes no artifacts at all.
-    pub enabled: bool,
-    /// Directory that replaces the one Beez resolves itself.
-    pub directory: Option<&'run Path>,
+pub enum LogSettings<'run> {
+    /// The run writes no artifacts at all.
+    Disabled,
+    /// The run writes to the directory Beez resolves itself.
+    Resolved,
+    /// The run writes to this directory instead.
+    At(&'run Path),
 }
 
-/// The artifacts of one run.
-pub(crate) struct RunLog {
+/// Turns the events of one run into its artifacts.
+#[derive(Debug)]
+pub struct RunRecorder {
     directory: PathBuf,
-    run: File,
+    run: Sink,
     labels: Labels,
     tasks: Vec<TaskLog>,
-    record: RunRecord,
-    started: SystemTime,
-}
-
-impl std::fmt::Debug for RunLog {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RunLog")
-            .field("directory", &self.directory)
-            .finish_non_exhaustive()
-    }
-}
-
-struct TaskLog {
-    stdout: File,
-    stderr: File,
-    record: TaskRecord,
-}
-
-#[derive(Debug, Serialize)]
-struct RunRecord {
-    schema: u32,
     id: String,
     arguments: Vec<String>,
     working_directory: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     manifest: Option<String>,
+    started: SystemTime,
+}
+
+#[derive(Debug)]
+struct TaskLog {
+    stdout: Sink,
+    stderr: Sink,
+    record: TaskRecord,
+}
+
+/// One file the run writes line by line.
+///
+/// After a write fails, the file takes no more writes, so one broken file
+/// costs neither the other files nor the record of the run.
+#[derive(Debug)]
+struct Sink {
+    file: File,
+    failed: bool,
+}
+
+impl Sink {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            failed: false,
+        }
+    }
+
+    /// Writes to the file unless an earlier write failed.
+    fn write(&mut self, action: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+        if self.failed {
+            return Ok(());
+        }
+        let result = action(&mut self.file);
+        self.failed = result.is_err();
+        result
+    }
+}
+
+/// The layout of `run.json`.
+#[derive(Serialize)]
+struct RunRecord<'run> {
+    schema: u32,
+    id: &'run str,
+    arguments: &'run [String],
+    working_directory: &'run str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest: Option<&'run str>,
     started: String,
     finished: String,
     duration_seconds: f64,
     exit_status: Option<i32>,
-    tasks: Vec<TaskRecord>,
+    tasks: Vec<&'run TaskRecord>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 struct TaskRecord {
     id: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -126,7 +155,7 @@ struct TaskRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     request: Option<RequestRecord>,
     sandbox: bool,
-    state: &'static str,
+    state: TaskState,
     exit_status: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_seconds: Option<f64>,
@@ -136,7 +165,7 @@ struct TaskRecord {
     stderr: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum RequestRecord {
     Harness {
@@ -154,31 +183,40 @@ enum RequestRecord {
     },
 }
 
-impl RunLog {
-    /// Creates the directory of one run and opens every file it writes.
+impl RunRecorder {
+    /// Creates the directory of one run and opens every file it writes, or
+    /// nothing when `settings` disable the artifacts.
     ///
-    /// `root` replaces the directory Beez would resolve itself, and
     /// `working_directory` is the directory the run's tasks run in.
     pub(crate) fn create(
-        root: Option<&Path>,
+        settings: LogSettings<'_>,
         target: &RunTarget<'_>,
         working_directory: &Path,
-    ) -> io::Result<Self> {
-        let resolved = root.map_or_else(|| resolve_root(working_directory), Path::to_path_buf);
+    ) -> io::Result<Option<Self>> {
+        let (root, resolved) = match settings {
+            LogSettings::Disabled => return Ok(None),
+            LogSettings::Resolved => (resolve_root(working_directory), true),
+            LogSettings::At(directory) => (directory.to_path_buf(), false),
+        };
         let started = SystemTime::now();
         let id = run_id(started);
-        let directory = resolved.join(RUNS).join(&id);
+        let directory = root.join(RUNS).join(&id);
 
         fs::create_dir_all(directory.join(TASKS))?;
         // Beez marks only a directory it resolved itself.
-        if root.is_none() {
-            let _ = ignore_everything(&resolved);
+        if resolved {
+            let _ = ignore_everything(&root);
         }
-        let _ = link_latest(&resolved, &id);
+        let _ = link_latest(&root, &id);
 
         let tasks = open_tasks(&directory, target)?;
-        let record = RunRecord {
-            schema: SCHEMA,
+        let labels = Labels::new(tasks.iter().map(|task| task.record.id.clone()).collect());
+
+        Ok(Some(Self {
+            run: Sink::new(File::create(directory.join(RUN_LOG))?),
+            directory,
+            labels,
+            tasks,
             id,
             arguments: std::env::args_os()
                 .map(|argument| argument.to_string_lossy().into_owned())
@@ -187,53 +225,55 @@ impl RunLog {
             manifest: target
                 .manifest()
                 .map(|path| working_directory.join(path).display().to_string()),
-            started: utc(started),
-            finished: String::new(),
-            duration_seconds: 0.0,
-            exit_status: None,
-            tasks: Vec::new(),
-        };
-
-        Ok(Self {
-            run: File::create(directory.join(RUN_LOG))?,
-            directory,
-            labels: target.labels(),
-            tasks,
-            record,
             started,
-        })
+        }))
     }
 
-    /// The directory that holds this run's artifacts.
+    /// The directory that holds the artifacts.
     #[must_use]
-    pub(crate) fn directory(&self) -> &Path {
+    pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// The labels of the run's tasks.
-    pub(crate) fn labels(&self) -> &Labels {
-        &self.labels
+    /// Records one lifecycle or output event.
+    pub fn event(&mut self, event: &RunEvent) -> io::Result<()> {
+        let index = event.position();
+        if let RunEvent::Output { stream, line, .. } = event {
+            return self.output(index, *stream, line);
+        }
+        let Some(outcome) = TaskOutcome::of(event) else {
+            return Ok(());
+        };
+        self.outcome(index, outcome);
+        let (state, message) = outcome.status(&self.labels.get(index));
+
+        self.status(state.verb(), &message)
     }
 
-    /// Records one of Beez's own status lines.
-    pub(crate) fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
-        writeln!(
-            self.run,
-            "{}",
-            stamped_status_line(SystemTime::now(), verb, message)
-        )
+    /// Records one of Beez's own status lines, such as a sandbox note.
+    pub fn status(&mut self, verb: &str, message: &str) -> io::Result<()> {
+        let line = stamped_status_line(SystemTime::now(), verb, message);
+        self.run.write(|file| writeln!(file, "{line}"))
+    }
+
+    /// Writes the line that closes the run, then the record of the run.
+    ///
+    /// The record follows even when the line fails, and the first failure
+    /// comes back. `exit_status` is the status Beez itself returns. It is
+    /// absent when the run ended in an execution error.
+    pub fn finish(&mut self, summary: &str, exit_status: Option<i32>) -> io::Result<()> {
+        let line = self.status("Summary", summary);
+        let record = self.write_record(exit_status);
+
+        line.and(record)
     }
 
     /// Records one output line of a task.
     ///
     /// The stream file keeps the bytes as the task wrote them. The run log
     /// keeps the line without its colours, behind the task and the stream.
-    pub(crate) fn output(
-        &mut self,
-        index: usize,
-        stream: OutputStream,
-        line: &[u8],
-    ) -> io::Result<()> {
+    /// Both get the line even when the other fails.
+    fn output(&mut self, index: usize, stream: OutputStream, line: &[u8]) -> io::Result<()> {
         let width = self.labels.width();
         let stamp = utc(SystemTime::now());
         let Some(task) = self.tasks.get_mut(index) else {
@@ -244,19 +284,27 @@ impl RunLog {
             OutputStream::Stderr => &mut task.stderr,
         };
 
-        file.write_all(line)?;
+        let raw = file.write(|file| file.write_all(line));
         let text = strip_bytes(trim_newline(line)).into_vec();
         let text = String::from_utf8_lossy(&text);
-        writeln!(
-            self.run,
-            "{stamp} {:<width$} {} {text}",
-            task.record.id,
-            stream_mark(stream)
-        )
+        let id = &task.record.id;
+        let mark = stream_mark(stream);
+        let logged = self
+            .run
+            .write(|file| writeln!(file, "{stamp} {id:<width$} {mark} {text}"));
+
+        raw.and(logged)
+    }
+
+    /// Swaps the run log for a read-only handle, so every later line fails.
+    #[cfg(test)]
+    pub(crate) fn break_run_log(&mut self) -> io::Result<()> {
+        self.run = Sink::new(File::open(self.directory.join(RUN_LOG))?);
+        Ok(())
     }
 
     /// Records what happened to one task.
-    pub(crate) fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
+    fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
         let Some(task) = self.tasks.get_mut(index) else {
             return;
         };
@@ -278,18 +326,26 @@ impl RunLog {
     }
 
     /// Writes the record of the run, with Beez's own exit status.
-    pub(crate) fn finish(&mut self, exit_status: Option<i32>) -> io::Result<()> {
+    fn write_record(&self, exit_status: Option<i32>) -> io::Result<()> {
         let finished = SystemTime::now();
-        self.record.finished = utc(finished);
-        self.record.duration_seconds = finished
-            .duration_since(self.started)
-            .unwrap_or_default()
-            .as_secs_f64();
-        self.record.exit_status = exit_status;
-        self.record.tasks = self.tasks.iter().map(|task| task.record.clone()).collect();
+        let record = RunRecord {
+            schema: SCHEMA,
+            id: &self.id,
+            arguments: &self.arguments,
+            working_directory: &self.working_directory,
+            manifest: self.manifest.as_deref(),
+            started: utc(self.started),
+            finished: utc(finished),
+            duration_seconds: finished
+                .duration_since(self.started)
+                .unwrap_or_default()
+                .as_secs_f64(),
+            exit_status,
+            tasks: self.tasks.iter().map(|task| &task.record).collect(),
+        };
 
         let mut file = File::create(self.directory.join(RUN_RECORD))?;
-        serde_json::to_writer_pretty(&mut file, &self.record).map_err(io::Error::other)?;
+        serde_json::to_writer_pretty(&mut file, &record).map_err(io::Error::other)?;
         writeln!(file)
     }
 }
@@ -348,8 +404,14 @@ fn link_latest(root: &Path, id: &str) -> io::Result<()> {
     let link = root.join(LATEST);
     // A relative target keeps the link working when the directory moves.
     let target = Path::new(RUNS).join(id);
-    let _ = fs::remove_file(&link);
-    std::os::unix::fs::symlink(target, link)
+    // The new link takes the place of the old one in one step, so a run that
+    // starts at the same time never finds `latest` missing.
+    let temporary = root.join(format!(".{LATEST}-{id}"));
+    let _ = fs::remove_file(&temporary);
+    std::os::unix::fs::symlink(target, &temporary)?;
+    fs::rename(&temporary, link).inspect_err(|_| {
+        let _ = fs::remove_file(&temporary);
+    })
 }
 
 #[cfg(not(unix))]
@@ -362,8 +424,8 @@ fn open_tasks(directory: &Path, target: &RunTarget<'_>) -> io::Result<Vec<TaskLo
         .into_iter()
         .map(|record| {
             Ok(TaskLog {
-                stdout: File::create(directory.join(&record.stdout))?,
-                stderr: File::create(directory.join(&record.stderr))?,
+                stdout: Sink::new(File::create(directory.join(&record.stdout))?),
+                stderr: Sink::new(File::create(directory.join(&record.stderr))?),
                 record,
             })
         })
@@ -413,7 +475,7 @@ fn task_record(
         depends_on,
         request,
         sandbox,
-        state: "pending",
+        state: TaskState::Pending,
         exit_status: None,
         duration_seconds: None,
         error: None,
@@ -441,12 +503,214 @@ fn request_record(request: &TaskRequest) -> RequestRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_run_name, resolve_root, run_id};
+    use super::{
+        LogSettings, RunRecorder, RunTarget, is_run_name, link_latest, resolve_root, run_id,
+    };
     use std::fs;
-    use std::path::Path;
-    use std::time::SystemTime;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, SystemTime};
 
+    use beez_core::{TaskDefinition, TaskRequest, Workflow};
     use beez_test_support::TemporaryDirectory;
+
+    use crate::outcome::TaskOutcome;
+
+    /// Records one run under `root` and returns the text of its `run.json`.
+    fn run_record(
+        root: &Path,
+        target: &RunTarget<'_>,
+        outcomes: &[(usize, TaskOutcome)],
+    ) -> String {
+        let mut recorder = RunRecorder::create(LogSettings::At(root), target, root)
+            .unwrap()
+            .unwrap();
+        for (index, outcome) in outcomes {
+            recorder.outcome(*index, *outcome);
+        }
+        recorder.write_record(Some(0)).unwrap();
+
+        fs::read_to_string(recorder.directory().join("run.json")).unwrap()
+    }
+
+    /// Replaces every value that changes from one run to the next.
+    fn mask(record: &str) -> String {
+        const VOLATILE: [&str; 4] = ["started", "finished", "working_directory", "manifest"];
+        const TOP_LEVEL_VOLATILE: [&str; 2] = ["id", "duration_seconds"];
+
+        let mut masked = Vec::new();
+        let mut lines = record.lines();
+        while let Some(line) = lines.next() {
+            if line.starts_with("  \"arguments\": [") {
+                if !line.ends_with("],") {
+                    for inner in lines.by_ref() {
+                        if inner == "  ]," {
+                            break;
+                        }
+                    }
+                }
+                masked.push("  \"arguments\": <masked>,".to_owned());
+                continue;
+            }
+            let top_level = line.starts_with("  \"");
+            let volatile = line.trim_start().split_once(": ").is_some_and(|(key, _)| {
+                let key = key.trim_matches('"');
+                VOLATILE.contains(&key) || (top_level && TOP_LEVEL_VOLATILE.contains(&key))
+            });
+            match line.split_once(": ") {
+                Some((key, value)) if volatile => {
+                    let comma = if value.ends_with(',') { "," } else { "" };
+                    masked.push(format!("{key}: <masked>{comma}"));
+                }
+                _ => masked.push(line.to_owned()),
+            }
+        }
+        masked.join("\n")
+    }
+
+    #[test]
+    fn names_every_task_state_as_run_json_spells_it() {
+        let elapsed = Duration::from_millis(10);
+        let cases = [
+            (None, "pending"),
+            (Some(TaskOutcome::Started), "running"),
+            (
+                Some(TaskOutcome::Finished {
+                    exit_status: Some(0),
+                    elapsed,
+                }),
+                "finished",
+            ),
+            (
+                Some(TaskOutcome::Finished {
+                    exit_status: Some(3),
+                    elapsed,
+                }),
+                "failed",
+            ),
+            (
+                Some(TaskOutcome::Failed {
+                    error: io::ErrorKind::NotFound,
+                    elapsed,
+                }),
+                "failed",
+            ),
+            (Some(TaskOutcome::Blocked), "blocked"),
+        ];
+
+        for (outcome, state) in cases {
+            let directory = TemporaryDirectory::new("log-state").unwrap();
+            let outcomes: Vec<_> = outcome.into_iter().map(|outcome| (0, outcome)).collect();
+            let record = run_record(
+                directory.path(),
+                &RunTarget::Request { name: "command" },
+                &outcomes,
+            );
+            let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+
+            assert_eq!(
+                record.pointer("/tasks/0/state"),
+                Some(&state.into()),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_the_run_record_in_a_fixed_layout() {
+        let directory = TemporaryDirectory::new("log-record-layout").unwrap();
+        let workflow = Workflow::try_from(vec![
+            TaskDefinition::new(
+                "build".parse().unwrap(),
+                Vec::new(),
+                TaskRequest::command("bash".to_owned(), vec!["-c".to_owned(), "true".to_owned()]),
+            ),
+            TaskDefinition::new(
+                "test".parse().unwrap(),
+                vec!["build".parse().unwrap()],
+                TaskRequest::command("cargo".to_owned(), Vec::new()),
+            ),
+        ])
+        .unwrap();
+        let target = RunTarget::Workflow {
+            path: Path::new("beez.toml"),
+            workflow: &workflow,
+        };
+
+        let record = run_record(
+            directory.path(),
+            &target,
+            &[
+                (
+                    0,
+                    TaskOutcome::Finished {
+                        exit_status: Some(0),
+                        elapsed: Duration::from_millis(1_500),
+                    },
+                ),
+                (
+                    1,
+                    TaskOutcome::Failed {
+                        error: io::ErrorKind::NotFound,
+                        elapsed: Duration::from_millis(200),
+                    },
+                ),
+            ],
+        );
+
+        assert_eq!(
+            mask(&record),
+            r#"{
+  "schema": 1,
+  "id": <masked>,
+  "arguments": <masked>,
+  "working_directory": <masked>,
+  "manifest": <masked>,
+  "started": <masked>,
+  "finished": <masked>,
+  "duration_seconds": <masked>,
+  "exit_status": 0,
+  "tasks": [
+    {
+      "id": "build",
+      "request": {
+        "kind": "command",
+        "program": "bash",
+        "arguments": [
+          "-c",
+          "true"
+        ]
+      },
+      "sandbox": false,
+      "state": "finished",
+      "exit_status": 0,
+      "duration_seconds": 1.5,
+      "stdout": "tasks/build.stdout",
+      "stderr": "tasks/build.stderr"
+    },
+    {
+      "id": "test",
+      "depends_on": [
+        "build"
+      ],
+      "request": {
+        "kind": "command",
+        "program": "cargo"
+      },
+      "sandbox": false,
+      "state": "failed",
+      "exit_status": null,
+      "duration_seconds": 0.2,
+      "error": "entity not found",
+      "stdout": "tasks/test.stdout",
+      "stderr": "tasks/test.stderr"
+    }
+  ]
+}"#
+        );
+    }
 
     #[test]
     fn reads_back_the_name_it_gives_a_run() {
@@ -499,5 +763,88 @@ mod tests {
         let working_directory = Path::new("/");
 
         assert_eq!(resolve_root(working_directory), Path::new("/.beez"));
+    }
+
+    /// The names in `root` besides `latest`, such as a leftover temporary link.
+    fn other_entries(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "latest")
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaces_a_link_to_an_older_run() {
+        let directory = TemporaryDirectory::new("log-latest-replace").unwrap();
+        let root = directory.path();
+
+        link_latest(root, "20260910T030000004Z-1").unwrap();
+        link_latest(root, "20260910T030000005Z-2").unwrap();
+
+        assert_eq!(
+            fs::read_link(root.join("latest")).unwrap(),
+            Path::new("runs/20260910T030000005Z-2")
+        );
+        assert!(other_entries(root).is_empty(), "{:?}", other_entries(root));
+    }
+
+    /// Two runs that start together must never leave a moment without `latest`.
+    #[cfg(unix)]
+    #[test]
+    fn keeps_a_valid_latest_link_while_runs_race_to_replace_it() {
+        const WRITERS: usize = 8;
+        const ROUNDS: usize = 200;
+
+        let directory = TemporaryDirectory::new("log-latest-race").unwrap();
+        let root = directory.path().to_path_buf();
+        link_latest(&root, "20260910T030000000Z-0").unwrap();
+        let ids: Vec<String> = (1..=WRITERS)
+            .map(|writer| format!("20260910T030000000Z-{writer}"))
+            .collect();
+        let targets: Vec<PathBuf> = ids.iter().map(|id| Path::new("runs").join(id)).collect();
+        let done = AtomicBool::new(false);
+
+        let missing = thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut missing = 0_usize;
+                while !done.load(Ordering::Relaxed) {
+                    // macOS may fail to follow a link while a rename replaces
+                    // it, so this checks only that the entry is there.
+                    if fs::symlink_metadata(root.join("latest")).is_err() {
+                        missing += 1;
+                    }
+                }
+                missing
+            });
+            let writers: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let root = &root;
+                    scope.spawn(move || {
+                        for _ in 0..ROUNDS {
+                            let _ = link_latest(root, id);
+                        }
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            reader.join().unwrap()
+        });
+
+        assert_eq!(missing, 0, "`latest` went missing {missing} times");
+        let latest = fs::read_link(root.join("latest")).unwrap();
+        assert!(targets.contains(&latest), "{latest:?}");
+        assert!(
+            other_entries(&root).is_empty(),
+            "{:?}",
+            other_entries(&root)
+        );
     }
 }

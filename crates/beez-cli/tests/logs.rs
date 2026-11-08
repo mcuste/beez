@@ -79,10 +79,9 @@ fn keeps_the_whole_run_in_one_log_and_the_streams_of_each_task_apart() {
         fs::read_to_string(run.join("tasks/second.stdout")).unwrap(),
         "second-out\n"
     );
-    assert!(
-        fs::read_to_string(run.join("tasks/second.stderr"))
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        fs::read_to_string(run.join("tasks/second.stderr")).unwrap(),
+        ""
     );
 }
 
@@ -308,4 +307,33 @@ fn runs_a_harness_prompt_and_records_it() {
     let record = fs::read_to_string(run.join("run.json")).unwrap();
     assert!(record.contains("\"inspect the repository\""), "{record}");
     assert!(record.contains("\"id\": \"pi\""), "{record}");
+}
+
+/// A plain run keeps its status lines off the terminal, but a run log that
+/// cannot open is a problem the user must hear about.
+#[test]
+fn warns_once_when_a_plain_run_cannot_open_its_log() {
+    let directory = TemporaryDirectory::new("logs-plain-warning").unwrap();
+    // A directory cannot live under a regular file.
+    let blocker = directory.write("blocker", "").unwrap();
+
+    let output = common::beez()
+        .args(["run", "command", "--no-sandbox", "bash", "-c"])
+        .arg("printf out; exit 7")
+        .env("BEEZ_LOG_DIR", blocker.join("artifacts"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(output.stdout, b"out");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warnings = stderr
+        .lines()
+        .filter(|line| line.starts_with("Warning"))
+        .count();
+    assert_eq!(warnings, 1, "{stderr}");
+    assert!(stderr.contains("run log"), "{stderr}");
+    for decoration in ["Logging", "Running", "Finished", "Summary"] {
+        assert!(!stderr.contains(decoration), "{stderr}");
+    }
 }

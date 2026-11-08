@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::thread::ScopedJoinHandle;
 
 use beez_policy::SandboxPolicy;
 use beez_sandbox::SandboxedCommand;
@@ -96,7 +96,7 @@ impl ProcessRunner {
         sink: &OutputSink<'_>,
     ) -> io::Result<ProcessOutput> {
         let harness = request.harness();
-        let (program, arguments) = request.into_parts();
+        let (program, arguments) = request.into_process_call().into_parts();
 
         if let Some(policy) = sandbox {
             // The sandbox must outlive the child, because it owns the proxy.
@@ -122,49 +122,78 @@ fn relay(command: &mut Command, sink: &OutputSink<'_>) -> io::Result<ProcessOutp
     let mut child = command.spawn()?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let collected = Mutex::new((Vec::new(), Vec::new()));
 
-    let collect = |stream: OutputStream, line: &[u8]| {
-        if let Ok(mut collected) = collected.lock() {
-            match stream {
-                OutputStream::Stdout => collected.0.extend_from_slice(line),
-                OutputStream::Stderr => collected.1.extend_from_slice(line),
-            }
-        }
-        sink(stream, line);
-    };
-    let collect: &OutputSink<'_> = &collect;
-
-    std::thread::scope(|scope| {
-        if let Some(stdout) = stdout {
-            scope.spawn(move || forward(stdout, OutputStream::Stdout, collect));
-        }
-        if let Some(stderr) = stderr {
-            scope.spawn(move || forward(stderr, OutputStream::Stderr, collect));
-        }
+    let (stdout, stderr) = std::thread::scope(|scope| {
+        let stdout =
+            stdout.map(|stdout| scope.spawn(move || forward(stdout, OutputStream::Stdout, sink)));
+        let stderr =
+            stderr.map(|stderr| scope.spawn(move || forward(stderr, OutputStream::Stderr, sink)));
+        (collected(stdout), collected(stderr))
     });
 
     let status = child.wait()?;
-    let (stdout, stderr) = collected
-        .into_inner()
-        .map_err(|_| io::Error::other("output collection lock is poisoned"))?;
 
     Ok(ProcessOutput {
-        stdout,
-        stderr,
+        stdout: stdout?,
+        stderr: stderr?,
         status_code: status.code(),
     })
 }
 
-/// Reads whole lines until the stream ends.
-fn forward(reader: impl Read, stream: OutputStream, sink: &OutputSink<'_>) {
+/// Waits for a reader thread and returns what it read; a stream that was
+/// never taken read nothing.
+fn collected(reader: Option<ScopedJoinHandle<'_, io::Result<Vec<u8>>>>) -> io::Result<Vec<u8>> {
+    match reader {
+        Some(reader) => reader
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Reads whole lines until the stream ends, forwarding each one to `sink`.
+///
+/// Returns every byte it read, or the read error that cut the stream short.
+fn forward(reader: impl Read, stream: OutputStream, sink: &OutputSink<'_>) -> io::Result<Vec<u8>> {
     let mut reader = BufReader::new(reader);
+    let mut collected = Vec::new();
     let mut line = Vec::new();
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => sink(stream, &line),
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(collected);
         }
+        collected.extend_from_slice(&line);
+        sink(stream, &line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Read};
+
+    use super::{OutputStream, forward};
+
+    /// Yields one line, then fails the way a broken pipe read would.
+    struct FailingReader {
+        line: &'static [u8],
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.line.is_empty() {
+                return Err(io::Error::other("read failed"));
+            }
+            self.line.read(buffer)
+        }
+    }
+
+    #[test]
+    fn reports_a_read_error_instead_of_truncating_the_output() {
+        let sut = FailingReader { line: b"first\n" };
+
+        let actual = forward(sut, OutputStream::Stdout, &|_, _| {});
+
+        assert_eq!(actual.unwrap_err().to_string(), "read failed");
     }
 }

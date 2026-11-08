@@ -48,26 +48,46 @@ impl SandboxPolicy {
         self.executables.as_ref()
     }
 
-    /// Adds each section the other policy defines to this policy.
+    /// Adds the sections of `other` to this policy.
+    ///
+    /// A section `other` leaves at its default keeps the section here, and
+    /// missing `executables` in `other` keeps the execution rules here.
     #[must_use]
-    pub fn merge(
-        mut self,
-        network: Option<NetworkPolicy>,
-        filesystem: Option<FilesystemPolicy>,
-        executables: Option<ExecutablePolicy>,
-    ) -> Self {
-        if let Some(network) = network {
-            self.network = self.network.merge(network);
-        }
-        if let Some(filesystem) = filesystem {
-            self.filesystem = self.filesystem.merge(filesystem);
-        }
-        if let Some(executables) = executables {
-            self.executables = Some(match self.executables {
-                Some(base) => base.merge(executables),
-                None => executables,
-            });
-        }
+    pub fn merge(mut self, other: Self) -> Self {
+        self.network = self.network.merge(other.network);
+        self.filesystem = self.filesystem.merge(other.filesystem);
+        self.executables = match (self.executables, other.executables) {
+            (Some(base), Some(executables)) => Some(base.merge(executables)),
+            (base, executables) => executables.or(base),
+        };
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SandboxPolicy;
+    use crate::{ExecutableGroup, ExecutablePolicy, FilesystemPolicy, NetworkPolicy};
+
+    fn base() -> SandboxPolicy {
+        SandboxPolicy::new(
+            NetworkPolicy::default().with_localhost(Some(true)),
+            FilesystemPolicy::default().with_write_allow(vec!["/data".parse().unwrap()]),
+            Some(ExecutablePolicy::default().with_groups(vec![ExecutableGroup::Rust])),
+        )
+    }
+
+    #[test]
+    fn keeps_every_section_a_merged_policy_leaves_unset() {
+        let sut = base().merge(SandboxPolicy::default());
+
+        assert_eq!(sut, base());
+    }
+
+    #[test]
+    fn keeps_unrestricted_execution_when_no_policy_restricts_it() {
+        let sut = SandboxPolicy::default().merge(SandboxPolicy::default());
+
+        assert_eq!(sut.executables(), None);
     }
 }

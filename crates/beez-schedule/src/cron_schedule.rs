@@ -14,13 +14,6 @@ use chrono::{DateTime, Utc};
 use crate::error::ScheduleError;
 use crate::offset::UtcOffset;
 
-/// Field position of the seconds, which Beez holds to one fixed value.
-const SECONDS: usize = 0;
-/// Field position of the day of month.
-const DAY_OF_MONTH: usize = 3;
-/// Field position of the day of week.
-const DAY_OF_WEEK: usize = 5;
-
 /// A cron expression and the offset it is read in.
 ///
 /// Beez accepts the five-field crontab form, the six-field form that starts
@@ -53,14 +46,21 @@ impl CronSchedule {
             (parse(text)?, None)
         } else {
             let fields = normalize(text)?;
-            let field = |position: usize| fields.get(position).map_or("*", String::as_str);
-            if restricts(field(DAY_OF_MONTH)) && restricts(field(DAY_OF_WEEK)) {
+            if restricts(&fields.day_of_month) && restricts(&fields.day_of_week) {
+                let day_of_month = Fields {
+                    day_of_week: "*".to_owned(),
+                    ..fields.clone()
+                };
+                let day_of_week = Fields {
+                    day_of_month: "*".to_owned(),
+                    ..fields
+                };
                 (
-                    parse(&with_field(&fields, DAY_OF_WEEK, "*"))?,
-                    Some(parse(&with_field(&fields, DAY_OF_MONTH, "*"))?),
+                    parse(&day_of_month.to_string())?,
+                    Some(parse(&day_of_week.to_string())?),
                 )
             } else {
-                (parse(&fields.join(" "))?, None)
+                (parse(&fields.to_string())?, None)
             }
         };
 
@@ -78,20 +78,12 @@ impl CronSchedule {
     /// names a year in the past.
     #[must_use]
     pub fn next_after(&self, time: SystemTime) -> Option<SystemTime> {
-        let offset = self.offset.fixed()?;
-        let start = DateTime::<Utc>::from(time).with_timezone(&offset);
-        let primary = self.primary.after(&start).next();
-        let alternate = self
-            .alternate
-            .as_ref()
-            .and_then(|schedule| schedule.after(&start).next());
-        let next = match (primary, alternate) {
-            (Some(primary), Some(alternate)) => primary.min(alternate),
-            (Some(next), None) | (None, Some(next)) => next,
-            (None, None) => return None,
-        };
-
-        Some(SystemTime::from(next))
+        let start = DateTime::<Utc>::from(time).with_timezone(&self.offset.fixed());
+        std::iter::once(&self.primary)
+            .chain(&self.alternate)
+            .filter_map(|schedule| schedule.after(&start).next())
+            .min()
+            .map(SystemTime::from)
     }
 }
 
@@ -127,29 +119,82 @@ impl fmt::Display for CronSchedule {
 /// A crontab expression has no seconds field, so it gains one that holds the
 /// start of the minute, and its days of week move to the numbers the parser
 /// counts in.
-fn normalize(text: &str) -> Result<Vec<String>, ScheduleError> {
+fn normalize(text: &str) -> Result<Fields, ScheduleError> {
     let fields: Vec<&str> = text.split_whitespace().collect();
-    let fields: Vec<&str> = match fields.len() {
-        5 => std::iter::once("0").chain(fields).collect(),
-        6 | 7 => fields,
-        count => return Err(ScheduleError::FieldCount(count)),
+    let (seconds, minute, hour, day_of_month, month, day_of_week, year) = match fields[..] {
+        [minute, hour, day_of_month, month, day_of_week] => {
+            ("0", minute, hour, day_of_month, month, day_of_week, None)
+        }
+        [seconds, minute, hour, day_of_month, month, day_of_week] => (
+            seconds,
+            minute,
+            hour,
+            day_of_month,
+            month,
+            day_of_week,
+            None,
+        ),
+        [
+            seconds,
+            minute,
+            hour,
+            day_of_month,
+            month,
+            day_of_week,
+            year,
+        ] => (
+            seconds,
+            minute,
+            hour,
+            day_of_month,
+            month,
+            day_of_week,
+            Some(year),
+        ),
+        _ => return Err(ScheduleError::FieldCount(fields.len())),
     };
     // A workflow run must not start more than once a minute.
-    if !fields.get(SECONDS).is_some_and(|field| is_number(field)) {
+    if !is_number(seconds) {
         return Err(ScheduleError::SubMinute);
     }
 
-    fields
-        .into_iter()
-        .enumerate()
-        .map(|(position, field)| {
-            if position == DAY_OF_WEEK {
-                shift_days_of_week(field)
-            } else {
-                Ok(field.to_owned())
-            }
-        })
-        .collect()
+    Ok(Fields {
+        seconds: seconds.to_owned(),
+        minute: minute.to_owned(),
+        hour: hour.to_owned(),
+        day_of_month: day_of_month.to_owned(),
+        month: month.to_owned(),
+        day_of_week: shift_days_of_week(day_of_week)?,
+        year: year.map(str::to_owned),
+    })
+}
+
+/// The fields of an expression in the form the parser reads.
+#[derive(Clone)]
+struct Fields {
+    /// Always one fixed value.
+    seconds: String,
+    minute: String,
+    hour: String,
+    day_of_month: String,
+    month: String,
+    /// Counts from Sunday as 1, as the parser does.
+    day_of_week: String,
+    year: Option<String>,
+}
+
+impl fmt::Display for Fields {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} {} {} {} {} {}",
+            self.seconds, self.minute, self.hour, self.day_of_month, self.month, self.day_of_week
+        )?;
+        if let Some(year) = &self.year {
+            write!(formatter, " {year}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Moves a crontab day of week to the number the parser counts in.
@@ -203,18 +248,11 @@ fn is_number(text: &str) -> bool {
 }
 
 /// True when a field names days rather than every day.
+///
+/// As in a crontab, a field that starts with `*`, such as `*/2`, counts as
+/// every day, so it narrows the other day field instead of adding to it.
 fn restricts(field: &str) -> bool {
-    field != "*" && field != "?"
-}
-
-/// Rewrites one field of an expression.
-fn with_field(fields: &[String], position: usize, value: &str) -> String {
-    fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| if index == position { value } else { field })
-        .collect::<Vec<_>>()
-        .join(" ")
+    !field.starts_with('*') && field != "?"
 }
 
 /// A parsed schedule is large, so it lives behind a pointer.
@@ -316,6 +354,19 @@ mod tests {
         );
     }
 
+    /// A crontab reads a day field that starts with `*` as every day, so it
+    /// narrows the other day field instead of adding to it.
+    #[test]
+    fn reads_a_starred_day_field_as_every_day() {
+        // 2026-10-01 is a Thursday, the first 1st on an even day of week.
+        assert_eq!(fires("0 3 1 * */2", 1), ["2026-10-01T03:00:00Z"]);
+        // Only Fridays on odd days of the month.
+        assert_eq!(
+            fires("0 3 */2 * Fri", 2),
+            ["2026-09-11T03:00:00Z", "2026-09-25T03:00:00Z"]
+        );
+    }
+
     #[test]
     fn keeps_one_restricted_day_field_as_it_is() {
         assert_eq!(fires("0 3 13 * *", 1), ["2026-09-13T03:00:00Z"]);
@@ -393,6 +444,15 @@ mod tests {
                 "{expression} was accepted"
             );
         }
+    }
+
+    /// The seconds check runs before the day-of-week check.
+    #[test]
+    fn reports_sub_minute_before_a_bad_day_of_week() {
+        assert_eq!(
+            CronSchedule::new("* * * * * 8", UtcOffset::UTC),
+            Err(ScheduleError::SubMinute)
+        );
     }
 
     #[test]

@@ -5,7 +5,10 @@ mod bubblewrap;
 mod diagnostic;
 #[cfg(target_os = "linux")]
 mod init;
+#[cfg(any(target_os = "linux", test))]
+mod mask_marker;
 mod proxy;
+mod relay;
 mod resolve;
 mod sandbox;
 #[cfg(target_os = "macos")]
@@ -15,7 +18,7 @@ mod stream;
 
 pub use diagnostic::set_diagnostic_sink;
 #[cfg(target_os = "linux")]
-pub use init::{init, parse_relay, relay};
+pub use init::{init, relay};
 pub use proxy::Proxy;
-pub use resolve::ResolvedSandbox;
+pub use relay::Relay;
 pub use sandbox::SandboxedCommand;

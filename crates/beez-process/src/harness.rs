@@ -1,15 +1,15 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 use beez_policy::{HarnessOptions, HeadlessHarness};
+
+use crate::process_call::ProcessCall;
 
 /// Sends one prompt through a harness's non-interactive interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessCall {
     harness: HeadlessHarness,
     prompt: OsString,
-    model: Option<OsString>,
-    effort: Option<OsString>,
+    options: HarnessOptions,
 }
 
 impl HarnessCall {
@@ -19,8 +19,7 @@ impl HarnessCall {
         Self {
             harness,
             prompt: prompt.into(),
-            model: None,
-            effort: None,
+            options: HarnessOptions::default(),
         }
     }
 
@@ -28,13 +27,8 @@ impl HarnessCall {
     ///
     /// An option that names neither keeps the harness default.
     #[must_use]
-    pub fn options(mut self, options: &HarnessOptions) -> Self {
-        if let Some(model) = options.model() {
-            self.model = Some(model.into());
-        }
-        if let Some(effort) = options.effort() {
-            self.effort = Some(effort.into());
-        }
+    pub fn options(mut self, options: HarnessOptions) -> Self {
+        self.options = options;
         self
     }
 
@@ -43,24 +37,30 @@ impl HarnessCall {
     pub fn harness(&self) -> HeadlessHarness {
         self.harness
     }
+}
 
-    pub(crate) fn into_parts(self) -> (PathBuf, Vec<OsString>) {
-        let mut arguments = Vec::with_capacity(7);
-        arguments.push(headless_argument(self.harness).into());
-        if let Some(model) = self.model {
-            arguments.push("--model".into());
-            arguments.push(model);
+impl From<HarnessCall> for ProcessCall {
+    fn from(call: HarnessCall) -> Self {
+        let HarnessCall {
+            harness,
+            prompt,
+            options,
+        } = call;
+        let mut arguments: Vec<OsString> = Vec::with_capacity(7);
+        arguments.push(headless_argument(harness).into());
+        if let Some(model) = options.model() {
+            arguments.extend(["--model".into(), model.into()]);
         }
-        if let Some(effort) = self.effort {
-            append_effort_arguments(&mut arguments, self.harness, effort);
+        if let Some(effort) = options.effort() {
+            arguments.extend(effort_arguments(harness, effort));
         }
-        if self.prompt.as_encoded_bytes().starts_with(b"-") {
+        if prompt.as_encoded_bytes().starts_with(b"-") {
             arguments.push("--".into());
         }
         // The prompt stays last because harnesses read it as a positional argument.
-        arguments.push(self.prompt);
+        arguments.push(prompt);
 
-        (self.harness.name().into(), arguments)
+        Self::new(harness.name()).arguments(arguments)
     }
 }
 
@@ -73,36 +73,23 @@ fn headless_argument(harness: HeadlessHarness) -> &'static str {
 }
 
 /// Each harness names the reasoning effort differently.
-fn append_effort_arguments(
-    arguments: &mut Vec<OsString>,
-    harness: HeadlessHarness,
-    effort: OsString,
-) {
+fn effort_arguments(harness: HeadlessHarness, effort: &str) -> [OsString; 2] {
     match harness {
-        HeadlessHarness::Pi | HeadlessHarness::Claude => {
-            arguments.push("--effort".into());
-            arguments.push(effort);
-        }
-        HeadlessHarness::Omp => {
-            arguments.push("--thinking".into());
-            arguments.push(effort);
-        }
-        HeadlessHarness::Codex => {
-            let mut override_value = OsString::from("model_reasoning_effort=");
-            override_value.push(effort);
-            arguments.push("-c".into());
-            arguments.push(override_value);
-        }
+        HeadlessHarness::Pi | HeadlessHarness::Claude => ["--effort".into(), effort.into()],
+        HeadlessHarness::Omp => ["--thinking".into(), effort.into()],
+        HeadlessHarness::Codex => [
+            "-c".into(),
+            format!("model_reasoning_effort={effort}").into(),
+        ],
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use beez_policy::{HarnessOptions, HeadlessHarness};
 
     use super::HarnessCall;
+    use crate::process_call::ProcessCall;
 
     /// A call that names the model and the effort a test needs.
     fn call(
@@ -111,7 +98,7 @@ mod tests {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> HarnessCall {
-        HarnessCall::new(harness, prompt).options(&HarnessOptions::new(
+        HarnessCall::new(harness, prompt).options(HarnessOptions::new(
             model.map(str::to_owned),
             effort.map(str::to_owned),
         ))
@@ -121,10 +108,12 @@ mod tests {
     fn omits_the_model_and_effort_when_unset() {
         let sut = HarnessCall::new(HeadlessHarness::Pi, "inspect the repository");
 
-        let (program, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
-        assert_eq!(program, PathBuf::from("pi"));
-        assert_eq!(arguments, ["--print", "inspect the repository"]);
+        assert_eq!(
+            actual,
+            ProcessCall::new("pi").arguments(["--print", "inspect the repository"])
+        );
     }
 
     #[test]
@@ -136,11 +125,16 @@ mod tests {
             None,
         );
 
-        let (_, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
         assert_eq!(
-            arguments,
-            ["--print", "--model", "opus", "inspect the repository"]
+            actual,
+            ProcessCall::new("pi").arguments([
+                "--print",
+                "--model",
+                "opus",
+                "inspect the repository"
+            ])
         );
     }
 
@@ -153,11 +147,16 @@ mod tests {
             Some("high"),
         );
 
-        let (_, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
         assert_eq!(
-            arguments,
-            ["--print", "--effort", "high", "inspect the repository"]
+            actual,
+            ProcessCall::new("pi").arguments([
+                "--print",
+                "--effort",
+                "high",
+                "inspect the repository"
+            ])
         );
     }
 
@@ -170,12 +169,16 @@ mod tests {
             Some("high"),
         );
 
-        let (program, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
-        assert_eq!(program, PathBuf::from("omp"));
         assert_eq!(
-            arguments,
-            ["--print", "--thinking", "high", "inspect the repository"]
+            actual,
+            ProcessCall::new("omp").arguments([
+                "--print",
+                "--thinking",
+                "high",
+                "inspect the repository"
+            ])
         );
     }
 
@@ -188,19 +191,18 @@ mod tests {
             Some("high"),
         );
 
-        let (program, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
-        assert_eq!(program, PathBuf::from("claude"));
         assert_eq!(
-            arguments,
-            [
+            actual,
+            ProcessCall::new("claude").arguments([
                 "--print",
                 "--model",
                 "opus",
                 "--effort",
                 "high",
                 "inspect the repository"
-            ]
+            ])
         );
     }
 
@@ -213,19 +215,18 @@ mod tests {
             Some("high"),
         );
 
-        let (program, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
-        assert_eq!(program, PathBuf::from("codex"));
         assert_eq!(
-            arguments,
-            [
+            actual,
+            ProcessCall::new("codex").arguments([
                 "exec",
                 "--model",
                 "gpt-5",
                 "-c",
                 "model_reasoning_effort=high",
                 "inspect the repository"
-            ]
+            ])
         );
     }
 
@@ -238,18 +239,18 @@ mod tests {
             Some("high"),
         );
 
-        let (_, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
         assert_eq!(
-            arguments,
-            [
+            actual,
+            ProcessCall::new("omp").arguments([
                 "--print",
                 "--model",
                 "opus",
                 "--thinking",
                 "high",
                 "inspect the repository"
-            ]
+            ])
         );
     }
 
@@ -262,11 +263,11 @@ mod tests {
             Some("high"),
         );
 
-        let (_, arguments) = sut.into_parts();
+        let actual = ProcessCall::from(sut);
 
         assert_eq!(
-            arguments,
-            [
+            actual,
+            ProcessCall::new("pi").arguments([
                 "--print",
                 "--model",
                 "opus",
@@ -274,7 +275,7 @@ mod tests {
                 "high",
                 "--",
                 "--inspect the repository"
-            ]
+            ])
         );
     }
 
@@ -286,13 +287,15 @@ mod tests {
             (HeadlessHarness::Claude, "claude", "--print"),
             (HeadlessHarness::Codex, "codex", "exec"),
         ] {
-            let (program, arguments) =
-                HarnessCall::new(harness, "--inspect the repository").into_parts();
+            let actual = ProcessCall::from(HarnessCall::new(harness, "--inspect the repository"));
 
-            assert_eq!(program, PathBuf::from(expected_program));
             assert_eq!(
-                arguments,
-                [expected_headless_argument, "--", "--inspect the repository"]
+                actual,
+                ProcessCall::new(expected_program).arguments([
+                    expected_headless_argument,
+                    "--",
+                    "--inspect the repository"
+                ])
             );
         }
     }

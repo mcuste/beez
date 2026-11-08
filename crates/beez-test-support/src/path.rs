@@ -1,14 +1,7 @@
-use std::ffi::OsString;
 use std::path::Path;
 
-/// `directory` before the host `PATH`, which the sandbox needs for its own tools.
+/// The path as text, for a manifest or an assertion message.
 #[must_use]
-pub fn extended_path(directory: &Path) -> OsString {
-    let mut path = OsString::from(directory);
-    if let Some(host) = std::env::var_os("PATH") {
-        path.push(":");
-        path.push(host);
-    }
-
-    path
+pub fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }

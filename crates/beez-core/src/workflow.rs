@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::task::{ResolvedReference, Task, TaskDefinition, TaskId, TaskIndex};
+use crate::task::{ResolvedReference, Task, TaskDefinition, TaskId, TaskIndex, TaskRequest};
 use crate::template::{Template, TemplateError};
 
 /// Reports invalid workflow dependencies.
@@ -137,6 +137,8 @@ impl From<Completion> for TaskStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Workflow {
     tasks: Vec<Task>,
+    /// Whether another task reads the output of the task at each position.
+    read: Vec<bool>,
 }
 
 impl Workflow {
@@ -164,7 +166,7 @@ impl Workflow {
     /// True when another task reads the output of the task at `index`.
     #[must_use]
     pub fn is_read(&self, index: TaskIndex) -> bool {
-        self.tasks.iter().any(|task| task.reads.contains(&index))
+        self.read.get(index.position()).copied().unwrap_or(false)
     }
 }
 
@@ -191,17 +193,24 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
             .into_iter()
             .zip(dependencies)
             .zip(templates)
-            .map(|((definition, dependencies), templates)| Task {
+            .map(|((definition, dependencies), template)| Task {
                 id: definition.id,
                 dependencies,
-                reads: distinct_sources(&templates),
+                reads: distinct_sources(&template),
                 request: definition.request,
-                templates,
+                template,
                 sandbox: definition.sandbox,
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        Ok(Self { tasks })
+        let mut read = vec![false; tasks.len()];
+        for source in tasks.iter().flat_map(Task::reads) {
+            if let Some(is_read) = read.get_mut(source.position()) {
+                *is_read = true;
+            }
+        }
+
+        Ok(Self { tasks, read })
     }
 }
 
@@ -218,19 +227,19 @@ impl<'workflow> WorkflowExecution<'workflow> {
     pub fn ready(&self) -> Vec<TaskIndex> {
         (0..self.workflow.tasks.len())
             .map(TaskIndex)
-            .filter(|index| self.is_ready(*index))
+            .filter(|index| self.ready_task(*index).is_some())
             .collect()
     }
 
     /// Marks a ready task as running and returns it.
     pub fn start(&mut self, index: TaskIndex) -> Result<&'workflow Task, ExecutionError> {
-        let not_ready = ExecutionError::NotReady(index);
-        if !self.is_ready(index) {
-            return Err(not_ready);
+        let task = self
+            .ready_task(index)
+            .ok_or(ExecutionError::NotReady(index))?;
+        if let Some(status) = self.statuses.get_mut(index.position()) {
+            *status = TaskStatus::Running;
         }
-
-        *self.statuses.get_mut(index.position()).ok_or(not_ready)? = TaskStatus::Running;
-        self.workflow.task(index).ok_or(not_ready)
+        Ok(task)
     }
 
     /// Records a running task's outcome.
@@ -265,15 +274,15 @@ impl<'workflow> WorkflowExecution<'workflow> {
             .collect()
     }
 
-    /// True when the task has not started and every dependency succeeded.
-    fn is_ready(&self, index: TaskIndex) -> bool {
-        let Some(task) = self.workflow.task(index) else {
-            return false;
-        };
-        self.statuses.get(index.position()) == Some(&TaskStatus::Pending)
+    /// The task at `index`, when it has not started and every dependency
+    /// succeeded.
+    fn ready_task(&self, index: TaskIndex) -> Option<&'workflow Task> {
+        let task = self.workflow.task(index)?;
+        let ready = self.statuses.get(index.position()) == Some(&TaskStatus::Pending)
             && task.dependencies().iter().all(|dependency| {
                 self.statuses.get(dependency.position()) == Some(&TaskStatus::Succeeded)
-            })
+            });
+        ready.then_some(task)
     }
 }
 
@@ -347,41 +356,37 @@ impl<'definitions> Graph<'definitions> {
         &self,
         definition: &TaskDefinition,
         dependencies: &[TaskIndex],
-    ) -> Result<Vec<Template<ResolvedReference>>, WorkflowError> {
+    ) -> Result<TaskRequest<Template<ResolvedReference>>, WorkflowError> {
         let task = || definition.id.clone();
-        definition
-            .request
-            .texts()
-            .map(|text| {
-                Template::parse(text)
-                    .map_err(|error| WorkflowError::InvalidTemplate {
-                        task: task(),
-                        error,
-                    })?
-                    .try_map_references(|reference| {
-                        let source = reference.task();
-                        if *source == definition.id {
-                            return Err(WorkflowError::SelfOutput(task()));
-                        }
-                        let Some(&index) = self.indexes.get(source) else {
-                            return Err(WorkflowError::OutputOfUnknownTask {
-                                task: task(),
-                                source: source.clone(),
-                            });
-                        };
-                        if !dependencies.contains(&index) {
-                            return Err(WorkflowError::OutputWithoutDependency {
-                                task: task(),
-                                source: source.clone(),
-                            });
-                        }
-                        Ok(ResolvedReference {
-                            source: index,
-                            reference,
-                        })
+        definition.request.try_map_texts(|text| {
+            Template::parse(text)
+                .map_err(|error| WorkflowError::InvalidTemplate {
+                    task: task(),
+                    error,
+                })?
+                .try_map_references(|reference| {
+                    let source = reference.task();
+                    if *source == definition.id {
+                        return Err(WorkflowError::SelfOutput(task()));
+                    }
+                    let Some(&index) = self.indexes.get(source) else {
+                        return Err(WorkflowError::OutputOfUnknownTask {
+                            task: task(),
+                            source: source.clone(),
+                        });
+                    };
+                    if !dependencies.contains(&index) {
+                        return Err(WorkflowError::OutputWithoutDependency {
+                            task: task(),
+                            source: source.clone(),
+                        });
+                    }
+                    Ok(ResolvedReference {
+                        source: index,
+                        reference,
                     })
-            })
-            .collect()
+                })
+        })
     }
 
     /// The first cycle as the positions on it, first repeated last.
@@ -449,10 +454,10 @@ impl<'definitions> Graph<'definitions> {
     }
 }
 
-/// The distinct tasks the templates read, in the order they first read them.
-fn distinct_sources(templates: &[Template<ResolvedReference>]) -> Vec<TaskIndex> {
+/// The distinct tasks the request reads, in the order it first reads them.
+fn distinct_sources(request: &TaskRequest<Template<ResolvedReference>>) -> Vec<TaskIndex> {
     let mut sources = Vec::new();
-    for resolved in templates.iter().flat_map(Template::references) {
+    for resolved in request.texts().flat_map(Template::references) {
         if !sources.contains(&resolved.source) {
             sources.push(resolved.source);
         }
@@ -548,7 +553,7 @@ mod tests {
         assert!(sut.start(TaskIndex(0)).is_ok());
 
         assert!(sut.start(TaskIndex(0)).is_err());
-        assert!(sut.ready().is_empty());
+        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
     }
 
     #[test]
@@ -593,7 +598,7 @@ mod tests {
         );
 
         assert!(!sut.has_pending());
-        assert!(sut.ready().is_empty());
+        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
     }
 
     #[test]
@@ -664,7 +669,7 @@ mod tests {
 
         assert_eq!(sut.complete(TaskIndex(1), Completion::Failed), Ok(()));
 
-        assert!(sut.ready().is_empty());
+        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
         assert!(sut.has_pending());
     }
 
@@ -691,7 +696,7 @@ mod tests {
 
         assert_eq!(sut.complete(TaskIndex(0), Completion::Failed), Ok(()));
 
-        assert!(sut.ready().is_empty());
+        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
         assert!(sut.has_pending());
     }
 
@@ -717,9 +722,9 @@ mod tests {
             [1, 2]
         );
         assert_eq!(prepare.id().as_str(), "prepare");
-        assert!(prepare.dependencies().is_empty());
+        assert_eq!(prepare.dependencies(), Vec::<TaskIndex>::new());
         assert_eq!(lint.id().as_str(), "lint");
-        assert!(lint.dependencies().is_empty());
+        assert_eq!(lint.dependencies(), Vec::<TaskIndex>::new());
     }
 
     #[test]
@@ -880,6 +885,29 @@ mod tests {
             error.to_string(),
             "task review reads the output of task inspect, so it must depend on it"
         );
+    }
+
+    #[test]
+    fn checks_the_dependency_of_a_reference_after_stray_braces() {
+        for prompt in [
+            "x {{ y {{ tasks.inspect.stdout }}",
+            "{{{ tasks.inspect.stdout }}",
+        ] {
+            let error = Workflow::try_from(vec![
+                task("inspect", &[]),
+                prompt_task("review", &[], prompt),
+            ])
+            .unwrap_err();
+
+            assert_eq!(
+                error,
+                WorkflowError::OutputWithoutDependency {
+                    task: "review".parse().unwrap(),
+                    source: "inspect".parse().unwrap(),
+                },
+                "{prompt}"
+            );
+        }
     }
 
     #[test]

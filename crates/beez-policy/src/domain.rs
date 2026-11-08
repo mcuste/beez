@@ -10,6 +10,8 @@ pub enum DomainRuleError {
     InvalidCharacter(char),
     /// A `*` appears anywhere but as the first label.
     MisplacedWildcard,
+    /// The host has an empty label, such as `.com` or `a..b`.
+    EmptyLabel,
     /// The port is not a number from 1 to 65535.
     InvalidPort(String),
 }
@@ -27,6 +29,7 @@ impl fmt::Display for DomainRuleError {
             Self::MisplacedWildcard => {
                 formatter.write_str("domain rule may use `*` only as the first label")
             }
+            Self::EmptyLabel => formatter.write_str("domain rule has an empty label"),
             Self::InvalidPort(port) => write!(formatter, "domain rule has invalid port {port:?}"),
         }
     }
@@ -57,15 +60,24 @@ impl DomainRule {
     }
 
     /// True when the rule names `host`, whatever the port.
-    #[must_use]
-    pub fn matches_host(&self, host: &str) -> bool {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        if self.wildcard {
-            host.strip_suffix(self.host.as_str())
-                .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
-        } else {
-            host == self.host
+    ///
+    /// A wildcard needs at least one label before its suffix, and no label of
+    /// the host may be empty.
+    fn matches_host(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.');
+        if !self.wildcard {
+            return host.eq_ignore_ascii_case(&self.host);
         }
+        let Some(split) = host.len().checked_sub(self.host.len()) else {
+            return false;
+        };
+        let (Some(prefix), Some(suffix)) = (host.get(..split), host.get(split..)) else {
+            return false;
+        };
+        suffix.eq_ignore_ascii_case(&self.host)
+            && prefix
+                .strip_suffix('.')
+                .is_some_and(|labels| labels.split('.').all(|label| !label.is_empty()))
     }
 }
 
@@ -95,6 +107,9 @@ impl FromStr for DomainRule {
         }
         if host.contains('*') {
             return Err(DomainRuleError::MisplacedWildcard);
+        }
+        if host.split('.').any(str::is_empty) {
+            return Err(DomainRuleError::EmptyLabel);
         }
         if let Some(character) = host
             .chars()
@@ -178,6 +193,28 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_wildcard_host_with_an_empty_label() {
+        let sut = "*.npmjs.org".parse::<DomainRule>().unwrap();
+
+        assert!(!sut.matches("..npmjs.org", 443, 443));
+        assert!(!sut.matches("a..npmjs.org", 443, 443));
+        assert!(!sut.matches("..a.npmjs.org", 443, 443));
+    }
+
+    #[test]
+    fn compares_a_non_ascii_host_without_matching_it() {
+        let exact = "github.com".parse::<DomainRule>().unwrap();
+        let wildcard = "*.npmjs.org".parse::<DomainRule>().unwrap();
+
+        assert!(!exact.matches("gïthub.com", 443, 443));
+        assert!(!exact.matches("github.cöm", 443, 443));
+        assert!(wildcard.matches("ré.npmjs.org", 443, 443));
+        assert!(wildcard.matches("RÉ.NPMJS.ORG", 443, 443));
+        assert!(!wildcard.matches("é.npmjs.örg", 443, 443));
+        assert!(!wildcard.matches("ö", 443, 443));
+    }
+
+    #[test]
     fn keeps_every_rule_form_across_display_and_parsing() {
         for text in [
             "github.com",
@@ -219,6 +256,13 @@ mod tests {
             "api.*.com".parse::<DomainRule>(),
             Err(DomainRuleError::MisplacedWildcard)
         );
+        for text in [".com", "a..b", "*..com", "*.a..com", "github..com:443"] {
+            assert_eq!(
+                text.parse::<DomainRule>(),
+                Err(DomainRuleError::EmptyLabel),
+                "{text}"
+            );
+        }
         assert_eq!(
             "bad host".parse::<DomainRule>(),
             Err(DomainRuleError::InvalidCharacter(' '))

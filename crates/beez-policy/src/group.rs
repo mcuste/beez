@@ -129,8 +129,7 @@ parse_by_name!(DomainGroup, GroupError::UnknownDomainGroup);
 
 impl DomainGroup {
     /// Host rules in the group, in `DomainRule` syntax.
-    #[must_use]
-    pub fn domains(self) -> &'static [&'static str] {
+    fn domains(self) -> &'static [&'static str] {
         match self {
             Self::Anthropic => &["api.anthropic.com", "platform.claude.com", "claude.ai"],
             Self::OpenAi => &["api.openai.com", "chatgpt.com", "auth.openai.com"],
@@ -217,8 +216,7 @@ impl DomainGroup {
     }
 
     /// Host rules in the group. A rule that fails to parse is dropped.
-    #[must_use]
-    pub fn rules(self) -> Vec<DomainRule> {
+    pub(crate) fn rules(self) -> Vec<DomainRule> {
         parse_valid(self.domains())
     }
 }
@@ -424,36 +422,37 @@ pub(crate) enum PathGroup {
     IacState,
 }
 
-name_table!(pub(crate) PathGroup {
-    Keys => "keys",
-    Cloud => "cloud",
-    Logins => "logins",
-    Tokens => "tokens",
-    History => "history",
-    Secrets => "secrets",
-    Workspace => "workspace",
-    Git => "git",
-    Ci => "ci",
-    Editor => "editor",
-    Toolchain => "toolchain",
-    Harness => "harness",
-    Artifacts => "artifacts",
-    ClaudeState => "claude-state",
-    CodexState => "codex-state",
-    PiState => "pi-state",
-    OmpState => "omp-state",
-    NodeState => "node-state",
-    PythonState => "python-state",
-    RustState => "rust-state",
-    GoState => "go-state",
-    JvmState => "jvm-state",
-    RubyState => "ruby-state",
-    DotnetState => "dotnet-state",
-    ZigState => "zig-state",
-    IacState => "iac-state",
-});
-
 impl PathGroup {
+    /// Every group.
+    #[cfg(test)]
+    const ALL: &[Self] = &[
+        Self::Keys,
+        Self::Cloud,
+        Self::Logins,
+        Self::Tokens,
+        Self::History,
+        Self::Secrets,
+        Self::Workspace,
+        Self::Git,
+        Self::Ci,
+        Self::Editor,
+        Self::Toolchain,
+        Self::Harness,
+        Self::Artifacts,
+        Self::ClaudeState,
+        Self::CodexState,
+        Self::PiState,
+        Self::OmpState,
+        Self::NodeState,
+        Self::PythonState,
+        Self::RustState,
+        Self::GoState,
+        Self::JvmState,
+        Self::RubyState,
+        Self::DotnetState,
+        Self::ZigState,
+        Self::IacState,
+    ];
     /// Paths in the group, in `SandboxPath` syntax.
     pub(crate) fn paths(self) -> &'static [&'static str] {
         match self {
@@ -559,7 +558,7 @@ mod tests {
             assert_eq!(
                 group.sandbox_paths().len(),
                 group.paths().len(),
-                "{group}: {:?}",
+                "{group:?}: {:?}",
                 group.paths()
             );
         }

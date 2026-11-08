@@ -16,7 +16,7 @@ fn runs_a_process_call_and_captures_its_streams() {
 
     assert!(output.succeeded());
     assert_eq!(output.stdout(), b"beez");
-    assert!(output.stderr().is_empty());
+    assert_eq!(output.stderr(), []);
 }
 
 #[test]

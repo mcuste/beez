@@ -2,13 +2,42 @@
 
 use std::collections::BTreeSet;
 
-/// Default groups a section may disable, and groups it adds of its own.
+/// A setting that stays unset until a policy names it.
 ///
-/// `defaults` stays unset until a policy names it, so a task that only adds a
-/// group keeps what the workflow chose.
+/// On merge a value the later policy sets wins, and one it leaves unset keeps
+/// the earlier value, so a task that only adds a rule keeps what the workflow
+/// chose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Override<T: Copy>(Option<T>);
+
+impl<T: Copy> Default for Override<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T: Copy> From<Option<T>> for Override<T> {
+    fn from(value: Option<T>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T: Copy> Override<T> {
+    /// The value `later` sets, or else the value here.
+    pub(crate) fn merge(self, later: Self) -> Self {
+        Self(later.0.or(self.0))
+    }
+
+    /// The value set, or `default` while unset.
+    pub(crate) fn get_or(self, default: T) -> T {
+        self.0.unwrap_or(default)
+    }
+}
+
+/// Default groups a section may disable, and groups it adds of its own.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GroupSelection<G> {
-    defaults: Option<bool>,
+    defaults: Override<bool>,
     groups: Vec<G>,
     disable: Vec<G>,
 }
@@ -16,7 +45,7 @@ pub(crate) struct GroupSelection<G> {
 impl<G> Default for GroupSelection<G> {
     fn default() -> Self {
         Self {
-            defaults: None,
+            defaults: Override::default(),
             groups: Vec::new(),
             disable: Vec::new(),
         }
@@ -24,12 +53,22 @@ impl<G> Default for GroupSelection<G> {
 }
 
 impl<G: Copy + Ord> GroupSelection<G> {
-    pub(crate) fn new(defaults: Option<bool>, groups: Vec<G>, disable: Vec<G>) -> Self {
-        Self {
-            defaults,
-            groups,
-            disable,
-        }
+    /// Sets whether the default groups apply; `None` leaves it unset.
+    pub(crate) fn with_defaults(mut self, defaults: Option<bool>) -> Self {
+        self.defaults = defaults.into();
+        self
+    }
+
+    /// Sets the groups the section adds.
+    pub(crate) fn with_groups(mut self, groups: Vec<G>) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    /// Sets the default groups the section disables.
+    pub(crate) fn with_disable(mut self, disable: Vec<G>) -> Self {
+        self.disable = disable;
+        self
     }
 
     /// Adds the groups of `other` to this selection.
@@ -37,7 +76,7 @@ impl<G: Copy + Ord> GroupSelection<G> {
     /// The lists join. A `defaults` `other` sets replaces the value here, and
     /// one it leaves unset keeps the value here.
     pub(crate) fn merge(mut self, other: Self) -> Self {
-        self.defaults = other.defaults.or(self.defaults);
+        self.defaults = self.defaults.merge(other.defaults);
         extend(&mut self.groups, other.groups);
         extend(&mut self.disable, other.disable);
         self
@@ -48,7 +87,7 @@ impl<G: Copy + Ord> GroupSelection<G> {
     ///
     /// A group the section names always applies, even when it is also disabled.
     pub(crate) fn selected(&self, default_groups: &[G]) -> BTreeSet<G> {
-        let defaults = self.defaults.unwrap_or(true);
+        let defaults = self.defaults.get_or(true);
         default_groups
             .iter()
             .filter(|group| defaults && !self.disable.contains(group))

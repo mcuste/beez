@@ -109,7 +109,7 @@ impl std::error::Error for TemplateError {}
 /// `R` is how a reference names its task: by ID as parsed, or by position
 /// once a workflow has resolved it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Template<R = OutputReference> {
+pub(crate) struct Template<R> {
     segments: Vec<Segment<R>>,
 }
 
@@ -123,9 +123,9 @@ const OPEN: &str = "{{";
 const CLOSE: &str = "}}";
 const PREFIX: &str = "tasks.";
 
-impl Template {
+impl Template<OutputReference> {
     /// Splits `text` into literal text and output references.
-    pub fn parse(text: &str) -> Result<Self, TemplateError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, TemplateError> {
         let mut segments = Vec::new();
         let mut rest = text;
 
@@ -145,7 +145,7 @@ impl Template {
 
 impl<R> Template<R> {
     /// Every output the text reads, in the order it reads them.
-    pub fn references(&self) -> impl Iterator<Item = &R> {
+    pub(crate) fn references(&self) -> impl Iterator<Item = &R> {
         self.segments.iter().filter_map(|segment| match segment {
             Segment::Output(reference) => Some(reference),
             Segment::Text(_) => None,
@@ -155,7 +155,10 @@ impl<R> Template<R> {
     /// Replaces every reference with the output `lookup` returns for it.
     ///
     /// Fails with the first reference `lookup` has no output for.
-    pub fn render(&self, mut lookup: impl FnMut(&R) -> Option<String>) -> Result<String, &R> {
+    pub(crate) fn render(
+        &self,
+        mut lookup: impl FnMut(&R) -> Option<String>,
+    ) -> Result<String, &R> {
         let mut rendered = String::new();
         for segment in &self.segments {
             match segment {
@@ -199,11 +202,15 @@ fn push_text<R>(segments: &mut Vec<Segment<R>>, text: &str) {
 }
 
 /// The text before the first closed placeholder, the placeholder with its braces, and the rest.
+///
+/// The placeholder runs from the last `{{` before the first `}}`, so stray
+/// braces in front of it stay literal text and cannot hide a reference.
 fn next_placeholder(text: &str) -> Option<(&str, &str, &str)> {
-    let start = text.find(OPEN)?;
-    let (before, from_open) = text.split_at(start);
-    let close = from_open.get(OPEN.len()..)?.find(CLOSE)? + OPEN.len();
-    let (placeholder, after) = from_open.split_at(close + CLOSE.len());
+    let first_open = text.find(OPEN)? + OPEN.len();
+    let end = first_open + text.get(first_open..)?.find(CLOSE)? + CLOSE.len();
+    let (through_close, after) = text.split_at(end);
+    let start = through_close.get(..end - CLOSE.len())?.rfind(OPEN)?;
+    let (before, placeholder) = through_close.split_at(start);
     Some((before, placeholder, after))
 }
 
@@ -266,6 +273,28 @@ mod tests {
             sut.render(|_| None).unwrap(),
             "render {{ name }} with {{ and }} then {{ tasks.a.stdout"
         );
+    }
+
+    #[test]
+    fn reads_a_reference_after_an_unclosed_open_brace_pair() {
+        let sut = Template::parse("x {{ y {{ tasks.a.stdout }}").unwrap();
+
+        assert_eq!(
+            sut.references().cloned().collect::<Vec<_>>(),
+            [reference("a", TaskOutput::Stdout)]
+        );
+        assert_eq!(sut.render(|_| Some("A".to_owned())).unwrap(), "x {{ y A");
+    }
+
+    #[test]
+    fn reads_a_reference_inside_an_extra_brace() {
+        let sut = Template::parse("{{{ tasks.a.stdout }}").unwrap();
+
+        assert_eq!(
+            sut.references().cloned().collect::<Vec<_>>(),
+            [reference("a", TaskOutput::Stdout)]
+        );
+        assert_eq!(sut.render(|_| Some("A".to_owned())).unwrap(), "{A");
     }
 
     #[test]

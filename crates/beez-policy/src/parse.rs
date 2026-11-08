@@ -51,6 +51,6 @@ mod tests {
 
         let error = parse_all::<SandboxPath>(&values).unwrap_err();
 
-        assert!(!error.is_empty());
+        assert_ne!(error, "");
     }
 }
