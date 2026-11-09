@@ -3,30 +3,20 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Reports an invalid sandbox path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SandboxPathError {
     /// The path is empty.
+    #[error("sandbox path must not be empty")]
     Empty,
     /// The path contains a NUL byte.
+    #[error("sandbox path must not contain NUL")]
     Nul,
 }
-
-impl fmt::Display for SandboxPathError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("sandbox path must not be empty"),
-            Self::Nul => formatter.write_str("sandbox path must not contain NUL"),
-        }
-    }
-}
-
-impl std::error::Error for SandboxPathError {}
 
 /// A filesystem rule path before it is resolved on a host.
 ///
 /// `~` or `~/...` refers to the home directory. A relative path refers to the
-/// task's working directory. A bare program name in an executable rule refers
-/// to a lookup on `PATH`.
+/// task's working directory.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SandboxPath(String);
 
@@ -38,8 +28,7 @@ impl SandboxPath {
     }
 
     /// True when the path is a bare name without a directory separator.
-    #[must_use]
-    pub fn is_bare_name(&self) -> bool {
+    pub(crate) fn is_bare_name(&self) -> bool {
         !self.0.contains('/') && self.0 != "~"
     }
 

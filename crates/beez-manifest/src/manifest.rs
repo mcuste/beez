@@ -7,22 +7,27 @@ use beez_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy, parse_all};
 use serde::Deserialize;
 
 use crate::sandbox::{ManifestSandbox, SandboxSetting};
-use crate::schedule::{JobSchedule, ScheduleSetting};
+use crate::schedule::{JobSchedule, ScheduleFields};
 
 /// Reports an unreadable or invalid workflow manifest.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     /// The manifest file could not be read.
-    Io(std::io::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     /// The manifest extension is unsupported.
+    #[error("workflow file {} must use a .yaml, .yml, or .json extension", .0.display())]
     UnsupportedFormat(PathBuf),
     /// The manifest does not match Beez's workflow schema.
+    #[error("{0}")]
     Invalid(String),
     /// A prompt file a task names could not be read.
+    #[error("cannot read prompt file {}", .path.display())]
     PromptFile {
         /// The path as the manifest resolves it.
         path: PathBuf,
         /// Why the read failed.
+        #[source]
         error: std::io::Error,
     },
 }
@@ -61,9 +66,8 @@ impl Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
-    #[serde(default)]
-    schedule: Option<ScheduleSetting>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::schedule::one_or_many")]
+    schedule: Vec<ScheduleFields>,
     sandbox: Option<ManifestSandbox>,
     tasks: Vec<ManifestTask>,
 }
@@ -80,43 +84,12 @@ struct ManifestTask {
     model: Option<String>,
     effort: Option<String>,
     command: Option<Vec<String>>,
-    #[serde(default)]
     sandbox: Option<SandboxSetting>,
-}
-
-impl fmt::Display for ManifestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => error.fmt(formatter),
-            Self::UnsupportedFormat(path) => write!(
-                formatter,
-                "workflow file {} must use a .yaml, .yml, or .json extension",
-                path.display()
-            ),
-            Self::Invalid(error) => formatter.write_str(error),
-            Self::PromptFile { path, error } => {
-                write!(
-                    formatter,
-                    "cannot read prompt file {}: {error}",
-                    path.display()
-                )
-            }
-        }
-    }
 }
 
 impl ManifestError {
     fn invalid(error: impl fmt::Display) -> Self {
         Self::Invalid(error.to_string())
-    }
-}
-
-impl std::error::Error for ManifestError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) | Self::PromptFile { error, .. } => Some(error),
-            Self::UnsupportedFormat(_) | Self::Invalid(_) => None,
-        }
     }
 }
 
@@ -128,36 +101,35 @@ impl ManifestTask {
         directory: &Path,
         workflow: Option<&SandboxPolicy>,
     ) -> Result<TaskDefinition, ManifestError> {
-        let prompt = prompt(self.prompt, self.prompt_file, directory)?;
-        let sandbox =
-            crate::sandbox::resolve(workflow, self.sandbox).map_err(ManifestError::Invalid)?;
+        // Every check runs before the prompt file is read.
         let id = self.id.parse::<TaskId>().map_err(ManifestError::invalid)?;
-        let depends_on = parse_all::<TaskId>(&self.depends_on).map_err(ManifestError::Invalid)?;
+        let depends_on = parse_all::<TaskId>(&self.depends_on).map_err(ManifestError::invalid)?;
+        let sandbox =
+            crate::sandbox::resolve(workflow, self.sandbox).map_err(ManifestError::invalid)?;
         let options = HarnessOptions::new(self.model, self.effort);
+        let prompt = Prompt::new(self.prompt, self.prompt_file)?;
         let request = match (self.harness, prompt, self.command) {
             (Some(harness), Some(prompt), None) => {
                 let harness = harness
                     .parse::<HeadlessHarness>()
                     .map_err(ManifestError::invalid)?;
-                TaskRequest::harness(harness, prompt, options)
+                TaskRequest::harness(harness, prompt.read(directory)?, options)
             }
             (None, None, Some(command)) => {
                 if !options.is_empty() {
-                    return Err(ManifestError::Invalid(
-                        "model and effort require a harness task".into(),
+                    return Err(ManifestError::invalid(
+                        "model and effort require a harness task",
                     ));
                 }
                 let mut command = command.into_iter();
                 let Some(program) = command.next() else {
-                    return Err(ManifestError::Invalid(
-                        "command must contain a program".into(),
-                    ));
+                    return Err(ManifestError::invalid("command must contain a program"));
                 };
                 TaskRequest::command(program, command.collect())
             }
             _ => {
-                return Err(ManifestError::Invalid(
-                    "task must define either harness with prompt or prompt_file, or command".into(),
+                return Err(ManifestError::invalid(
+                    "task must define either harness with prompt or prompt_file, or command",
                 ));
             }
         };
@@ -165,29 +137,54 @@ impl ManifestTask {
     }
 }
 
-/// The prompt a task writes inline, or the contents of its `file`, relative to
-/// `directory`.
-fn prompt(
-    prompt: Option<String>,
-    file: Option<PathBuf>,
-    directory: &Path,
-) -> Result<Option<String>, ManifestError> {
-    let Some(file) = file else {
-        return Ok(prompt);
-    };
-    if prompt.is_some() {
-        return Err(ManifestError::Invalid(
-            "task must define either prompt or prompt_file, not both".into(),
-        ));
+/// The prompt a task writes inline, or the file that holds it.
+enum Prompt {
+    Inline(String),
+    File(PathBuf),
+}
+
+impl Prompt {
+    fn new(prompt: Option<String>, file: Option<PathBuf>) -> Result<Option<Self>, ManifestError> {
+        match (prompt, file) {
+            (Some(_), Some(_)) => Err(ManifestError::invalid(
+                "task must define either prompt or prompt_file, not both",
+            )),
+            (Some(prompt), None) => Ok(Some(Self::Inline(prompt))),
+            (None, Some(file)) => Ok(Some(Self::File(file))),
+            (None, None) => Ok(None),
+        }
     }
-    let path = directory.join(file);
-    fs::read_to_string(&path)
-        .map(Some)
-        .map_err(|error| ManifestError::PromptFile { path, error })
+
+    /// The prompt text, with a file read relative to `directory`.
+    fn read(self, directory: &Path) -> Result<String, ManifestError> {
+        match self {
+            Self::Inline(prompt) => Ok(prompt),
+            Self::File(file) => {
+                let path = directory.join(file);
+                fs::read_to_string(&path).map_err(|error| ManifestError::PromptFile { path, error })
+            }
+        }
+    }
 }
 
 /// Loads and validates a workflow manifest.
 pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
+    let loaded = read(path);
+    match &loaded {
+        Ok(manifest) => tracing::debug!(
+            path = %path.display(),
+            tasks = manifest.workflow.tasks().len(),
+            schedules = manifest.schedules.len(),
+            all_sandboxed = manifest.workflow.all_tasks_sandboxed(),
+            "loaded manifest"
+        ),
+        Err(error) => tracing::debug!(path = %path.display(), %error, "cannot load manifest"),
+    }
+    loaded
+}
+
+/// Reads and validates the manifest at `path`.
+fn read(path: &Path) -> Result<Manifest, ManifestError> {
     let source = fs::read_to_string(path).map_err(ManifestError::Io)?;
     let document: Document = match path.extension().and_then(|extension| extension.to_str()) {
         Some("yaml" | "yml") => noyalib::from_str(&source).map_err(ManifestError::invalid)?,

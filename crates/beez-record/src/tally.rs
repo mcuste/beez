@@ -12,7 +12,7 @@ use crate::outcome::{TaskOutcome, TaskState};
 /// Every run counts its tasks the same way, whether a person started it or the
 /// daemon did, so both close a run with the same line.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RunTally {
+pub(crate) struct RunTally {
     passed: usize,
     failed: usize,
     blocked: usize,
@@ -20,7 +20,7 @@ pub struct RunTally {
 
 impl RunTally {
     /// Counts one event. An event that does not end a task changes nothing.
-    pub fn record(&mut self, event: &RunEvent) {
+    pub(crate) fn record(&mut self, event: &RunEvent<'_>) {
         if let Some(outcome) = TaskOutcome::of(event) {
             self.add(outcome);
         }
@@ -38,13 +38,13 @@ impl RunTally {
 
     /// How many tasks failed or could not run.
     #[must_use]
-    pub fn failed(&self) -> usize {
+    pub(crate) fn failed(&self) -> usize {
         self.failed
     }
 
     /// The counts and the time, as the line that closes a run writes them.
     #[must_use]
-    pub fn summary(&self, elapsed: Duration) -> String {
+    pub(crate) fn summary(&self, elapsed: Duration) -> String {
         format!(
             "{} in {}",
             counts(self.passed, self.failed, self.blocked),

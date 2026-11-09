@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::init_request::{ExecRestriction, InitRequest};
 use crate::mask_marker::{MARKER_PREFIX, marker_owner};
 use crate::proxy::{ProxyPorts, loopback};
 use crate::relay::Relay;
-use crate::resolve::{Execution, PathSet, ResolvedSandbox};
+use crate::resolve::{Execution, PathSet, ResolvedSandbox, strictly_inside};
 use crate::sandbox::Wrapped;
 use crate::server::{Server, UnixPathListener, forward};
 
@@ -59,8 +60,8 @@ struct Bridge {
     _servers: [Server; 2],
     directory: SocketDirectory,
     empty: PathBuf,
-    http_socket: PathBuf,
-    socks_socket: PathBuf,
+    /// The proxy ports inside the sandbox, each with the socket it forwards to.
+    relays: [Relay; 2],
 }
 
 impl Bridge {
@@ -73,17 +74,18 @@ impl Bridge {
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
         let empty = directory.path().join("empty");
         fs::create_dir(&empty)?;
-        let http_socket = directory.path().join("http.sock");
-        let socks_socket = directory.path().join("socks.sock");
-        let http = forward_socket(&http_socket, ports.http)?;
-        let socks = forward_socket(&socks_socket, ports.socks)?;
+        let http = Relay::new(HTTP_PORT, directory.path().join("http.sock"));
+        let socks = Relay::new(SOCKS_PORT, directory.path().join("socks.sock"));
+        let servers = [
+            forward_socket(http.socket(), ports.http)?,
+            forward_socket(socks.socket(), ports.socks)?,
+        ];
 
         Ok(Self {
-            _servers: [http, socks],
+            _servers: servers,
             directory,
             empty,
-            http_socket,
-            socks_socket,
+            relays: [http, socks],
         })
     }
 
@@ -160,7 +162,15 @@ fn command(
     let plan = MaskPlan::of(resolved);
 
     let mut command = Command::new(bwrap);
-    command.args(bwrap_arguments(resolved, bridge, &beez, arguments, &plan));
+    let bwrap_arguments = bwrap_arguments(resolved, bridge, &beez, arguments, &plan);
+    // The program's own arguments come last and can hold a prompt, so they
+    // stay out of the trace.
+    let setup = bwrap_arguments.len().saturating_sub(arguments.len());
+    tracing::trace!(
+        arguments = ?bwrap_arguments.iter().take(setup).collect::<Vec<_>>(),
+        "bubblewrap arguments"
+    );
+    command.args(bwrap_arguments);
     Ok((command, plan.hold()))
 }
 
@@ -193,7 +203,7 @@ impl MaskPlan {
                 resolved
                     .write_deny
                     .iter()
-                    .any(|path| path.starts_with(root) && path != *root)
+                    .any(|path| strictly_inside(path, root))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -286,13 +296,9 @@ impl MaskLock {
 /// is empty for a path that exists, which needs no mask.
 fn mask_directories(path: &Path) -> Vec<PathBuf> {
     path.ancestors()
-        .take_while(|directory| !directory.exists() || is_marked(directory))
+        .take_while(|directory| !directory.exists() || markers(directory).next().is_some())
         .map(Path::to_path_buf)
         .collect()
-}
-
-fn is_marked(directory: &Path) -> bool {
-    markers(directory).next().is_some()
 }
 
 fn markers(directory: &Path) -> impl Iterator<Item = PathBuf> {
@@ -405,35 +411,25 @@ fn bwrap_arguments(
 
 /// The command `bwrap` runs: `beez sandbox-init`, which starts the proxy
 /// relays and limits the programs, then runs the task's program.
-///
-/// The arguments after `sandbox-init` are read back by Beez's own
-/// `sandbox-init` command, so their names must match its options.
 fn sandbox_init(
     resolved: &ResolvedSandbox,
     bridge: &Bridge,
     beez: &Path,
     program_arguments: &[OsString],
 ) -> Vec<OsString> {
-    let mut command = vec![beez.into(), OsString::from("sandbox-init")];
-    for relay in [
-        Relay::new(HTTP_PORT, bridge.http_socket.clone()),
-        Relay::new(SOCKS_PORT, bridge.socks_socket.clone()),
-    ] {
-        command.push(OsString::from("--relay"));
-        command.push(OsString::from(&relay));
-    }
-    match &resolved.execution {
-        Execution::Unrestricted => command.push(OsString::from("--unrestricted-exec")),
-        Execution::Only(allowlist) => {
-            for path in allowlist {
-                command.push(OsString::from("--exec"));
-                command.push(path.into());
+    let request = InitRequest {
+        relays: bridge.relays.to_vec(),
+        execution: match &resolved.execution {
+            Execution::Unrestricted => ExecRestriction::Unrestricted,
+            Execution::Only(allowlist) => {
+                ExecRestriction::Only(allowlist.iter().cloned().collect())
             }
-        }
-    }
-    command.push(OsString::from("--"));
-    command.push(resolved.program().into());
-    command.extend(program_arguments.iter().cloned());
+        },
+        program: resolved.program().to_path_buf(),
+        arguments: program_arguments.to_vec(),
+    };
+    let mut command = vec![beez.into(), OsString::from("sandbox-init")];
+    command.extend(request.to_arguments());
     command
 }
 
@@ -600,14 +596,13 @@ mod tests {
     use super::{
         Bridge, Bwrap, MARKER_PREFIX, MaskPlan, SANDBOX_PORTS, bwrap_arguments, remove_dead_markers,
     };
-    use crate::proxy::ProxyPorts;
+    use crate::proxy::{NetworkRules, ProxyPorts};
     use crate::resolve::{ExecAllowlist, Execution, PathSet, ResolvedSandbox};
 
     /// A policy that may write `work` and must not write `.git/hooks` in it.
     fn resolved(work: &Path) -> ResolvedSandbox {
         ResolvedSandbox {
-            allowed_domains: Vec::new(),
-            localhost: false,
+            network: NetworkRules::default(),
             read_deny: PathSet::default(),
             write_allow: PathSet::from([work.to_path_buf()]),
             write_deny: PathSet::from([work.join(".git/hooks")]),
@@ -651,7 +646,7 @@ mod tests {
     fn binds_writable_paths_and_read_only_binds_denied_paths_that_exist() {
         let directory = TemporaryDirectory::new("bwrap-writes").unwrap();
         let work = directory.join("work");
-        fs::create_dir_all(work.join(".git/hooks")).unwrap();
+        directory.subdirectory("work/.git/hooks").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
@@ -666,7 +661,7 @@ mod tests {
     fn binds_the_parent_of_a_denied_path_before_the_deny_so_it_cannot_be_renamed() {
         let directory = TemporaryDirectory::new("bwrap-deny-parent").unwrap();
         let work = directory.join("work");
-        fs::create_dir_all(work.join(".git/hooks")).unwrap();
+        directory.subdirectory("work/.git/hooks").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
@@ -684,8 +679,7 @@ mod tests {
     #[test]
     fn binds_no_parent_of_a_denied_path_that_does_not_exist_yet() {
         let directory = TemporaryDirectory::new("bwrap-missing-parent").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
@@ -697,8 +691,7 @@ mod tests {
     #[test]
     fn masks_a_denied_path_that_does_not_exist_yet_with_an_empty_directory() {
         let directory = TemporaryDirectory::new("bwrap-missing-deny").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
@@ -711,8 +704,7 @@ mod tests {
     #[test]
     fn leaves_a_denied_path_outside_every_writable_directory_unmounted() {
         let directory = TemporaryDirectory::new("bwrap-unwritable-deny").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let mut policy = resolved(&work);
         policy.write_deny = PathSet::from([directory.join("elsewhere/.claude")]);
         let bridge = bridge();
@@ -727,8 +719,7 @@ mod tests {
     #[test]
     fn gives_every_sandbox_a_private_tmp_and_run_even_when_tmp_is_writable() {
         let directory = TemporaryDirectory::new("bwrap-tmp").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let mut writable_tmp = resolved(&work);
         writable_tmp.write_allow.extend([PathBuf::from("/tmp")]);
         let bridge = bridge();
@@ -743,8 +734,7 @@ mod tests {
     #[test]
     fn keeps_a_program_in_the_host_tmp_visible() {
         let directory = TemporaryDirectory::new("bwrap-tmp-program").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let mut policy = resolved(&work);
         policy.write_allow.extend([PathBuf::from("/tmp")]);
         policy.program = PathBuf::from("/tmp/tools/claude");
@@ -764,8 +754,7 @@ mod tests {
     #[test]
     fn mounts_the_private_directories_before_anything_inside_them() {
         let directory = TemporaryDirectory::new("bwrap-tmp-order").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
@@ -781,8 +770,7 @@ mod tests {
     #[test]
     fn keeps_a_run_path_as_a_link_or_a_read_only_bind() {
         let directory = TemporaryDirectory::new("bwrap-keep").unwrap();
-        let program_directory = directory.join("wrappers");
-        fs::create_dir(&program_directory).unwrap();
+        let program_directory = directory.subdirectory("wrappers").unwrap();
         let link = directory.join("current-system");
         std::os::unix::fs::symlink("/nix/store/system", &link).unwrap();
 
@@ -811,8 +799,7 @@ mod tests {
     #[test]
     fn creates_every_mask_directory_and_marks_it_as_in_use() {
         let directory = TemporaryDirectory::new("bwrap-mask-hold").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let hooks = work.join(".git/hooks");
 
         let sut = MaskPlan::of(&resolved(&work)).hold();
@@ -826,8 +813,7 @@ mod tests {
     #[test]
     fn gives_back_its_mask_directories_when_the_run_ends() {
         let directory = TemporaryDirectory::new("bwrap-mask-release").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
 
         drop(MaskPlan::of(&resolved(&work)).hold());
 
@@ -838,8 +824,7 @@ mod tests {
     #[test]
     fn keeps_a_mask_directory_another_run_still_needs() {
         let directory = TemporaryDirectory::new("bwrap-mask-shared").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let held = MaskPlan::of(&resolved(&work)).hold();
 
         drop(MaskPlan::of(&resolved(&work)).hold());
@@ -852,8 +837,7 @@ mod tests {
     #[test]
     fn masks_every_deny_while_other_runs_hold_and_give_back_the_same_masks() {
         let directory = TemporaryDirectory::new("bwrap-mask-concurrent").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let mut policy = resolved(&work);
         policy.write_deny = (0..20)
             .map(|index| work.join(format!(".deny-{index}/inner")))
@@ -908,7 +892,7 @@ mod tests {
     fn plans_no_mask_for_a_deny_that_exists_already() {
         let directory = TemporaryDirectory::new("bwrap-mask-existing").unwrap();
         let work = directory.join("work");
-        fs::create_dir_all(work.join(".git/hooks")).unwrap();
+        directory.subdirectory("work/.git/hooks").unwrap();
 
         let sut = MaskPlan::of(&resolved(&work));
 
@@ -918,12 +902,9 @@ mod tests {
     #[test]
     fn hides_denied_directories_with_a_tmpfs_and_denied_files_with_dev_null() {
         let directory = TemporaryDirectory::new("bwrap-reads").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
-        let keys = directory.join("keys");
-        let netrc = directory.join(".netrc");
-        fs::create_dir(&keys).unwrap();
-        fs::write(&netrc, "secret").unwrap();
+        let work = directory.subdirectory("work").unwrap();
+        let keys = directory.subdirectory("keys").unwrap();
+        let netrc = directory.write(".netrc", "secret").unwrap();
         let mut policy = resolved(&work);
         policy.read_deny = PathSet::from([keys.clone(), netrc.clone()]);
         let bridge = bridge();
@@ -942,14 +923,22 @@ mod tests {
     #[test]
     fn relays_both_proxy_ports_through_the_bridge_sockets() {
         let directory = TemporaryDirectory::new("bwrap-relays").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
 
-        let http = format!("{}={}", SANDBOX_PORTS.http, text(&bridge.http_socket));
-        let socks = format!("{}={}", SANDBOX_PORTS.socks, text(&bridge.socks_socket));
+        let sockets = bridge.directory.path();
+        let http = format!(
+            "{}={}",
+            SANDBOX_PORTS.http,
+            text(&sockets.join("http.sock"))
+        );
+        let socks = format!(
+            "{}={}",
+            SANDBOX_PORTS.socks,
+            text(&sockets.join("socks.sock"))
+        );
         assert!(has_run(&sut, &["--relay", &http]), "{sut:?}");
         assert!(has_run(&sut, &["--relay", &socks]), "{sut:?}");
     }
@@ -957,8 +946,7 @@ mod tests {
     #[test]
     fn passes_one_exec_option_for_each_allowed_executable() {
         let directory = TemporaryDirectory::new("bwrap-executables").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let mut restricted = resolved(&work);
         restricted.execution = Execution::Only(ExecAllowlist::new(
             PathBuf::from("/bin/bash"),
@@ -983,8 +971,7 @@ mod tests {
     #[test]
     fn always_passes_an_exec_option_when_execution_is_restricted() {
         let directory = TemporaryDirectory::new("bwrap-exec-program").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let mut restricted = resolved(&work);
         restricted.execution = Execution::Only(ExecAllowlist::new(PathBuf::from("/bin/bash"), []));
         let bridge = bridge();
@@ -1000,8 +987,7 @@ mod tests {
     #[test]
     fn ends_with_the_program_and_its_arguments_after_a_separator() {
         let directory = TemporaryDirectory::new("bwrap-program").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);
@@ -1019,10 +1005,10 @@ mod tests {
         let directory = TemporaryDirectory::new("bwrap-nested-order").unwrap();
         let work = directory.join("work");
         let sub = work.join("sub");
-        for path in [work.join("b"), sub.join("a/hooks"), work.join("keys")] {
-            fs::create_dir_all(path).unwrap();
+        for name in ["work/b", "work/sub/a/hooks", "work/keys"] {
+            directory.subdirectory(name).unwrap();
         }
-        fs::write(sub.join(".netrc"), "secret").unwrap();
+        directory.write("work/sub/.netrc", "secret").unwrap();
         let mut policy = resolved(&work);
         policy.write_allow = PathSet::from([work.clone(), sub.clone()]);
         policy.write_deny = PathSet::from([work.join("b"), sub.join("a/hooks")]);
@@ -1072,8 +1058,7 @@ mod tests {
     #[test]
     fn changes_to_the_working_directory() {
         let directory = TemporaryDirectory::new("bwrap-chdir").unwrap();
-        let work = directory.join("work");
-        fs::create_dir(&work).unwrap();
+        let work = directory.subdirectory("work").unwrap();
         let bridge = bridge();
 
         let sut = arguments(&resolved(&work), &bridge);

@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 
 use crate::error::ScheduleError;
 use crate::offset::UtcOffset;
+use crate::text::is_ascii_digits;
 
 /// A cron expression and the offset it is read in.
 ///
@@ -45,23 +46,13 @@ impl CronSchedule {
         let (primary, alternate) = if text.starts_with('@') {
             (parse(text)?, None)
         } else {
-            let fields = normalize(text)?;
-            if restricts(&fields.day_of_month) && restricts(&fields.day_of_week) {
-                let day_of_month = Fields {
-                    day_of_week: "*".to_owned(),
-                    ..fields.clone()
-                };
-                let day_of_week = Fields {
-                    day_of_month: "*".to_owned(),
-                    ..fields
-                };
-                (
-                    parse(&day_of_month.to_string())?,
-                    Some(parse(&day_of_week.to_string())?),
-                )
-            } else {
-                (parse(&fields.to_string())?, None)
-            }
+            let (primary, alternate) = Fields::parse(text)?.split_days();
+            (
+                parse(&primary.to_string())?,
+                alternate
+                    .map(|fields| parse(&fields.to_string()))
+                    .transpose()?,
+            )
         };
 
         Ok(Self {
@@ -96,14 +87,6 @@ impl PartialEq for CronSchedule {
 
 impl Eq for CronSchedule {}
 
-impl FromStr for CronSchedule {
-    type Err = ScheduleError;
-
-    fn from_str(expression: &str) -> Result<Self, Self::Err> {
-        Self::new(expression, UtcOffset::UTC)
-    }
-}
-
 impl fmt::Display for CronSchedule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.text)?;
@@ -114,76 +97,90 @@ impl fmt::Display for CronSchedule {
     }
 }
 
-/// Puts an expression in the form the parser reads.
-///
-/// A crontab expression has no seconds field, so it gains one that holds the
-/// start of the minute, and its days of week move to the numbers the parser
-/// counts in.
-fn normalize(text: &str) -> Result<Fields, ScheduleError> {
-    let fields: Vec<&str> = text.split_whitespace().collect();
-    let (seconds, minute, hour, day_of_month, month, day_of_week, year) = match fields[..] {
-        [minute, hour, day_of_month, month, day_of_week] => {
-            ("0", minute, hour, day_of_month, month, day_of_week, None)
-        }
-        [seconds, minute, hour, day_of_month, month, day_of_week] => (
-            seconds,
-            minute,
-            hour,
-            day_of_month,
-            month,
-            day_of_week,
-            None,
-        ),
-        [
-            seconds,
-            minute,
-            hour,
-            day_of_month,
-            month,
-            day_of_week,
-            year,
-        ] => (
-            seconds,
-            minute,
-            hour,
-            day_of_month,
-            month,
-            day_of_week,
-            Some(year),
-        ),
-        _ => return Err(ScheduleError::FieldCount(fields.len())),
-    };
-    // A workflow run must not start more than once a minute.
-    if !is_number(seconds) {
-        return Err(ScheduleError::SubMinute);
-    }
-
-    Ok(Fields {
-        seconds: seconds.to_owned(),
-        minute: minute.to_owned(),
-        hour: hour.to_owned(),
-        day_of_month: day_of_month.to_owned(),
-        month: month.to_owned(),
-        day_of_week: shift_days_of_week(day_of_week)?,
-        year: year.map(str::to_owned),
-    })
-}
-
 /// The fields of an expression in the form the parser reads.
-#[derive(Clone)]
-struct Fields {
+struct Fields<'a> {
     /// Always one fixed value.
-    seconds: String,
-    minute: String,
-    hour: String,
-    day_of_month: String,
-    month: String,
+    seconds: &'a str,
+    minute: &'a str,
+    hour: &'a str,
+    day_of_month: &'a str,
+    month: &'a str,
     /// Counts from Sunday as 1, as the parser does.
     day_of_week: String,
-    year: Option<String>,
+    year: Option<&'a str>,
 }
 
-impl fmt::Display for Fields {
+impl<'a> Fields<'a> {
+    /// Puts an expression in the form the parser reads.
+    ///
+    /// A crontab expression has no seconds field, so it gains one that holds
+    /// the start of the minute, and its days of week move to the numbers the
+    /// parser counts in.
+    fn parse(text: &'a str) -> Result<Self, ScheduleError> {
+        let fields: Vec<&str> = text.split_whitespace().collect();
+        let (seconds, [minute, hour, day_of_month, month, day_of_week], year) = match fields[..] {
+            [minute, hour, day_of_month, month, day_of_week] => {
+                ("0", [minute, hour, day_of_month, month, day_of_week], None)
+            }
+            [seconds, minute, hour, day_of_month, month, day_of_week] => (
+                seconds,
+                [minute, hour, day_of_month, month, day_of_week],
+                None,
+            ),
+            [
+                seconds,
+                minute,
+                hour,
+                day_of_month,
+                month,
+                day_of_week,
+                year,
+            ] => (
+                seconds,
+                [minute, hour, day_of_month, month, day_of_week],
+                Some(year),
+            ),
+            _ => return Err(ScheduleError::FieldCount(fields.len())),
+        };
+        // A workflow run must not start more than once a minute.
+        if !is_ascii_digits(seconds) {
+            return Err(ScheduleError::SubMinute);
+        }
+
+        Ok(Self {
+            seconds,
+            minute,
+            hour,
+            day_of_month,
+            month,
+            day_of_week: shift_days_of_week(day_of_week)?,
+            year,
+        })
+    }
+
+    /// Splits a restricted day of month and day of week into two schedules.
+    ///
+    /// A crontab reads both as "either day", but the parser keeps only the
+    /// days both fields hold. The first half keeps the day of month and the
+    /// second, when there is one, keeps the day of week.
+    fn split_days(self) -> (Self, Option<Self>) {
+        if !(restricts(self.day_of_month) && restricts(&self.day_of_week)) {
+            return (self, None);
+        }
+        // Every field the update copies is borrowed, so `self` stays whole.
+        let day_of_month = Self {
+            day_of_week: "*".to_owned(),
+            ..self
+        };
+        let day_of_week = Self {
+            day_of_month: "*",
+            ..self
+        };
+        (day_of_month, Some(day_of_week))
+    }
+}
+
+impl fmt::Display for Fields<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
@@ -206,45 +203,85 @@ impl fmt::Display for Fields {
 fn shift_days_of_week(field: &str) -> Result<String, ScheduleError> {
     let terms = field
         .split(',')
-        .map(|term| {
-            // A step divides a range, so only the range holds days.
-            let (days, step) = match term.split_once('/') {
-                Some((days, step)) => (days, Some(step)),
-                None => (term, None),
-            };
-            let days = days
-                .split('-')
-                .map(shift_day_of_week)
-                .collect::<Result<Vec<_>, _>>()?
-                .join("-");
-            Ok(match step {
-                Some(step) => format!("{days}/{step}"),
-                None => days,
-            })
-        })
+        .map(shift_term)
         .collect::<Result<Vec<_>, ScheduleError>>()?;
 
     Ok(terms.join(","))
 }
 
-fn shift_day_of_week(day: &str) -> Result<String, ScheduleError> {
-    if !is_number(day) {
-        return Ok(day.to_owned());
+/// Moves one comma-separated term of a day-of-week field.
+fn shift_term(term: &str) -> Result<String, ScheduleError> {
+    // A step divides a range, so only the range holds days.
+    let (days, step) = match term.split_once('/') {
+        Some((days, step)) => (days, Some(step)),
+        None => (term, None),
+    };
+    if let Some(days) = list_range_ending_on_sunday(days, step)? {
+        return Ok(days);
     }
-    let number = day
-        .parse::<u32>()
-        .map_err(|_| ScheduleError::DayOfWeek(day.to_owned()))?;
-    if number > 7 {
-        return Err(ScheduleError::DayOfWeek(day.to_owned()));
-    }
-
-    // Both 0 and 7 are Sunday, which the parser counts as 1.
-    Ok((number % 7 + 1).to_string())
+    let days = days
+        .split('-')
+        .map(shift_day_of_week)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("-");
+    Ok(match step {
+        Some(step) => format!("{days}/{step}"),
+        None => days,
+    })
 }
 
-/// True for one or more ASCII digits and nothing else.
-fn is_number(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+/// Lists the days of a numbered range that ends on 7, such as `5-7`.
+///
+/// Sunday is 7 in a crontab but 1 in the Quartz form, so the range would end
+/// before it starts once shifted. Listing its days, after any step, keeps its
+/// meaning. Returns nothing for every other term.
+fn list_range_ending_on_sunday(
+    days: &str,
+    step: Option<&str>,
+) -> Result<Option<String>, ScheduleError> {
+    let Some((start, end)) = days.split_once('-') else {
+        return Ok(None);
+    };
+    if !is_ascii_digits(start) || !is_ascii_digits(end) || day_number(end)? != 7 {
+        return Ok(None);
+    }
+    let start = day_number(start)?;
+    let step = match step {
+        None => 1,
+        // The parser reports a step that is not a positive number.
+        Some(step) => match step.parse::<u32>() {
+            Ok(step) if step > 0 => step,
+            _ => return Ok(None),
+        },
+    };
+
+    Ok(Some(
+        (start..=7)
+            .filter(|day| (day - start) % step == 0)
+            .map(|day| quartz_day(day).to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    ))
+}
+
+fn shift_day_of_week(day: &str) -> Result<String, ScheduleError> {
+    if !is_ascii_digits(day) {
+        return Ok(day.to_owned());
+    }
+    Ok(quartz_day(day_number(day)?).to_string())
+}
+
+/// Reads a crontab day number, which runs from 0 to 7.
+fn day_number(day: &str) -> Result<u32, ScheduleError> {
+    day.parse::<u32>()
+        .ok()
+        .filter(|number| *number <= 7)
+        .ok_or_else(|| ScheduleError::DayOfWeek(day.to_owned()))
+}
+
+/// Both 0 and 7 are Sunday, which the parser counts as 1.
+const fn quartz_day(day: u32) -> u32 {
+    day % 7 + 1
 }
 
 /// True when a field names days rather than every day.
@@ -266,7 +303,7 @@ fn parse(expression: &str) -> Result<Box<cron::Schedule>, ScheduleError> {
 mod tests {
     use super::CronSchedule;
     use crate::error::ScheduleError;
-    use crate::instant::{format_instant, parse_instant};
+    use crate::instant::{Utc, parse_instant};
     use crate::offset::UtcOffset;
 
     /// The next `count` fires after the start of 2026-09-09, as UTC text.
@@ -282,7 +319,7 @@ mod tests {
             let Some(next) = schedule.next_after(time) else {
                 break;
             };
-            fires.push(format_instant(next));
+            fires.push(Utc(next).to_string());
             time = next;
         }
 
@@ -403,6 +440,41 @@ mod tests {
         assert_eq!(fires("0 3 * * 1-5/2", 3), fires("0 3 * * Mon,Wed,Fri", 3));
     }
 
+    /// A range may end on 7, the second name for Sunday.
+    #[test]
+    fn reads_a_day_of_week_range_that_ends_on_seven() {
+        // 2026-09-09 is a Wednesday.
+        assert_eq!(fires("0 3 * * 1-7", 7), fires("0 3 * * *", 7));
+        assert_eq!(fires("0 3 * * 0-7", 7), fires("0 3 * * *", 7));
+        assert_eq!(fires("0 3 * * 5-7", 4), fires("0 3 * * Fri,Sat,Sun", 4));
+        assert_eq!(
+            fires("0 3 * * 5-7", 4),
+            [
+                "2026-09-11T03:00:00Z",
+                "2026-09-12T03:00:00Z",
+                "2026-09-13T03:00:00Z",
+                "2026-09-18T03:00:00Z"
+            ]
+        );
+        assert_eq!(fires("0 3 * * 7-7", 2), fires("0 3 * * Sun", 2));
+    }
+
+    #[test]
+    fn reads_a_stepped_day_of_week_range_that_ends_on_seven() {
+        assert_eq!(
+            fires("0 3 * * 1-7/2", 8),
+            fires("0 3 * * Mon,Wed,Fri,Sun", 8)
+        );
+        assert_eq!(fires("0 3 * * 0-7/7", 4), fires("0 3 * * Sun", 4));
+        assert_eq!(fires("0 3 * * 2-7/3,1", 6), fires("0 3 * * Mon,Tue,Fri", 6));
+    }
+
+    #[test]
+    fn reads_a_day_of_week_range_that_starts_on_zero() {
+        assert_eq!(fires("0 3 * * 0-6", 7), fires("0 3 * * *", 7));
+        assert_eq!(fires("0 3 * * 0-2", 6), fires("0 3 * * Sun,Mon,Tue", 6));
+    }
+
     #[test]
     fn rejects_a_day_of_week_outside_the_week() {
         assert_eq!(
@@ -417,7 +489,7 @@ mod tests {
         let fire = parse_instant("2026-09-09T03:00:00Z").unwrap();
 
         assert_eq!(
-            schedule.next_after(fire).map(format_instant),
+            schedule.next_after(fire).map(|time| Utc(time).to_string()),
             Some("2026-09-10T03:00:00Z".to_owned())
         );
     }

@@ -1,31 +1,16 @@
-use std::fmt;
-
 use crate::named::{self, name_table, parse_by_name};
 use crate::{DomainRule, SandboxPath, parse_valid};
 
 /// Reports an unknown group name.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum GroupError {
     /// The name does not match a domain group.
+    #[error("{}", named::unknown::<DomainGroup>("domain group", .0))]
     UnknownDomainGroup(String),
     /// The name does not match an executable group.
+    #[error("{}", named::unknown::<ExecutableGroup>("executable group", .0))]
     UnknownExecutableGroup(String),
 }
-
-impl fmt::Display for GroupError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownDomainGroup(name) => {
-                formatter.write_str(&named::unknown::<DomainGroup>("domain group", name))
-            }
-            Self::UnknownExecutableGroup(name) => {
-                formatter.write_str(&named::unknown::<ExecutableGroup>("executable group", name))
-            }
-        }
-    }
-}
-
-impl std::error::Error for GroupError {}
 
 /// A named set of hosts a task may need.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -334,8 +319,7 @@ impl ExecutableGroup {
 
     /// Directories the group's programs need to write. A path that fails to
     /// parse is dropped.
-    #[must_use]
-    pub fn state_sandbox_paths(self) -> Vec<SandboxPath> {
+    pub(crate) fn state_sandbox_paths(self) -> Vec<SandboxPath> {
         self.state_group()
             .map(PathGroup::sandbox_paths)
             .unwrap_or_default()
@@ -364,95 +348,85 @@ impl ExecutableGroup {
     }
 }
 
-/// A named set of paths a policy applies.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum PathGroup {
-    /// Private keys.
-    Keys,
-    /// Cloud provider credentials.
-    Cloud,
-    /// Cluster, registry, and host logins.
-    Logins,
-    /// Registry and forge tokens.
-    Tokens,
-    /// Shell history, which often holds a token typed on a command line.
-    History,
-    /// Keychains and password stores.
-    Secrets,
-    /// The task's working directory and the temporary directory.
-    Workspace,
-    /// Git files that run commands or point Git at other code.
-    Git,
-    /// Pipeline definitions that run on a later push.
-    Ci,
-    /// Editor and container configuration that runs commands on open.
-    Editor,
-    /// Files that change how a build tool runs.
-    Toolchain,
-    /// Harness configuration a run could use to execute code outside the
-    /// sandbox later.
-    Harness,
-    /// The artifacts of the run itself.
-    Artifacts,
-    /// Claude Code configuration and state.
-    ClaudeState,
-    /// Codex configuration and state.
-    CodexState,
-    /// Pi configuration and state.
-    PiState,
-    /// Oh My Pi configuration and state.
-    OmpState,
-    /// Node.js caches.
-    NodeState,
-    /// Python caches.
-    PythonState,
-    /// Rust toolchain and registry caches.
-    RustState,
-    /// Go module and build caches.
-    GoState,
-    /// Maven and Gradle caches.
-    JvmState,
-    /// Ruby gem and bundler caches.
-    RubyState,
-    /// .NET package and toolchain caches.
-    DotnetState,
-    /// Zig caches.
-    ZigState,
-    /// Terraform plugin cache.
-    IacState,
+/// Defines an enum with `ALL`, every variant in declaration order, for tests
+/// that cover each one.
+macro_rules! listed_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $type:ident { $($(#[$variant_meta:meta])* $variant:ident,)+ }
+    ) => {
+        $(#[$meta])*
+        $vis enum $type { $($(#[$variant_meta])* $variant,)+ }
+
+        impl $type {
+            /// Every value.
+            #[cfg(test)]
+            const ALL: &[Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+listed_enum! {
+    /// A named set of paths a policy applies.
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub(crate) enum PathGroup {
+        /// Private keys.
+        Keys,
+        /// Cloud provider credentials.
+        Cloud,
+        /// Cluster, registry, and host logins.
+        Logins,
+        /// Registry and forge tokens.
+        Tokens,
+        /// Shell history, which often holds a token typed on a command line.
+        History,
+        /// Keychains and password stores.
+        Secrets,
+        /// The task's working directory and the temporary directory.
+        Workspace,
+        /// Git files that run commands or point Git at other code.
+        Git,
+        /// Pipeline definitions that run on a later push.
+        Ci,
+        /// Editor and container configuration that runs commands on open.
+        Editor,
+        /// Files that change how a build tool runs.
+        Toolchain,
+        /// Harness configuration a run could use to execute code outside the
+        /// sandbox later.
+        Harness,
+        /// The artifacts of the run itself.
+        Artifacts,
+        /// Claude Code configuration and state.
+        ClaudeState,
+        /// Codex configuration and state.
+        CodexState,
+        /// Pi configuration and state.
+        PiState,
+        /// Oh My Pi configuration and state.
+        OmpState,
+        /// Node.js caches.
+        NodeState,
+        /// Python caches.
+        PythonState,
+        /// Rust toolchain and registry caches.
+        RustState,
+        /// Go module and build caches.
+        GoState,
+        /// Maven and Gradle caches.
+        JvmState,
+        /// Ruby gem and bundler caches.
+        RubyState,
+        /// .NET package and toolchain caches.
+        DotnetState,
+        /// Zig caches.
+        ZigState,
+        /// Terraform plugin cache.
+        IacState,
+    }
 }
 
 impl PathGroup {
-    /// Every group.
-    #[cfg(test)]
-    const ALL: &[Self] = &[
-        Self::Keys,
-        Self::Cloud,
-        Self::Logins,
-        Self::Tokens,
-        Self::History,
-        Self::Secrets,
-        Self::Workspace,
-        Self::Git,
-        Self::Ci,
-        Self::Editor,
-        Self::Toolchain,
-        Self::Harness,
-        Self::Artifacts,
-        Self::ClaudeState,
-        Self::CodexState,
-        Self::PiState,
-        Self::OmpState,
-        Self::NodeState,
-        Self::PythonState,
-        Self::RustState,
-        Self::GoState,
-        Self::JvmState,
-        Self::RubyState,
-        Self::DotnetState,
-        Self::ZigState,
-        Self::IacState,
-    ];
     /// Paths in the group, in `SandboxPath` syntax.
     pub(crate) fn paths(self) -> &'static [&'static str] {
         match self {

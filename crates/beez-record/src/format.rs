@@ -1,6 +1,5 @@
 //! The shape of one line of `run.log`, shared with Beez's terminal output.
 
-use std::io;
 use std::time::{Duration, SystemTime};
 
 use beez_process::OutputStream;
@@ -94,22 +93,6 @@ pub fn seconds(elapsed: Duration) -> String {
     format!("{:.1}s", elapsed.as_secs_f64())
 }
 
-/// How a task ended, in one word.
-#[must_use]
-pub fn status_text(exit_status: Option<i32>) -> String {
-    match exit_status {
-        Some(0) => "ok".to_owned(),
-        Some(code) => format!("exit {code}"),
-        None => "signalled".to_owned(),
-    }
-}
-
-/// What Beez reports when it cannot write the artifacts of a run.
-#[must_use]
-pub(crate) fn log_failure(error: &io::Error) -> String {
-    format!("run log: {error}")
-}
-
 /// The counts that close a run.
 pub(crate) fn counts(passed: usize, failed: usize, blocked: usize) -> String {
     let mut counts = vec![format!("{passed} passed")];
@@ -125,19 +108,12 @@ pub(crate) fn counts(passed: usize, failed: usize, blocked: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Labels, counts, status_text};
+    use super::{Labels, counts};
 
     #[test]
     fn names_only_the_counts_a_run_reached() {
         assert_eq!(counts(2, 0, 0), "2 passed");
         assert_eq!(counts(0, 1, 1), "0 passed, 1 failed, 1 blocked");
-    }
-
-    #[test]
-    fn names_how_a_task_ended() {
-        assert_eq!(status_text(Some(0)), "ok");
-        assert_eq!(status_text(Some(23)), "exit 23");
-        assert_eq!(status_text(None), "signalled");
     }
 
     #[test]

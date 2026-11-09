@@ -3,40 +3,43 @@ use std::fmt;
 
 use beez_schedule::{CronSchedule, Schedule, UtcOffset, parse_instant};
 use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
-use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-/// A manifest's `schedule` field: one entry, or a list of entries.
-pub(crate) enum ScheduleSetting {
-    One(Box<ScheduleFields>),
-    Many(Vec<ScheduleFields>),
+/// Reads a manifest's `schedule` field: one entry, a list of entries, or
+/// nothing.
+///
+/// It reads the shape the manifest wrote, so a mistake inside an entry
+/// reports the entry's own error rather than a generic mismatch.
+pub(crate) fn one_or_many<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ScheduleFields>, D::Error> {
+    deserializer.deserialize_any(OneOrManyVisitor)
 }
 
-impl<'de> Deserialize<'de> for ScheduleSetting {
-    /// Reads the shape the manifest wrote, so a mistake inside an entry
-    /// reports the entry's own error rather than a generic mismatch.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(ScheduleSettingVisitor)
-    }
-}
+struct OneOrManyVisitor;
 
-struct ScheduleSettingVisitor;
-
-impl<'de> Visitor<'de> for ScheduleSettingVisitor {
-    type Value = ScheduleSetting;
+impl<'de> Visitor<'de> for OneOrManyVisitor {
+    type Value = Vec<ScheduleFields>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a schedule table or a list of schedule tables")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-        ScheduleFields::deserialize(MapAccessDeserializer::new(map))
-            .map(|fields| ScheduleSetting::One(Box::new(fields)))
+        ScheduleFields::deserialize(MapAccessDeserializer::new(map)).map(|fields| vec![fields])
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
         Vec::<ScheduleFields>::deserialize(SeqAccessDeserializer::new(seq))
-            .map(ScheduleSetting::Many)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
     }
 }
 
@@ -127,23 +130,25 @@ impl TryFrom<ScheduleFields> for JobSchedule {
     type Error = String;
 
     fn try_from(fields: ScheduleFields) -> Result<Self, Self::Error> {
-        let offset = fields
-            .offset
-            .as_deref()
-            .map(str::parse::<UtcOffset>)
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let schedule = match (fields.cron, fields.at) {
             (Some(_), Some(_)) => {
                 return Err("schedule must define either cron or at, not both".into());
             }
             (None, None) => return Err("schedule must define either cron or at".into()),
-            (Some(cron), None) => Schedule::Cron(
-                CronSchedule::new(&cron, offset.unwrap_or_default())
-                    .map_err(|error| error.to_string())?,
-            ),
+            (Some(cron), None) => {
+                let offset = fields
+                    .offset
+                    .as_deref()
+                    .map(str::parse::<UtcOffset>)
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                Schedule::Cron(
+                    CronSchedule::new(&cron, offset.unwrap_or_default())
+                        .map_err(|error| error.to_string())?,
+                )
+            }
             (None, Some(at)) => {
-                if offset.is_some() {
+                if fields.offset.is_some() {
                     return Err("at already names its own offset, so offset must be absent".into());
                 }
                 Schedule::Once(parse_instant(&at).map_err(|error| error.to_string())?)
@@ -161,20 +166,9 @@ impl TryFrom<ScheduleFields> for JobSchedule {
     }
 }
 
-impl From<ScheduleSetting> for Vec<ScheduleFields> {
-    fn from(setting: ScheduleSetting) -> Self {
-        match setting {
-            ScheduleSetting::One(fields) => vec![*fields],
-            ScheduleSetting::Many(fields) => fields,
-        }
-    }
-}
-
 /// Reads every schedule of a manifest, in the order it wrote them.
-pub(crate) fn resolve(setting: Option<ScheduleSetting>) -> Result<Vec<JobSchedule>, String> {
-    let schedules = setting
-        .map(Vec::from)
-        .unwrap_or_default()
+pub(crate) fn resolve(fields: Vec<ScheduleFields>) -> Result<Vec<JobSchedule>, String> {
+    let schedules = fields
         .into_iter()
         .map(JobSchedule::try_from)
         .collect::<Result<Vec<_>, _>>()?;

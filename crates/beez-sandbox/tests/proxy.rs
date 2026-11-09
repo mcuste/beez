@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use beez_policy::DomainRule;
-use beez_sandbox::Proxy;
+use beez_sandbox::{NetworkRules, Proxy};
 use beez_test_support::{assert_never_reached, loopback_listener, unused_origin};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -40,7 +40,10 @@ fn proxy(texts: &[&str], localhost: bool) -> io::Result<Proxy> {
         .map(|text| text.parse::<DomainRule>())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-    Proxy::start(rules, localhost)
+    Proxy::start(NetworkRules {
+        domains: rules,
+        localhost,
+    })
 }
 
 fn connect(port: u16) -> io::Result<TcpStream> {

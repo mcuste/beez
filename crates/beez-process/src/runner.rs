@@ -1,12 +1,47 @@
+use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::thread::ScopedJoinHandle;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError, mpsc};
+use std::thread::{self, Scope, ScopedJoinHandle};
 
 use beez_policy::SandboxPolicy;
-use beez_sandbox::SandboxedCommand;
+use beez_sandbox::{SandboxError, SandboxedCommand};
 
 use crate::execution::ExecutionRequest;
+
+/// Reports why a request could not run to the end.
+#[derive(Debug, thiserror::Error)]
+pub enum ProcessError {
+    /// The sandbox around the program could not be prepared.
+    #[error("cannot prepare the sandbox")]
+    Sandbox(#[from] SandboxError),
+    /// The program could not be started.
+    #[error("cannot start {}", .program.display())]
+    Spawn {
+        /// The program Beez tried to start.
+        program: OsString,
+        /// Why it could not start.
+        #[source]
+        source: io::Error,
+    },
+    /// Reading the program's output or waiting for it failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+impl ProcessError {
+    /// The category of the underlying I/O error, or `Other` when there is none.
+    #[must_use]
+    pub fn kind(&self) -> io::ErrorKind {
+        match self {
+            Self::Sandbox(SandboxError::Io(error))
+            | Self::Spawn { source: error, .. }
+            | Self::Io(error) => error.kind(),
+            Self::Sandbox(_) => io::ErrorKind::Other,
+        }
+    }
+}
 
 /// One of a child process's output streams.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +80,15 @@ impl ProcessOutput {
         &self.stderr
     }
 
+    /// One captured stream.
+    #[must_use]
+    pub fn stream(&self, stream: OutputStream) -> &[u8] {
+        match stream {
+            OutputStream::Stdout => &self.stdout,
+            OutputStream::Stderr => &self.stderr,
+        }
+    }
+
     /// Returns `None` after signal termination.
     #[must_use]
     pub fn status_code(&self) -> Option<i32> {
@@ -55,6 +99,83 @@ impl ProcessOutput {
     #[must_use]
     pub fn succeeded(&self) -> bool {
         self.status_code == Some(0)
+    }
+}
+
+/// Stops every process started with it once it is cancelled.
+///
+/// A process that starts after the cancellation is stopped at once.
+///
+/// Only the direct child is killed. Processes it started itself, such as the
+/// commands a shell script runs, keep running unless they exit when their
+/// parent does.
+#[derive(Debug, Default)]
+pub struct Cancellation {
+    state: Mutex<CancelState>,
+}
+
+#[derive(Debug, Default)]
+struct CancelState {
+    cancelled: bool,
+    /// The relays of running processes, which each stop their child.
+    relays: Vec<mpsc::Sender<Signal>>,
+}
+
+impl Cancellation {
+    /// A cancellation that has not been cancelled yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Kills every running process started with this cancellation, and
+    /// every process started with it from now on.
+    pub fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.cancelled = true;
+        tracing::debug!(running = state.relays.len(), "cancelling processes");
+        for relay in state.relays.drain(..) {
+            let _ = relay.send(Signal::Cancel);
+        }
+    }
+
+    /// True once [`Self::cancel`] has run.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cancelled
+    }
+
+    /// Lets `cancel` reach one relay; false when the cancellation came first.
+    fn register(&self, relay: mpsc::Sender<Signal>) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.cancelled {
+            return false;
+        }
+        state.relays.push(relay);
+        true
+    }
+}
+
+/// What a relay waits for while its child runs.
+#[derive(Debug)]
+enum Signal {
+    /// A reader thread ended, by a panic when `panicked` is set.
+    ReaderDone { panicked: bool },
+    /// The cancellation asks for the child to stop.
+    Cancel,
+}
+
+/// Tells the relay that a reader thread ended, even when it panicked.
+struct ReaderDone(mpsc::Sender<Signal>);
+
+impl Drop for ReaderDone {
+    fn drop(&mut self) {
+        let _ = self.0.send(Signal::ReaderDone {
+            panicked: thread::panicking(),
+        });
     }
 }
 
@@ -82,7 +203,7 @@ impl ProcessRunner {
     }
 
     /// Starts a request and captures its output.
-    pub fn run(&self, request: ExecutionRequest) -> io::Result<ProcessOutput> {
+    pub fn run(&self, request: ExecutionRequest) -> Result<ProcessOutput, ProcessError> {
         self.run_streaming(request, None, &|_, _| {})
     }
 
@@ -94,10 +215,33 @@ impl ProcessRunner {
         request: ExecutionRequest,
         sandbox: Option<&SandboxPolicy>,
         sink: &OutputSink<'_>,
-    ) -> io::Result<ProcessOutput> {
-        let harness = request.harness();
-        let (program, arguments) = request.into_process_call().into_parts();
+    ) -> Result<ProcessOutput, ProcessError> {
+        self.run_cancellable(request, sandbox, sink, &Cancellation::new())
+    }
 
+    /// Runs a request like [`Self::run_streaming`], and kills it when `cancel`
+    /// is cancelled.
+    ///
+    /// The returned output then holds what the request wrote before it died.
+    pub fn run_cancellable(
+        &self,
+        request: ExecutionRequest,
+        sandbox: Option<&SandboxPolicy>,
+        sink: &OutputSink<'_>,
+        cancel: &Cancellation,
+    ) -> Result<ProcessOutput, ProcessError> {
+        let (harness, call) = request.into_parts();
+        let (program, arguments) = call.into_parts();
+
+        // Arguments can hold a prompt, so only their count is traced.
+        tracing::debug!(
+            program = %program.display(),
+            arguments = arguments.len(),
+            harness = ?harness,
+            cwd = %self.working_directory.display(),
+            sandboxed = sandbox.is_some(),
+            "preparing process"
+        );
         if let Some(policy) = sandbox {
             // The sandbox must outlive the child, because it owns the proxy.
             let mut sandboxed = SandboxedCommand::new(
@@ -107,31 +251,64 @@ impl ProcessRunner {
                 &arguments,
                 &self.working_directory,
             )?;
-            relay(sandboxed.command_mut(), sink)
+            relay(sandboxed.command_mut(), sink, cancel)
         } else {
             let mut command = Command::new(program);
             command.args(arguments).current_dir(&self.working_directory);
-            relay(&mut command, sink)
+            relay(&mut command, sink, cancel)
         }
     }
 }
 
 /// Runs `command` with piped output, forwarding and collecting every line.
-fn relay(command: &mut Command, sink: &OutputSink<'_>) -> io::Result<ProcessOutput> {
+///
+/// The child dies early when `cancel` is cancelled or a reader thread
+/// panics, and it is always waited for, so no child outlives the call.
+fn relay(
+    command: &mut Command,
+    sink: &OutputSink<'_>,
+    cancel: &Cancellation,
+) -> Result<ProcessOutput, ProcessError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|source| {
+        tracing::debug!(program = ?command.get_program(), error = %source, "spawn failed");
+        ProcessError::Spawn {
+            program: command.get_program().to_owned(),
+            source,
+        }
+    })?;
+    tracing::debug!(pid = child.id(), program = ?command.get_program(), "spawned process");
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let (signals, received) = mpsc::channel();
+    if !cancel.register(signals.clone()) {
+        tracing::debug!(pid = child.id(), "cancelled before it started, killing");
+        kill(&mut child);
+    }
 
-    let (stdout, stderr) = std::thread::scope(|scope| {
+    let (stdout, stderr) = thread::scope(|scope| {
         let stdout =
-            stdout.map(|stdout| scope.spawn(move || forward(stdout, OutputStream::Stdout, sink)));
+            stdout.map(|stdout| spawn_reader(scope, stdout, OutputStream::Stdout, sink, &signals));
         let stderr =
-            stderr.map(|stderr| scope.spawn(move || forward(stderr, OutputStream::Stderr, sink)));
-        (collected(stdout), collected(stderr))
+            stderr.map(|stderr| spawn_reader(scope, stderr, OutputStream::Stderr, sink, &signals));
+        let readers = usize::from(stdout.is_some()) + usize::from(stderr.is_some());
+        supervise(&mut child, &received, readers);
+        (
+            stdout.map(ScopedJoinHandle::join),
+            stderr.map(ScopedJoinHandle::join),
+        )
     });
 
-    let status = child.wait()?;
+    let status = child.wait();
+    let stdout = collected(stdout);
+    let stderr = collected(stderr);
+    let status = status?;
+    tracing::debug!(pid = child.id(), %status, "process exited");
+    for (stream, collected) in [("stdout", &stdout), ("stderr", &stderr)] {
+        if let Err(error) = collected {
+            tracing::warn!(pid = child.id(), stream, %error, "reading the output failed");
+        }
+    }
 
     Ok(ProcessOutput {
         stdout: stdout?,
@@ -140,13 +317,54 @@ fn relay(command: &mut Command, sink: &OutputSink<'_>) -> io::Result<ProcessOutp
     })
 }
 
-/// Waits for a reader thread and returns what it read; a stream that was
-/// never taken read nothing.
-fn collected(reader: Option<ScopedJoinHandle<'_, io::Result<Vec<u8>>>>) -> io::Result<Vec<u8>> {
+/// Starts a thread that forwards one stream and reports when it ends.
+fn spawn_reader<'scope>(
+    scope: &'scope Scope<'scope, '_>,
+    reader: impl Read + Send + 'scope,
+    stream: OutputStream,
+    sink: &'scope OutputSink<'_>,
+    signals: &mpsc::Sender<Signal>,
+) -> ScopedJoinHandle<'scope, io::Result<Vec<u8>>> {
+    let done = ReaderDone(signals.clone());
+    scope.spawn(move || {
+        let _done = done;
+        forward(reader, stream, sink)
+    })
+}
+
+/// Waits until every reader has ended, killing the child on a cancellation
+/// or when a reader panics, so the other reader sees its stream end.
+fn supervise(child: &mut Child, received: &mpsc::Receiver<Signal>, mut readers: usize) {
+    while readers > 0 {
+        match received.recv() {
+            Ok(Signal::ReaderDone { panicked }) => {
+                readers -= 1;
+                if panicked {
+                    tracing::error!(pid = child.id(), "an output reader panicked, killing");
+                    kill(child);
+                }
+            }
+            Ok(Signal::Cancel) => {
+                tracing::debug!(pid = child.id(), "cancelled, killing");
+                kill(child);
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Kills `child`. A child that already exited cannot be killed, which is fine.
+fn kill(child: &mut Child) {
+    if let Err(error) = child.kill() {
+        tracing::debug!(pid = child.id(), %error, "kill failed");
+    }
+}
+
+/// What a reader thread read, resuming its panic; a stream that was never
+/// taken read nothing.
+fn collected(reader: Option<thread::Result<io::Result<Vec<u8>>>>) -> io::Result<Vec<u8>> {
     match reader {
-        Some(reader) => reader
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        Some(reader) => reader.unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
         None => Ok(Vec::new()),
     }
 }
@@ -164,6 +382,7 @@ fn forward(reader: impl Read, stream: OutputStream, sink: &OutputSink<'_>) -> io
             return Ok(collected);
         }
         collected.extend_from_slice(&line);
+        tracing::trace!(?stream, bytes = line.len(), "output line");
         sink(stream, &line);
     }
 }

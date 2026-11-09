@@ -14,7 +14,7 @@ mod sandbox;
 mod selection;
 
 pub use domain::{DomainRule, DomainRuleError};
-pub use executable::ExecutablePolicy;
+pub use executable::{ExecutablePolicy, ExecutableRule};
 pub use filesystem::FilesystemPolicy;
 pub(crate) use group::PathGroup;
 pub use group::{DomainGroup, ExecutableGroup, GroupError};

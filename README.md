@@ -97,6 +97,18 @@ beez schedule add review.yaml
 beez daemon start
 ```
 
+## Troubleshooting
+
+`BEEZ_TRACE` turns on diagnostic tracing of Beez itself on standard error.
+It takes a [filter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+such as `debug` or `beez_sandbox=debug`, and is off when unset:
+
+```sh
+BEEZ_TRACE=debug beez run command -- curl -sI https://example.com
+```
+
+See [Output and logs](docs/output.md#diagnostic-tracing) for what it shows.
+
 ## Documentation
 
 - [Workflows](docs/workflows.md): the YAML file, harnesses, and task outputs

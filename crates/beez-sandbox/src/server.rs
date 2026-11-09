@@ -28,10 +28,13 @@ where
     L::Stream: Stream,
     S: Stream,
 {
-    Server::spawn(listener, move |client| {
-        if let Ok(upstream) = connect() {
-            let _ = pipe(client, upstream);
+    Server::spawn(listener, move |client| match connect() {
+        Ok(upstream) => {
+            if let Err(error) = pipe(client, upstream) {
+                tracing::debug!(%error, "bridged connection ended in an error");
+            }
         }
+        Err(error) => tracing::debug!(%error, "cannot open the bridged connection"),
     })
 }
 
@@ -149,6 +152,7 @@ impl Server {
                     }
                     // Retrying a permanent error would spin this thread.
                     Err(error) => {
+                        tracing::warn!(%error, "accept failed, the server stops");
                         crate::diagnostic::report(&format!(
                             "stopped accepting connections: {error}"
                         ));
@@ -159,6 +163,7 @@ impl Server {
                     break;
                 }
                 let Some(slot) = ConnectionSlot::claim(&live) else {
+                    tracing::debug!(limit = MAX_CONNECTIONS, "connection refused at the limit");
                     if !reported_limit.swap(true, Ordering::SeqCst) {
                         crate::diagnostic::report(&format!(
                             "refused a connection, {MAX_CONNECTIONS} are already open"

@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use beez_manifest::load;
-use beez_record::{LogSettings, OpenLog, RunRecorder, RunTally, RunTarget};
+use beez_record::{LogFailure, LogSettings, OpenLog, RunTarget};
 use beez_runner::Runner;
-use beez_schedule::format_instant;
+use beez_schedule::Utc;
 
 use crate::control::JobId;
+use crate::error::one_line;
 use crate::report;
 
 /// What one job needs to run.
@@ -44,7 +45,10 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
     let started = Instant::now();
     let manifest = match load(&job.manifest) {
         Ok(manifest) => manifest,
-        Err(error) => return failure(&error.to_string()),
+        Err(error) => {
+            tracing::warn!(manifest = %job.manifest.display(), %error, "cannot load the manifest of a run");
+            return failure(&one_line(&error));
+        }
     };
     let workflow = manifest.into_workflow();
     let target = RunTarget::Workflow {
@@ -55,9 +59,7 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
     // holds them all, even when a job runs in another repository.
     let settings = LogSettings::At(&job.log_directory);
     let (mut log, failure) = OpenLog::open(settings, &target, &job.working_directory);
-    if let Some(failure) = failure {
-        warn(&job.id, &failure);
-    }
+    warn(&job.id, failure);
     let directory = log
         .directory()
         .and_then(Path::file_name)
@@ -66,51 +68,31 @@ pub(crate) fn execute(job: &JobRun) -> RunOutcome {
         report::line("Logging", &format!("{}: runs/{directory}", job.id));
     }
     // The run log says which fire started the run, so a run explains itself.
-    record(
-        &mut log,
-        |recorder| {
-            recorder.status(
-                "Trigger",
-                &format!("{} scheduled for {}", job.id, format_instant(job.fire)),
-            )
-        },
+    let trigger = format!("{} scheduled for {}", job.id, Utc(job.fire));
+    warn(
         &job.id,
+        log.write(|recorder| recorder.status("Trigger", &trigger)),
     );
 
-    let mut tally = RunTally::default();
     let outcome = Runner::new(&job.working_directory).run_workflow(&workflow, &mut |event| {
-        tally.record(event);
-        record(&mut log, |recorder| recorder.event(event), &job.id);
+        warn(&job.id, log.event(event));
         Ok(())
     });
-    let summary = tally.summary(started.elapsed());
-    let status = outcome.as_ref().ok().copied();
-    record(
-        &mut log,
-        |recorder| recorder.finish(&summary, status),
-        &job.id,
-    );
+    let (summary, failure) = log.finish(started.elapsed(), outcome.as_ref().ok().copied());
+    warn(&job.id, failure);
 
     RunOutcome {
         directory,
-        result: outcome.map_err(|error| error.to_string()),
+        result: outcome.map_err(|error| one_line(&error)),
         summary,
     }
 }
 
-/// Writes to the run log, and names the job of a log that could not be written.
-fn record(
-    log: &mut OpenLog,
-    action: impl FnOnce(&mut RunRecorder) -> std::io::Result<()>,
-    job: &JobId,
-) {
-    if let Some(failure) = log.write(action) {
-        warn(job, &failure);
+/// Shows a run log failure, named after its job.
+fn warn(job: &JobId, failure: Option<LogFailure>) {
+    if let Some(failure) = failure {
+        report::line("Warning", &format!("{job}: {failure}"));
     }
-}
-
-fn warn(job: &JobId, failure: &str) {
-    report::line("Warning", &format!("{job}: {failure}"));
 }
 
 fn failure(error: &str) -> RunOutcome {

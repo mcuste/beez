@@ -3,18 +3,16 @@
 //! A manifest holds its own schedules, so the daemon reads them again on every
 //! rescan. An edited manifest changes the job it describes without a command.
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use beez_manifest::{JobSchedule, Manifest, load};
-use beez_schedule::format_instant;
+use beez_manifest::{JobSchedule, Overlap, load};
+use beez_schedule::Utc;
 
 use crate::control::{Condition, JobId, JobReport};
-use crate::message::Refusal;
-use crate::paths::DaemonPaths;
+use crate::error::one_line;
 use crate::run::RunOutcome;
-use crate::store::{self, JobState, Registry, States, Watched};
+use crate::store::{JobState, States, Watched};
 
 /// One job: one schedule of one manifest.
 #[derive(Debug)]
@@ -27,8 +25,9 @@ pub(crate) struct Job {
     /// How many runs of the job are going. A job with `on_overlap: parallel`
     /// can have more than one.
     running: usize,
-    /// A fire that waits for the running run to end.
-    pub(crate) queued: bool,
+    /// The time a fire was due that waits for room to run. The run names
+    /// it, whatever fires the schedule passed while it waited.
+    pub(crate) queued: Option<SystemTime>,
     pub(crate) state: JobState,
 }
 
@@ -74,7 +73,7 @@ impl Job {
             definition,
             next_fire: None,
             running: 0,
-            queued: false,
+            queued: None,
         }
     }
 
@@ -104,10 +103,23 @@ impl Job {
         self.running > 0
     }
 
+    /// What the job does with a fire that comes while it runs. A job whose
+    /// manifest does not load skips it.
+    pub(crate) fn on_overlap(&self) -> Overlap {
+        self.schedule()
+            .map_or(Overlap::Skip, JobSchedule::on_overlap)
+    }
+
+    /// True when a fire of the job may start now, while the daemon has room:
+    /// the job does not run, or it runs its fires side by side.
+    pub(crate) fn may_start(&self) -> bool {
+        !self.is_running() || self.on_overlap() == Overlap::Parallel
+    }
+
     /// Notes that one run of the job started, which takes the waiting fire.
     pub(crate) fn run_started(&mut self) {
         self.running += 1;
-        self.queued = false;
+        self.queued = None;
     }
 
     /// Notes that one run of the job ended, and what it left.
@@ -144,7 +156,7 @@ impl Job {
             Condition::Disabled
         } else if self.next_fire.is_none() {
             Condition::Done
-        } else if self.queued {
+        } else if self.queued.is_some() {
             Condition::Queued
         } else {
             Condition::Waiting
@@ -153,14 +165,14 @@ impl Job {
 
     pub(crate) fn report(&self) -> JobReport {
         JobReport {
-            id: self.id.to_string(),
+            id: self.id.clone(),
             manifest: self.manifest.display().to_string(),
             schedule: self
                 .schedule()
                 .map(|schedule| schedule.schedule().to_string()),
             condition: self.condition(),
-            next_fire: self.next_fire.map(format_instant),
-            last_fire: self.state.last_fire.map(format_instant),
+            next_fire: self.next_fire.map(|time| Utc(time).to_string()),
+            last_fire: self.state.last_fire.map(|time| Utc(time).to_string()),
             last_run: self.state.last_run.clone(),
             last_status: self.state.last_status,
             error: self.error().map(str::to_owned),
@@ -210,44 +222,13 @@ pub(crate) struct WatchedManifest {
     pub(crate) modified: Option<SystemTime>,
 }
 
-/// Reads every manifest of the registry and builds its jobs.
-///
-/// A manifest that does not load keeps its jobs out of the set and reports the
-/// reason against every job it used to hold.
-pub(crate) fn build(registry: &Registry, states: &States) -> (Vec<WatchedManifest>, Vec<Job>) {
-    let mut manifests = Vec::new();
-    let mut jobs = Vec::new();
-    for watched in registry.manifests() {
-        let modified = modified_at(&watched.path);
-        jobs.extend(jobs_of(watched, states));
-        manifests.push(WatchedManifest {
-            watched: watched.clone(),
-            modified,
-        });
-    }
-
-    (manifests, jobs)
-}
-
-/// Reports every job of a Beez root without a running daemon.
-pub(crate) fn reports(paths: &DaemonPaths) -> io::Result<Vec<JobReport>> {
-    let (registry, states) = store::load_all(paths)?;
-    let (_, mut jobs) = build(&registry, &states);
-    let now = SystemTime::now();
-    for job in &mut jobs {
-        job.plan(now, CatchUp::Refuse);
-    }
-
-    Ok(jobs.iter().map(Job::report).collect())
-}
-
 /// Builds the jobs of one manifest.
 pub(crate) fn jobs_of(watched: &Watched, states: &States) -> Vec<Job> {
     let stem = stem(&watched.path);
     let manifest = match load(&watched.path) {
         Ok(manifest) => manifest,
         Err(error) => {
-            return vec![unloadable(&stem, watched, states, error.to_string())];
+            return vec![unloadable(&stem, watched, states, one_line(&error))];
         }
     };
     if manifest.schedules().is_empty() {
@@ -258,7 +239,7 @@ pub(crate) fn jobs_of(watched: &Watched, states: &States) -> Vec<Job> {
             "manifest has no schedule section".to_owned(),
         )];
     }
-    let sandboxed = every_task_sandboxed(&manifest);
+    let sandboxed = manifest.workflow().all_tasks_sandboxed();
 
     manifest
         .schedules()
@@ -278,44 +259,6 @@ pub(crate) fn jobs_of(watched: &Watched, states: &States) -> Vec<Job> {
         .collect()
 }
 
-/// The job IDs a manifest holds, without keeping the jobs.
-pub(crate) fn ids_of(watched: &Watched, states: &States) -> Vec<JobId> {
-    ids(&jobs_of(watched, states))
-}
-
-/// The IDs of `jobs`, in order.
-pub(crate) fn ids(jobs: &[Job]) -> Vec<JobId> {
-    jobs.iter().map(|job| job.id.clone()).collect()
-}
-
-/// Checks the jobs of a manifest a command wants to watch, and names their IDs.
-///
-/// `others` holds the job IDs of every other watched manifest. An ID one of
-/// them already uses is refused.
-pub(crate) fn admit(
-    jobs: &[Job],
-    others: impl IntoIterator<Item = JobId>,
-) -> Result<Vec<JobId>, Refusal> {
-    if let Some(error) = manifest_error(jobs) {
-        return Err(Refusal::Broken(error.to_owned()));
-    }
-    let ids = ids(jobs);
-    if let Some(taken) = others.into_iter().find(|id| ids.contains(id)) {
-        return Err(Refusal::Taken(taken));
-    }
-
-    Ok(ids)
-}
-
-/// Why a manifest cannot become a job at all: it does not load, or it names
-/// no schedule. A job that loads but cannot run keeps its own error instead.
-fn manifest_error(jobs: &[Job]) -> Option<&str> {
-    jobs.iter().find_map(|job| match &job.definition {
-        Definition::Unloadable(error) => Some(error.as_str()),
-        Definition::Schedule { .. } => None,
-    })
-}
-
 /// The name a manifest gives its jobs.
 pub(crate) fn stem(manifest: &Path) -> String {
     manifest.file_stem().map_or_else(
@@ -329,14 +272,6 @@ pub(crate) fn modified_at(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
-}
-
-fn every_task_sandboxed(manifest: &Manifest) -> bool {
-    manifest
-        .workflow()
-        .tasks()
-        .iter()
-        .all(|task| task.sandbox().is_some())
 }
 
 /// A job that names its manifest's problem instead of running.
@@ -392,9 +327,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::testing::{at, job, jobs};
-    use super::{CatchUp, Plan, admit};
-    use crate::control::{Condition, JobId};
-    use crate::message::Refusal;
+    use super::{CatchUp, Plan};
+    use crate::control::Condition;
     use crate::run::RunOutcome;
 
     const NIGHTLY: &str = "  cron: \"0 3 * * *\"\n  allow_unsandboxed: true\n";
@@ -516,11 +450,11 @@ mod tests {
     fn reports_a_queued_and_a_running_job() {
         let mut job = job(NIGHTLY);
         job.plan(at("2026-09-10T12:00:00Z"), CatchUp::Refuse);
-        job.queued = true;
+        job.queued = Some(at("2026-09-11T03:00:00Z"));
 
         assert_eq!(job.report().condition, Condition::Queued);
         job.run_started();
-        assert!(!job.queued);
+        assert!(job.queued.is_none());
         assert_eq!(job.report().condition, Condition::Running);
         job.run_ended(&outcome(3));
         assert_eq!(job.report().condition, Condition::Waiting);
@@ -551,21 +485,5 @@ mod tests {
         let ids: Vec<String> = jobs.iter().map(|job| job.id.to_string()).collect();
 
         assert_eq!(ids, ["nightly:docs", "nightly:tests"]);
-    }
-
-    #[test]
-    fn refuses_a_manifest_that_does_not_load_or_an_id_another_uses() {
-        let broken = jobs("  cron: \"not a cron\"\n");
-        let nightly = jobs(NIGHTLY);
-
-        assert!(matches!(admit(&broken, []), Err(Refusal::Broken(_))));
-        assert_eq!(
-            admit(&nightly, [JobId::new("nightly", None)]),
-            Err(Refusal::Taken(JobId::new("nightly", None)))
-        );
-        assert_eq!(
-            admit(&nightly, [JobId::new("weekly", None)]),
-            Ok(vec![JobId::new("nightly", None)])
-        );
     }
 }

@@ -72,7 +72,7 @@ impl NetworkPolicy {
     /// Required harness groups always apply. Default groups apply unless
     /// disabled. Explicit groups and rules always apply.
     #[must_use]
-    pub fn allowed_domains(&self, profile: Option<&HarnessProfile>) -> Vec<DomainRule> {
+    pub fn allowed_domains(&self, profile: Option<HarnessProfile>) -> Vec<DomainRule> {
         let defaults = profile.map_or(&[][..], HarnessProfile::default_domain_groups);
         let mut groups = self.groups.selected(defaults);
         // A harness reaches no provider at all without its required groups.
@@ -102,7 +102,7 @@ mod tests {
         let sut = NetworkPolicy::default();
         let profile = HarnessProfile::for_harness(HeadlessHarness::Claude);
 
-        let domains = sut.allowed_domains(Some(&profile));
+        let domains = sut.allowed_domains(Some(profile));
 
         assert!(domains.contains(&rule("api.anthropic.com")));
         assert!(domains.contains(&rule("platform.claude.com")));
@@ -117,7 +117,7 @@ mod tests {
             .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Pi);
 
-        let domains = sut.allowed_domains(Some(&profile));
+        let domains = sut.allowed_domains(Some(profile));
 
         assert!(domains.contains(&rule("generativelanguage.googleapis.com")));
         assert!(domains.contains(&rule("openrouter.ai")));
@@ -133,7 +133,7 @@ mod tests {
             .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Claude);
 
-        let domains = sut.allowed_domains(Some(&profile));
+        let domains = sut.allowed_domains(Some(profile));
 
         assert!(domains.contains(&rule("api.anthropic.com")));
     }
@@ -145,8 +145,8 @@ mod tests {
             .with_localhost(Some(false));
 
         let claude =
-            sut.allowed_domains(Some(&HarnessProfile::for_harness(HeadlessHarness::Claude)));
-        let pi = sut.allowed_domains(Some(&HarnessProfile::for_harness(HeadlessHarness::Pi)));
+            sut.allowed_domains(Some(HarnessProfile::for_harness(HeadlessHarness::Claude)));
+        let pi = sut.allowed_domains(Some(HarnessProfile::for_harness(HeadlessHarness::Pi)));
 
         assert!(claude.contains(&rule("api.anthropic.com")));
         assert_eq!(pi, Vec::<DomainRule>::new());
@@ -161,7 +161,7 @@ mod tests {
             .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Pi);
 
-        let domains = sut.allowed_domains(Some(&profile));
+        let domains = sut.allowed_domains(Some(profile));
 
         assert!(domains.contains(&rule("api.anthropic.com")));
     }
@@ -175,7 +175,7 @@ mod tests {
             .with_localhost(Some(false));
         let profile = HarnessProfile::for_harness(HeadlessHarness::Codex);
 
-        let domains = sut.allowed_domains(Some(&profile));
+        let domains = sut.allowed_domains(Some(profile));
 
         assert!(domains.contains(&rule("api.openai.com")));
         assert!(domains.contains(&rule("github.com")));
@@ -218,10 +218,7 @@ mod tests {
 
         let profile = HarnessProfile::for_harness(HeadlessHarness::Pi);
         assert!(!sut.localhost());
-        assert_eq!(
-            sut.allowed_domains(Some(&profile)),
-            Vec::<DomainRule>::new()
-        );
+        assert_eq!(sut.allowed_domains(Some(profile)), Vec::<DomainRule>::new());
     }
 
     #[test]

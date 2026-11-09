@@ -7,34 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beez_core::{TaskDefinition, TaskIndex, TaskRequest, Workflow};
 use beez_process::{ExecutionRequest, OutputStream, ProcessCall};
-use beez_runner::{RunEvent, Runner};
+use beez_runner::{RunError, RunEvent, Runner};
 use beez_test_support::{TemporaryDirectory, text};
-
-macro_rules! assert_ok {
-    ($result:expr) => {{
-        let result = $result;
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-        let Ok(value) = result else {
-            return;
-        };
-        value
-    }};
-}
-
-macro_rules! assert_err {
-    ($result:expr) => {{
-        let result = $result;
-        assert!(result.is_err(), "expected Err, got {result:?}");
-        let Err(error) = result else {
-            return;
-        };
-        error
-    }};
-}
 
 #[derive(Debug, Eq, PartialEq)]
 enum RecordedEvent {
@@ -63,36 +41,33 @@ enum RecordedEvent {
 
 #[test]
 fn runs_ready_tasks_and_releases_dependents() {
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "prepare",
-            &[],
-            "bash",
-            arguments(&["-c", "printf prepare"]),
-        )),
-        assert_ok!(command_task(
+    let workflow = Workflow::try_from(vec![
+        command_task("prepare", &[], "bash", arguments(&["-c", "printf prepare"])).unwrap(),
+        command_task(
             "independent",
             &[],
             "bash",
             arguments(&["-c", "printf independent"]),
-        )),
-        assert_ok!(command_task(
+        )
+        .unwrap(),
+        command_task(
             "verify",
             &["prepare"],
             "bash",
             arguments(&["-c", "printf verify"]),
-        )),
-    ]));
+        )
+        .unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(status, 0);
     assert_eq!(count_started(&events, 0), 1);
@@ -111,21 +86,22 @@ fn runs_ready_tasks_and_releases_dependents() {
         } if stdout == b"verify" && stderr.is_empty()
     )));
 
-    let prepare_finished = assert_ok!(event_position(&events, |event| is_finished(event, 0)));
-    let verify_started = assert_ok!(event_position(&events, |event| is_started(event, 2)));
+    let prepare_finished = event_position(&events, |event| is_finished(event, 0)).unwrap();
+    let verify_started = event_position(&events, |event| is_started(event, 2)).unwrap();
     assert!(prepare_finished < verify_started);
 }
 
 #[test]
 fn fills_output_placeholders_from_finished_dependencies() {
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
+    let workflow = Workflow::try_from(vec![
+        command_task(
             "inspect",
             &[],
             "bash",
             arguments(&["-c", "printf 'first\\nsecond\\n'; printf 'warn\\r\\n' >&2"]),
-        )),
-        assert_ok!(command_task(
+        )
+        .unwrap(),
+        command_task(
             "review",
             &["inspect"],
             "printf",
@@ -135,18 +111,19 @@ fn fills_output_placeholders_from_finished_dependencies() {
                 "{{tasks.inspect.stderr}}",
                 "{{ literal }}",
             ]),
-        )),
-    ]));
+        )
+        .unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(status, 0);
     assert!(
@@ -165,27 +142,22 @@ fn fills_output_placeholders_from_finished_dependencies() {
 
 #[test]
 fn blocks_dependents_after_a_failed_task() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-failed-dependency"));
+    let directory = TemporaryDirectory::new("runner-failed-dependency").unwrap();
     let marker = directory.path().join("blocked-task-ran");
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "prepare",
-            &[],
-            "bash",
-            arguments(&["-c", "exit 23"]),
-        )),
-        assert_ok!(marker_task("verify", &["prepare"], &marker)),
-    ]));
+    let workflow = Workflow::try_from(vec![
+        command_task("prepare", &[], "bash", arguments(&["-c", "exit 23"])).unwrap(),
+        marker_task("verify", &["prepare"], &marker).unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(status, 23);
     assert!(!marker.exists());
@@ -197,27 +169,28 @@ fn blocks_dependents_after_a_failed_task() {
 
 #[test]
 fn treats_a_signalled_task_as_a_failure_and_blocks_dependents() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-signalled-task"));
+    let directory = TemporaryDirectory::new("runner-signalled-task").unwrap();
     let marker = directory.path().join("blocked-task-ran");
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
+    let workflow = Workflow::try_from(vec![
+        command_task(
             "signalled",
             &[],
             "bash",
             arguments(&["-c", "kill -TERM $$"]),
-        )),
-        assert_ok!(marker_task("verify", &["signalled"], &marker)),
-    ]));
+        )
+        .unwrap(),
+        marker_task("verify", &["signalled"], &marker).unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     // A signalled task has no exit code, so the workflow reports 1.
     assert_eq!(status, 1);
@@ -235,32 +208,28 @@ fn treats_a_signalled_task_as_a_failure_and_blocks_dependents() {
 
 #[test]
 fn reports_siblings_that_completed_when_a_task_cannot_start() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-missing-program"));
+    let directory = TemporaryDirectory::new("runner-missing-program").unwrap();
     let missing_program = directory.path().join("missing-program");
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "missing",
-            &[],
-            &text(&missing_program),
-            Vec::new(),
-        )),
-        assert_ok!(command_task(
+    let workflow = Workflow::try_from(vec![
+        command_task("missing", &[], &text(&missing_program), Vec::new()).unwrap(),
+        command_task(
             "succeeds",
             &[],
             "bash",
             arguments(&["-c", "printf sibling"]),
-        )),
-    ]));
+        )
+        .unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let error = assert_err!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let error = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(events.iter().any(|event| matches!(
@@ -283,29 +252,24 @@ fn reports_siblings_that_completed_when_a_task_cannot_start() {
 
 #[test]
 fn reports_dependents_of_a_task_that_cannot_start_as_blocked() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-missing-program-dependents"));
+    let directory = TemporaryDirectory::new("runner-missing-program-dependents").unwrap();
     let missing_program = directory.path().join("missing-program");
     let marker = directory.path().join("blocked-task-ran");
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "missing",
-            &[],
-            &text(&missing_program),
-            Vec::new(),
-        )),
-        assert_ok!(marker_task("verify", &["missing"], &marker)),
-        assert_ok!(marker_task("publish", &["verify"], &marker)),
-    ]));
+    let workflow = Workflow::try_from(vec![
+        command_task("missing", &[], &text(&missing_program), Vec::new()).unwrap(),
+        marker_task("verify", &["missing"], &marker).unwrap(),
+        marker_task("publish", &["verify"], &marker).unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let error = assert_err!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let error = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(!marker.exists());
@@ -325,17 +289,20 @@ fn reports_dependents_of_a_task_that_cannot_start_as_blocked() {
 
 #[test]
 fn reports_direct_start_failures_as_terminal_events() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-direct-missing-program"));
+    let directory = TemporaryDirectory::new("runner-direct-missing-program").unwrap();
     let mut events = Vec::new();
 
-    let error = assert_err!(Runner::here().unwrap().run_request_in(
-        ExecutionRequest::Command(ProcessCall::new(directory.path().join("missing-program"))),
-        None,
-        &mut |event| {
-            record_event(&mut events, event);
-            Ok(())
-        },
-    ));
+    let error = Runner::here()
+        .unwrap()
+        .run_request_in(
+            ExecutionRequest::Command(ProcessCall::new(directory.path().join("missing-program"))),
+            None,
+            &mut |event| {
+                record_event(&mut events, event);
+                Ok(())
+            },
+        )
+        .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(matches!(
@@ -352,7 +319,7 @@ fn reports_direct_start_failures_as_terminal_events() {
 
 #[test]
 fn stops_before_starting_a_request_when_the_callback_fails() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-callback-failure"));
+    let directory = TemporaryDirectory::new("runner-callback-failure").unwrap();
     let marker = directory.path().join("request-ran");
     let request = ExecutionRequest::Command(
         ProcessCall::new("bash")
@@ -362,13 +329,12 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
             .argument(text(&marker)),
     );
 
-    let error = assert_err!(
-        Runner::here()
-            .unwrap()
-            .run_request_in(request, None, &mut |_| Err(io::Error::other(
-                "cannot report"
-            )),)
-    );
+    let error = Runner::here()
+        .unwrap()
+        .run_request_in(request, None, &mut |_| {
+            Err(io::Error::other("cannot report"))
+        })
+        .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(!marker.exists());
@@ -376,45 +342,30 @@ fn stops_before_starting_a_request_when_the_callback_fails() {
 
 #[test]
 fn reports_the_status_of_the_first_failing_task_in_declaration_order() {
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "first",
-            &[],
-            "bash",
-            arguments(&["-c", "exit 23"]),
-        )),
-        assert_ok!(command_task(
-            "second",
-            &[],
-            "bash",
-            arguments(&["-c", "exit 7"]),
-        )),
-    ]));
+    let workflow = Workflow::try_from(vec![
+        command_task("first", &[], "bash", arguments(&["-c", "exit 23"])).unwrap(),
+        command_task("second", &[], "bash", arguments(&["-c", "exit 7"])).unwrap(),
+    ])
+    .unwrap();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |_| Ok(()))
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |_| Ok(()))
+        .unwrap();
 
     assert_eq!(status, 23);
 }
 
 #[test]
 fn stops_before_starting_a_workflow_task_when_the_callback_fails() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-workflow-callback-failure"));
+    let directory = TemporaryDirectory::new("runner-workflow-callback-failure").unwrap();
     let marker = directory.path().join("task-ran");
-    let workflow = assert_ok!(Workflow::try_from(vec![assert_ok!(marker_task(
-        "prepare",
-        &[],
-        &marker
-    ))]));
+    let workflow = Workflow::try_from(vec![marker_task("prepare", &[], &marker).unwrap()]).unwrap();
 
-    let error = assert_err!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |_| Err(io::Error::other("cannot report")))
-    );
+    let error = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |_| Err(io::Error::other("cannot report")))
+        .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(!marker.exists());
@@ -422,25 +373,21 @@ fn stops_before_starting_a_workflow_task_when_the_callback_fails() {
 
 #[test]
 fn stops_a_workflow_when_reporting_a_finished_task_fails() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-finished-callback-failure"));
+    let directory = TemporaryDirectory::new("runner-finished-callback-failure").unwrap();
     let marker = directory.path().join("dependent-ran");
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "prepare",
-            &[],
-            "bash",
-            arguments(&["-c", "printf prepare"]),
-        )),
-        assert_ok!(marker_task("verify", &["prepare"], &marker)),
-    ]));
+    let workflow = Workflow::try_from(vec![
+        command_task("prepare", &[], "bash", arguments(&["-c", "printf prepare"])).unwrap(),
+        marker_task("verify", &["prepare"], &marker).unwrap(),
+    ])
+    .unwrap();
 
-    let error = assert_err!(Runner::here().unwrap().run_workflow(
-        &workflow,
-        &mut |event| match event {
+    let error = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| match event {
             RunEvent::Finished { .. } => Err(io::Error::other("cannot report")),
             _ => Ok(()),
-        }
-    ));
+        })
+        .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(!marker.exists());
@@ -448,25 +395,26 @@ fn stops_a_workflow_when_reporting_a_finished_task_fails() {
 
 #[test]
 fn starts_independent_processes_before_either_can_finish() {
-    let directory = assert_ok!(TemporaryDirectory::new("runner-concurrent-tasks"));
+    let directory = TemporaryDirectory::new("runner-concurrent-tasks").unwrap();
     let first_ready = directory.path().join("first-ready");
     let first_release = directory.path().join("first-release");
     let second_ready = directory.path().join("second-ready");
     let second_release = directory.path().join("second-release");
 
     for fifo in [&first_ready, &first_release, &second_ready, &second_release] {
-        assert_ok!(create_fifo(fifo));
+        create_fifo(fifo).unwrap();
     }
 
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(waiting_task("first", &first_ready, &first_release)),
-        assert_ok!(waiting_task("second", &second_ready, &second_release)),
-    ]));
+    let workflow = Workflow::try_from(vec![
+        waiting_task("first", &first_ready, &first_release).unwrap(),
+        waiting_task("second", &second_ready, &second_release).unwrap(),
+    ])
+    .unwrap();
     let first_ready_receiver = read_fifo(first_ready);
     let second_ready_receiver = read_fifo(second_ready);
     let (finished_sender, finished_receiver) = mpsc::channel();
     let runner_thread = thread::spawn(move || {
-        let mut on_event = |_: &RunEvent| Ok(());
+        let mut on_event = |_: &RunEvent<'_>| Ok(());
         let result = Runner::here()
             .unwrap()
             .run_workflow(&workflow, &mut on_event);
@@ -478,14 +426,13 @@ fn starts_independent_processes_before_either_can_finish() {
     let second_started = received_fifo_byte(&second_ready_receiver, timeout);
     let first_release_receiver = write_fifo(first_release);
     let second_release_receiver = write_fifo(second_release);
-    assert_ok!(received_fifo_write(&first_release_receiver, timeout));
-    assert_ok!(received_fifo_write(&second_release_receiver, timeout));
-    let status = assert_ok!(received_workflow_status(&finished_receiver, timeout));
-    assert_ok!(
-        runner_thread
-            .join()
-            .map_err(|_| io::Error::other("runner thread panicked"))
-    );
+    received_fifo_write(&first_release_receiver, timeout).unwrap();
+    received_fifo_write(&second_release_receiver, timeout).unwrap();
+    let status = received_workflow_status(&finished_receiver, timeout).unwrap();
+    runner_thread
+        .join()
+        .map_err(|_| io::Error::other("runner thread panicked"))
+        .unwrap();
 
     assert!(first_started);
     assert!(second_started);
@@ -494,59 +441,55 @@ fn starts_independent_processes_before_either_can_finish() {
 
 #[test]
 fn reports_output_before_the_task_finishes() {
-    let workflow = assert_ok!(Workflow::try_from(vec![assert_ok!(command_task(
-        "stream",
-        &[],
-        "bash",
-        arguments(&["-c", "echo early; sleep 0.2"]),
-    ))]));
+    let workflow = Workflow::try_from(vec![
+        command_task(
+            "stream",
+            &[],
+            "bash",
+            arguments(&["-c", "echo early; sleep 0.2"]),
+        )
+        .unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(status, 0);
-    let reported = assert_ok!(event_position(&events, |event| matches!(
-        event,
-        RecordedEvent::Output { line, stream, .. }
-            if line == b"early\n" && *stream == OutputStream::Stdout
-    )));
-    let finished = assert_ok!(event_position(&events, |event| is_finished(event, 0)));
+    let reported = event_position(&events, |event| {
+        matches!(
+            event,
+            RecordedEvent::Output { line, stream, .. }
+                if line == b"early\n" && *stream == OutputStream::Stdout
+        )
+    })
+    .unwrap();
+    let finished = event_position(&events, |event| is_finished(event, 0)).unwrap();
     assert!(reported < finished);
 }
 
 #[test]
 fn reports_a_blocked_task_after_a_dependency_fails() {
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "prepare",
-            &[],
-            "bash",
-            arguments(&["-c", "exit 3"])
-        )),
-        assert_ok!(command_task(
-            "verify",
-            &["prepare"],
-            "bash",
-            arguments(&["-c", "true"]),
-        )),
-    ]));
+    let workflow = Workflow::try_from(vec![
+        command_task("prepare", &[], "bash", arguments(&["-c", "exit 3"])).unwrap(),
+        command_task("verify", &["prepare"], "bash", arguments(&["-c", "true"])).unwrap(),
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(status, 3);
     assert!(events.contains(&RecordedEvent::Blocked { task: 1 }));
@@ -593,7 +536,7 @@ fn marker_task(
     )
 }
 
-fn record_event(events: &mut Vec<RecordedEvent>, event: &RunEvent) {
+fn record_event(events: &mut Vec<RecordedEvent>, event: &RunEvent<'_>) {
     let event = match event {
         RunEvent::Started { task } => RecordedEvent::Started {
             task: (*task).map(TaskIndex::position),
@@ -601,7 +544,7 @@ fn record_event(events: &mut Vec<RecordedEvent>, event: &RunEvent) {
         RunEvent::Output { task, stream, line } => RecordedEvent::Output {
             task: (*task).map(TaskIndex::position),
             stream: *stream,
-            line: line.clone(),
+            line: line.to_vec(),
         },
         RunEvent::Finished { task, output, .. } => RecordedEvent::Finished {
             task: (*task).map(TaskIndex::position),
@@ -723,12 +666,12 @@ fn received_fifo_write(
 }
 
 fn received_workflow_status(
-    receiver: &mpsc::Receiver<io::Result<i32>>,
+    receiver: &mpsc::Receiver<Result<i32, RunError>>,
     timeout: Duration,
-) -> io::Result<i32> {
-    receiver
+) -> Result<i32, Box<dyn std::error::Error>> {
+    Ok(receiver
         .recv_timeout(timeout)
-        .map_err(|error| io::Error::other(format!("workflow did not finish: {error}")))?
+        .map_err(|error| format!("workflow did not finish: {error}"))??)
 }
 
 // The Linux sandbox re-executes the `beez` binary inside its namespace, so
@@ -738,40 +681,40 @@ fn received_workflow_status(
 fn runs_sandboxed_tasks_inside_the_sandbox() {
     use beez_policy::{FilesystemPolicy, NetworkPolicy, SandboxPolicy};
 
-    let directory = assert_ok!(TemporaryDirectory::new("runner-sandbox"));
+    let directory = TemporaryDirectory::new("runner-sandbox").unwrap();
     let outside = directory.join("outside.txt");
-    let filesystem = assert_ok!(".".parse().map(|work| {
-        FilesystemPolicy::default()
-            .with_defaults(Some(false))
-            .with_write_allow(vec![work])
-    }));
+    let filesystem = "."
+        .parse()
+        .map(|work| {
+            FilesystemPolicy::default()
+                .with_defaults(Some(false))
+                .with_write_allow(vec![work])
+        })
+        .unwrap();
     let policy = SandboxPolicy::new(NetworkPolicy::default(), filesystem, None);
-    let workflow = assert_ok!(Workflow::try_from(vec![
-        assert_ok!(command_task(
-            "open",
-            &[],
-            "bash",
-            arguments(&["-c", "printf open"]),
-        ))
-        .sandboxed(Some(policy.clone())),
-        assert_ok!(command_task(
+    let workflow = Workflow::try_from(vec![
+        command_task("open", &[], "bash", arguments(&["-c", "printf open"]))
+            .unwrap()
+            .sandboxed(Some(policy.clone())),
+        command_task(
             "leak",
             &[],
             "bash",
             arguments(&["-c", &format!("printf leak > {}", outside.display())]),
-        ))
+        )
+        .unwrap()
         .sandboxed(Some(policy)),
-    ]));
+    ])
+    .unwrap();
     let mut events = Vec::new();
 
-    let status = assert_ok!(
-        Runner::here()
-            .unwrap()
-            .run_workflow(&workflow, &mut |event| {
-                record_event(&mut events, event);
-                Ok(())
-            })
-    );
+    let status = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| {
+            record_event(&mut events, event);
+            Ok(())
+        })
+        .unwrap();
 
     assert_ne!(status, 0);
     assert!(!outside.exists());
@@ -783,4 +726,29 @@ fn runs_sandboxed_tasks_inside_the_sandbox() {
         event,
         RecordedEvent::Finished { task: Some(1), status: Some(status), .. } if *status != 0
     )));
+}
+
+#[test]
+fn stops_running_tasks_when_the_callback_fails() {
+    let workflow = Workflow::try_from(vec![
+        command_task("prepare", &[], "bash", arguments(&["-c", "printf prepare"])).unwrap(),
+        command_task("wait", &[], "sleep", arguments(&["30"])).unwrap(),
+    ])
+    .unwrap();
+    let started = Instant::now();
+
+    let error = Runner::here()
+        .unwrap()
+        .run_workflow(&workflow, &mut |event| match event {
+            RunEvent::Finished { .. } => Err(io::Error::other("cannot report")),
+            _ => Ok(()),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "cannot report");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
 }

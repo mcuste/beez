@@ -69,21 +69,31 @@ impl Proxy {
     /// The proxies run outside the sandbox, so they also apply the `localhost`
     /// rule: unless it is set, an allowed name that resolves to a loopback or
     /// link-local address is refused.
-    pub fn start(rules: Vec<DomainRule>, localhost: bool) -> io::Result<Self> {
+    pub fn start(network: NetworkRules) -> io::Result<Self> {
         let rules = Arc::new(Rules {
-            domains: rules,
-            localhost,
+            network,
             reported: Mutex::new(BTreeSet::new()),
         });
         let (http, http_port) = loopback_listener()?;
         let (socks, socks_port) = loopback_listener()?;
         let http_rules = Arc::clone(&rules);
+        // Connections arrive on threads of their own, so their trace lines
+        // name the request that started the proxy.
+        let http_span = tracing::Span::current();
+        let socks_span = http_span.clone();
         let http = Server::spawn(http, move |stream| {
-            let _ = http::serve_http(stream, &http_rules);
+            let _span = http_span.enter();
+            if let Err(error) = http::serve_http(stream, &http_rules) {
+                tracing::debug!(proxy = "http", %error, "proxy connection ended in an error");
+            }
         });
         let socks = Server::spawn(socks, move |stream| {
-            let _ = socks::serve_socks(stream, &rules);
+            let _span = socks_span.enter();
+            if let Err(error) = socks::serve_socks(stream, &rules) {
+                tracing::debug!(proxy = "socks", %error, "proxy connection ended in an error");
+            }
         });
+        tracing::debug!(http = http_port, socks = socks_port, "proxies started");
 
         Ok(Self {
             ports: ProxyPorts {
@@ -111,6 +121,15 @@ impl Proxy {
     pub(crate) fn ports(&self) -> ProxyPorts {
         self.ports
     }
+}
+
+/// The hosts the proxies may reach.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetworkRules {
+    /// Hosts a client may name.
+    pub domains: Vec<DomainRule>,
+    /// True when an allowed host may resolve to a loopback or link-local address.
+    pub localhost: bool,
 }
 
 /// The loopback ports of the HTTP and SOCKS5 proxies.
@@ -163,8 +182,7 @@ impl Access {
 
 /// The allowlist plus the targets already reported as denied.
 struct Rules {
-    domains: Vec<DomainRule>,
-    localhost: bool,
+    network: NetworkRules,
     reported: Mutex<BTreeSet<String>>,
 }
 
@@ -175,21 +193,26 @@ impl Rules {
     fn permits(&self, target: &Target, access: Access) -> bool {
         let default_port = access.default_port();
         if self
+            .network
             .domains
             .iter()
             .any(|rule| rule.matches(&target.host, target.port, default_port))
         {
+            tracing::debug!(%target, ?access, "allowed: a rule names the host");
             return true;
         }
+        tracing::debug!(%target, ?access, "denied: no rule names the host");
         self.report(&format!("denied connection to {target}"));
         false
     }
 
     /// True when the policy allows connections to `address`.
     fn permits_address(&self, host: &str, address: IpAddr) -> bool {
-        if self.localhost || !is_local(address) {
+        if self.network.localhost || !is_local(address) {
+            tracing::trace!(host, %address, "allowed address");
             return true;
         }
+        tracing::debug!(host, %address, "denied: the address is local");
         self.report(&format!("denied connection to {host} ({address})"));
         false
     }
@@ -258,9 +281,15 @@ fn open_tunnel(
         return Ok(Some(received));
     }
     let received = tls::read_first_record(client, received)?;
-    match tunnel_verdict(&tls::parse(&received), target) {
-        Ok(()) => Ok(Some(received)),
+    let hello = tls::parse(&received);
+    tracing::trace!(%target, ?hello, "TLS hello");
+    match tunnel_verdict(&hello, target) {
+        Ok(()) => {
+            tracing::debug!(%target, "allowed: the TLS hello names the tunnel host");
+            Ok(Some(received))
+        }
         Err(refusal) => {
+            tracing::debug!(%target, %refusal, "denied: TLS hello");
             rules.report(&refusal);
             Ok(None)
         }
@@ -271,32 +300,29 @@ fn open_tunnel(
 ///
 /// The error is the refusal to report.
 fn tunnel_verdict(hello: &Hello, target: &Target) -> Result<(), String> {
-    let host = target.host.as_str();
-    match hello {
-        Hello::Other => Err(format!(
+    let Hello::Tls {
+        server_name,
+        encrypted,
+    } = hello
+    else {
+        return Err(format!(
             "denied a tunnel to {target} that did not start TLS"
-        )),
-        Hello::Tls {
-            encrypted: true, ..
-        } => Err(format!(
+        ));
+    };
+    if *encrypted {
+        return Err(format!(
             "denied an encrypted TLS hello through a tunnel to {target}"
-        )),
-        Hello::Tls {
-            server_name: None, ..
-        } if host.parse::<IpAddr>().is_ok() => Ok(()),
-        Hello::Tls {
-            server_name: None, ..
-        } => Err(format!(
+        ));
+    }
+    let host = target.host.as_str();
+    match server_name {
+        // A client sends no name for a tunnel opened to an address.
+        None if host.parse::<IpAddr>().is_ok() => Ok(()),
+        None => Err(format!(
             "denied TLS without a server name through a tunnel to {target}"
         )),
-        Hello::Tls {
-            server_name: Some(name),
-            ..
-        } if same_host(name, host) => Ok(()),
-        Hello::Tls {
-            server_name: Some(name),
-            ..
-        } => Err(format!("denied TLS to {name} through a tunnel to {target}")),
+        Some(name) if same_host(name, host) => Ok(()),
+        Some(name) => Err(format!("denied TLS to {name} through a tunnel to {target}")),
     }
 }
 
@@ -359,24 +385,7 @@ enum ConnectError {
     /// The host resolved to no address.
     Unresolved,
     /// Resolving, or connecting to the last address tried, failed.
-    Io(io::Error),
-}
-
-impl ConnectError {
-    /// The error for the proxy's own result, naming `target`.
-    fn into_io(self, target: &Target) -> io::Error {
-        match self {
-            Self::Denied => io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("{} resolves to a local address", target.host),
-            ),
-            Self::Unresolved => io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{} did not resolve", target.host),
-            ),
-            Self::Io(error) => error,
-        }
-    }
+    Io,
 }
 
 /// Connects to the first allowed address of `target`.
@@ -385,17 +394,24 @@ impl ConnectError {
 fn connect(rules: &Rules, target: &Target) -> Result<TcpStream, ConnectError> {
     let host = target.host.as_str();
     let mut last_error = ConnectError::Unresolved;
-    for address in (host, target.port)
-        .to_socket_addrs()
-        .map_err(ConnectError::Io)?
-    {
+    let addresses = (host, target.port).to_socket_addrs().map_err(|error| {
+        tracing::debug!(%target, %error, "cannot resolve the host");
+        ConnectError::Io
+    })?;
+    for address in addresses {
         if !rules.permits_address(host, address.ip()) {
             last_error = ConnectError::Denied;
             continue;
         }
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_error = ConnectError::Io(error),
+            Ok(stream) => {
+                tracing::debug!(%target, %address, "connected upstream");
+                return Ok(stream);
+            }
+            Err(error) => {
+                tracing::debug!(%target, %address, %error, "cannot connect upstream");
+                last_error = ConnectError::Io;
+            }
         }
     }
     Err(last_error)
@@ -417,13 +433,13 @@ mod tests {
     use super::tls::Hello;
     use super::tls::tests::{client_hello, encrypted_hello_extension, server_name_extension};
     use super::{
-        REPORTED_LIMIT, Rules, Target, is_local, loopback_listener, open_tunnel, tunnel_verdict,
+        NetworkRules, REPORTED_LIMIT, Rules, Target, is_local, loopback_listener, open_tunnel,
+        tunnel_verdict,
     };
 
     fn rules() -> Rules {
         Rules {
-            domains: Vec::new(),
-            localhost: false,
+            network: NetworkRules::default(),
             reported: Mutex::new(BTreeSet::new()),
         }
     }
@@ -512,51 +528,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn opens_a_tls_tunnel_that_names_its_host() {
-        let hello = client_hello(&[server_name_extension("API.example.com.")]);
-
-        assert_eq!(open("api.example.com", 443, &hello), Some(hello));
-    }
-
-    #[test]
-    fn refuses_a_tls_tunnel_that_names_another_host() {
-        let hello = client_hello(&[server_name_extension("evil.example")]);
-
-        assert_eq!(open("api.example.com", 443, &hello), None);
-    }
-
-    #[test]
-    fn refuses_an_encrypted_hello_and_a_hello_without_a_name() {
-        let encrypted = client_hello(&[
-            server_name_extension("api.example.com"),
-            encrypted_hello_extension(),
-        ]);
-        let nameless = client_hello(&[]);
-
-        assert_eq!(open("api.example.com", 443, &encrypted), None);
-        assert_eq!(open("api.example.com", 443, &nameless), None);
-    }
-
-    #[test]
-    fn opens_a_nameless_tls_tunnel_to_an_address() {
-        let nameless = client_hello(&[]);
-
-        assert_eq!(open("10.0.0.5", 443, &nameless), Some(nameless));
-    }
-
-    #[test]
-    fn refuses_plain_text_on_the_tls_port() {
-        assert_eq!(
-            open(
-                "api.example.com",
-                443,
-                b"GET / HTTP/1.1\r\nHost: evil\r\n\r\n"
-            ),
-            None
-        );
     }
 
     #[test]

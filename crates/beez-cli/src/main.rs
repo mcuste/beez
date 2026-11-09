@@ -1,22 +1,26 @@
 //! Beez's user-facing command-line interface.
 
+use std::error::Error;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use anstyle::{AnsiColor, Style};
+use anyhow::Context;
 use beez_manifest::load;
 use beez_policy::{
     DomainRule, FilesystemPolicy, HarnessOptions, HeadlessHarness, NetworkPolicy, SandboxPath,
-    SandboxPolicy, parse_all,
+    SandboxPolicy,
 };
 use beez_process::{ExecutionRequest, HarnessCall, ProcessCall};
 use beez_record::{LogSettings, RunTarget};
-use beez_runner::Runner;
+use beez_runner::{RunError, Runner};
 use clap::{Args, Parser, Subcommand};
 
 mod report;
 mod sandbox;
 mod schedule;
+mod trace;
 
 use report::{RenderOptions, Reporter};
 use sandbox::{SandboxInit, SandboxRelay};
@@ -135,48 +139,79 @@ struct SandboxArgs {
     no_sandbox: bool,
     /// Host the sandbox may also reach, such as github.com or *.npmjs.org:443.
     #[arg(long, value_name = "HOST")]
-    allow_domain: Vec<String>,
+    allow_domain: Vec<DomainRule>,
     /// Path the sandbox may also write.
     #[arg(long, value_name = "PATH")]
-    allow_write: Vec<String>,
+    allow_write: Vec<SandboxPath>,
 }
 
 impl SandboxArgs {
     /// Beez's default policy, plus the hosts and paths the command allows.
-    fn policy(&self) -> io::Result<Option<SandboxPolicy>> {
+    fn policy(&self) -> Option<SandboxPolicy> {
         if self.no_sandbox {
-            return Ok(None);
+            return None;
         }
-        let allow = parse_values::<DomainRule>(&self.allow_domain)?;
-        let write_allow = parse_values::<SandboxPath>(&self.allow_write)?;
-        let network = NetworkPolicy::default().with_allow(allow);
-        let filesystem = FilesystemPolicy::default().with_write_allow(write_allow);
-        Ok(Some(SandboxPolicy::new(network, filesystem, None)))
+        let network = NetworkPolicy::default().with_allow(self.allow_domain.clone());
+        let filesystem = FilesystemPolicy::default().with_write_allow(self.allow_write.clone());
+        Some(SandboxPolicy::new(network, filesystem, None))
     }
 }
 
-/// Reads policy values a flag holds, and reports a wrong one as bad input.
-fn parse_values<T>(values: &[String]) -> io::Result<Vec<T>>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    parse_all(values).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
-}
+/// The status Beez exits with when it fails itself, as for a usage error.
+///
+/// A run that Beez carried out exits with the status of its tasks instead.
+const FAILURE: i32 = 2;
 
 fn main() {
-    let status = match run(Cli::parse()) {
+    let cli = Cli::parse();
+    // The sandbox helpers share standard error with the sandboxed program,
+    // so a trace line there would land in the task's own output.
+    if !matches!(
+        cli.command,
+        Command::SandboxInit(_) | Command::SandboxRelay(_)
+    ) {
+        trace::init();
+    }
+    tracing::debug!(
+        version = env!("CARGO_PKG_VERSION"),
+        pid = std::process::id(),
+        "beez started"
+    );
+    let status = match run(cli) {
         Ok(status) => status,
         Err(error) => {
-            // Standard error may be closed. The status still says Beez failed.
-            let _ = writeln!(io::stderr(), "{error}");
-            2
+            tracing::debug!(error = %format_args!("{error:#}"), "beez failed");
+            report_error(error.as_ref());
+            FAILURE
         }
     };
+    tracing::debug!(status, "beez exiting");
     std::process::exit(status);
 }
 
-fn run(cli: Cli) -> io::Result<i32> {
+/// Prints an error for a person: what failed on the first line, then each
+/// cause behind it on a line of its own.
+///
+/// Standard error may be closed, so this is best effort; the exit status
+/// still says Beez failed.
+fn report_error(error: &(dyn Error + 'static)) {
+    let mut stderr = anstream::stderr().lock();
+    let _ = write_error(&mut stderr, error);
+}
+
+/// Writes `error` and its chain of causes, as [`report_error`] prints them.
+fn write_error(out: &mut impl Write, error: &(dyn Error + 'static)) -> io::Result<()> {
+    let style = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
+    writeln!(out, "{style}error:{style:#} {error}")?;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        writeln!(out, "  caused by: {cause}")?;
+        source = cause.source();
+    }
+    Ok(())
+}
+
+fn run(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         Command::Run { command } => match command {
             RunCommand::Workflow(file) => run_workflow(file),
@@ -193,11 +228,11 @@ fn run(cli: Cli) -> io::Result<i32> {
     }
 }
 
-fn run_workflow(file: WorkflowFile) -> io::Result<i32> {
+fn run_workflow(file: WorkflowFile) -> anyhow::Result<i32> {
     let WorkflowFile { path, render, log } = file;
     let workflow = load(&path)
         .map(beez_manifest::Manifest::into_workflow)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        .with_context(|| format!("cannot load workflow {}", path.display()))?;
     let target = RunTarget::Workflow {
         path: &path,
         workflow: &workflow,
@@ -208,7 +243,7 @@ fn run_workflow(file: WorkflowFile) -> io::Result<i32> {
     })
 }
 
-fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
+fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> anyhow::Result<i32> {
     let HarnessRun {
         prompt,
         model,
@@ -223,7 +258,7 @@ fn run_harness(harness: HeadlessHarness, run: HarnessRun) -> io::Result<i32> {
     run_request(harness.name(), request, &sandbox, &log)
 }
 
-fn run_command(process: Process) -> io::Result<i32> {
+fn run_command(process: Process) -> anyhow::Result<i32> {
     let Process {
         sandbox,
         log,
@@ -241,8 +276,8 @@ fn run_request(
     request: ExecutionRequest,
     sandbox: &SandboxArgs,
     log: &LogArgs,
-) -> io::Result<i32> {
-    let policy = sandbox.policy()?;
+) -> anyhow::Result<i32> {
+    let policy = sandbox.policy();
     let target = RunTarget::Request { name };
 
     run_reported(
@@ -261,18 +296,19 @@ fn run_reported(
     target: &RunTarget<'_>,
     render: RenderOptions,
     log: LogSettings<'_>,
-    run: impl FnOnce(&Runner, &mut Reporter) -> io::Result<i32>,
-) -> io::Result<i32> {
-    let working_directory = std::env::current_dir()?;
+    run: impl FnOnce(&Runner, &mut Reporter) -> Result<i32, RunError>,
+) -> anyhow::Result<i32> {
+    let working_directory = std::env::current_dir().context("cannot read the working directory")?;
     let mut reporter = Reporter::new(target, render, log, &working_directory);
     beez_sandbox::set_diagnostic_sink(reporter.diagnostic_sink());
 
     let status = run(&Runner::new(&working_directory), &mut reporter);
     let finished = reporter.finish(status.as_ref().ok().copied());
-    settle(status, finished, |error| {
-        // Standard error may be what failed, so this is best effort.
-        let _ = writeln!(io::stderr(), "{error}");
-    })
+    match &status {
+        Ok(code) => tracing::debug!(status = code, "run ended"),
+        Err(error) => tracing::debug!(%error, "run ended in an error"),
+    }
+    Ok(settle(status, finished, |error| report_error(error))?)
 }
 
 /// The result of a run, once its report has closed.
@@ -280,11 +316,11 @@ fn run_reported(
 /// The run's own status or error decides how Beez exits. A report that
 /// could not close goes to `report` instead, so it cannot hide that a run
 /// passed or why it failed.
-fn settle(
-    status: io::Result<i32>,
+fn settle<E>(
+    status: Result<i32, E>,
     finished: io::Result<()>,
     report: impl FnOnce(&io::Error),
-) -> io::Result<i32> {
+) -> Result<i32, E> {
     if let Err(error) = finished {
         report(&error);
     }
@@ -295,7 +331,7 @@ fn settle(
 mod tests {
     use std::io;
 
-    use super::settle;
+    use super::{settle, write_error};
 
     fn closed() -> io::Error {
         io::Error::from(io::ErrorKind::BrokenPipe)
@@ -305,7 +341,7 @@ mod tests {
     fn keeps_the_run_status_when_the_report_cannot_close() {
         for status in [0, 1, 23] {
             let mut reported = None;
-            let settled = settle(Ok(status), Err(closed()), |error| {
+            let settled = settle(Ok::<_, io::Error>(status), Err(closed()), |error| {
                 reported = Some(error.kind());
             });
 
@@ -328,9 +364,27 @@ mod tests {
     }
 
     #[test]
+    fn writes_each_cause_of_an_error_on_its_own_line() {
+        let error = anyhow::Error::new(io::Error::other("unknown field `comand`"))
+            .context("cannot load workflow nightly.yaml");
+        let mut out = Vec::new();
+
+        write_error(&mut out, error.as_ref()).unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("error:"), "{out}");
+        assert!(
+            out.ends_with(
+                " cannot load workflow nightly.yaml\n  caused by: unknown field `comand`\n"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn returns_the_run_status_when_the_report_closes() {
         let mut reported = false;
-        let settled = settle(Ok(4), Ok(()), |_| reported = true);
+        let settled = settle(Ok::<_, io::Error>(4), Ok(()), |_| reported = true);
 
         assert_eq!(settled.ok(), Some(4));
         assert!(!reported);

@@ -6,29 +6,15 @@ use beez_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
 use crate::template::{OutputReference, TaskOutput, Template};
 
 /// Reports an invalid task ID.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TaskIdError {
     /// The ID is empty.
+    #[error("task ID must not be empty")]
     Empty,
     /// The ID contains a character outside the allowed alphabet.
+    #[error("task ID contains invalid character {0:?}")]
     InvalidCharacter(char),
 }
-
-impl fmt::Display for TaskIdError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("task ID must not be empty"),
-            Self::InvalidCharacter(character) => {
-                write!(
-                    formatter,
-                    "task ID contains invalid character {character:?}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for TaskIdError {}
 
 /// A task ID of ASCII letters, digits, or underscores.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -195,6 +181,8 @@ pub struct Task {
     pub(crate) id: TaskId,
     pub(crate) dependencies: Vec<TaskIndex>,
     pub(crate) reads: Vec<TaskIndex>,
+    /// Whether another task reads this task's output.
+    pub(crate) read_by_dependents: bool,
     /// The request as written, kept verbatim for callers that record it.
     pub(crate) request: TaskRequest,
     /// The same request with every text parsed into a template.

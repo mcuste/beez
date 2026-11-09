@@ -6,6 +6,7 @@ use std::str::FromStr;
 use chrono::FixedOffset;
 
 use crate::error::ScheduleError;
+use crate::text::is_ascii_digits;
 
 /// Largest offset any real time zone uses.
 const LIMIT_SECONDS: i32 = 18 * 3_600;
@@ -78,7 +79,7 @@ impl FromStr for UtcOffset {
 
 /// Reads one or more ASCII digits and nothing else, so no sign slips in.
 fn digits(text: &str) -> Option<i32> {
-    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !is_ascii_digits(text) {
         return None;
     }
     text.parse().ok()

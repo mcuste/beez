@@ -1,17 +1,19 @@
 use std::collections::HashMap;
-use std::fmt;
 
 use crate::task::{ResolvedReference, Task, TaskDefinition, TaskId, TaskIndex, TaskRequest};
 use crate::template::{Template, TemplateError};
 
 /// Reports invalid workflow dependencies.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorkflowError {
     /// The workflow declares no tasks.
+    #[error("workflow must define at least one task")]
     Empty,
     /// An ID occurs more than once.
+    #[error("duplicate task ID {0}")]
     DuplicateTask(TaskId),
     /// A required predecessor is absent.
+    #[error("task {task} depends on unknown task {dependency}")]
     UnknownDependency {
         /// The task that declares the dependency.
         task: TaskId,
@@ -19,10 +21,16 @@ pub enum WorkflowError {
         dependency: TaskId,
     },
     /// A task depends directly on itself.
+    #[error("task {0} depends on itself")]
     SelfDependency(TaskId),
     /// A dependency cycle, with the first ID repeated last.
+    #[error("workflow dependency cycle: {}", cycle(.0))]
     Cycle(Vec<TaskId>),
     /// A placeholder in a prompt or an argument names no task output.
+    ///
+    /// The placeholder detail is part of this one-line validation message,
+    /// not a separate cause.
+    #[error("task {task}: {error}")]
     InvalidTemplate {
         /// The task whose text holds the placeholder.
         task: TaskId,
@@ -30,62 +38,34 @@ pub enum WorkflowError {
         error: TemplateError,
     },
     /// A task reads its own output.
+    #[error("task {0} reads its own output")]
     SelfOutput(TaskId),
     /// A task reads the output of a task that does not exist.
+    #[error("task {task} reads the output of unknown task {producer}")]
     OutputOfUnknownTask {
         /// The task that reads the output.
         task: TaskId,
         /// The task the placeholder names.
-        source: TaskId,
+        producer: TaskId,
     },
     /// A task reads the output of a task it does not depend on.
+    #[error("task {task} reads the output of task {producer}, so it must depend on it")]
     OutputWithoutDependency {
         /// The task that reads the output.
         task: TaskId,
         /// The task the placeholder names.
-        source: TaskId,
+        producer: TaskId,
     },
 }
 
-impl fmt::Display for WorkflowError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("workflow must define at least one task"),
-            Self::DuplicateTask(task) => write!(formatter, "duplicate task ID {task}"),
-            Self::UnknownDependency { task, dependency } => {
-                write!(
-                    formatter,
-                    "task {task} depends on unknown task {dependency}"
-                )
-            }
-            Self::SelfDependency(task) => write!(formatter, "task {task} depends on itself"),
-            Self::Cycle(tasks) => {
-                let cycle = tasks
-                    .iter()
-                    .map(TaskId::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" -> ");
-                write!(formatter, "workflow dependency cycle: {cycle}")
-            }
-            Self::InvalidTemplate { task, error } => write!(formatter, "task {task}: {error}"),
-            Self::SelfOutput(task) => write!(formatter, "task {task} reads its own output"),
-            Self::OutputOfUnknownTask { task, source } => {
-                write!(
-                    formatter,
-                    "task {task} reads the output of unknown task {source}"
-                )
-            }
-            Self::OutputWithoutDependency { task, source } => {
-                write!(
-                    formatter,
-                    "task {task} reads the output of task {source}, so it must depend on it"
-                )
-            }
-        }
-    }
+/// The tasks of a cycle, joined by arrows.
+fn cycle(tasks: &[TaskId]) -> String {
+    tasks
+        .iter()
+        .map(TaskId::as_str)
+        .collect::<Vec<_>>()
+        .join(" -> ")
 }
-
-impl std::error::Error for WorkflowError {}
 
 /// How a running task ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,24 +77,12 @@ pub enum Completion {
 }
 
 /// Reports a task that is not in the state an execution step needs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ExecutionError {
-    /// The task has started already, or a dependency has not succeeded.
-    NotReady(TaskIndex),
     /// The task is not running.
+    #[error("workflow task is not running")]
     NotRunning(TaskIndex),
 }
-
-impl fmt::Display for ExecutionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::NotReady(_) => "workflow task is not ready",
-            Self::NotRunning(_) => "workflow task is not running",
-        })
-    }
-}
-
-impl std::error::Error for ExecutionError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TaskStatus {
@@ -137,8 +105,6 @@ impl From<Completion> for TaskStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Workflow {
     tasks: Vec<Task>,
-    /// Whether another task reads the output of the task at each position.
-    read: Vec<bool>,
 }
 
 impl Workflow {
@@ -146,6 +112,25 @@ impl Workflow {
     #[must_use]
     pub fn tasks(&self) -> &[Task] {
         &self.tasks
+    }
+
+    /// Returns every task with its index, in declaration order.
+    pub fn indexed(&self) -> impl Iterator<Item = (TaskIndex, &Task)> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .map(|(position, task)| (TaskIndex(position), task))
+    }
+
+    /// The IDs of the tasks `task` depends on, in the order it names them.
+    pub fn dependency_ids<'workflow>(
+        &'workflow self,
+        task: &'workflow Task,
+    ) -> impl Iterator<Item = &'workflow TaskId> {
+        task.dependencies()
+            .iter()
+            .filter_map(|index| self.task(*index))
+            .map(Task::id)
     }
 
     /// Starts tracking one execution of this workflow.
@@ -166,7 +151,13 @@ impl Workflow {
     /// True when another task reads the output of the task at `index`.
     #[must_use]
     pub fn is_read(&self, index: TaskIndex) -> bool {
-        self.read.get(index.position()).copied().unwrap_or(false)
+        self.task(index).is_some_and(|task| task.read_by_dependents)
+    }
+
+    /// True when every task runs inside a sandbox.
+    #[must_use]
+    pub fn all_tasks_sandboxed(&self) -> bool {
+        self.tasks.iter().all(|task| task.sandbox.is_some())
     }
 }
 
@@ -180,37 +171,37 @@ impl TryFrom<Vec<TaskDefinition>> for Workflow {
 
         let graph = Graph::resolve(&definitions)?;
         if let Some(cycle) = graph.find_cycle() {
-            return Err(WorkflowError::Cycle(task_ids(&definitions, &cycle)));
+            return Err(WorkflowError::Cycle(
+                cycle
+                    .iter()
+                    .filter_map(|index| definitions.get(index.position()))
+                    .map(|definition| definition.id.clone())
+                    .collect(),
+            ));
         }
-        let templates = definitions
-            .iter()
-            .zip(&graph.dependencies)
-            .map(|(definition, dependencies)| graph.resolve_templates(definition, dependencies))
-            .collect::<Result<Vec<_>, _>>()?;
-        let dependencies = graph.into_dependencies();
 
-        let tasks = definitions
+        let Graph {
+            indexes,
+            dependencies,
+        } = graph;
+        let mut tasks = definitions
             .into_iter()
             .zip(dependencies)
-            .zip(templates)
-            .map(|((definition, dependencies), template)| Task {
-                id: definition.id,
-                dependencies,
-                reads: distinct_sources(&template),
-                request: definition.request,
-                template,
-                sandbox: definition.sandbox,
-            })
-            .collect::<Vec<_>>();
+            .map(|(definition, dependencies)| build_task(&indexes, definition, dependencies))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let mut read = vec![false; tasks.len()];
-        for source in tasks.iter().flat_map(Task::reads) {
-            if let Some(is_read) = read.get_mut(source.position()) {
-                *is_read = true;
+        let sources = tasks
+            .iter()
+            .flat_map(Task::reads)
+            .copied()
+            .collect::<Vec<_>>();
+        for source in sources {
+            if let Some(task) = tasks.get_mut(source.position()) {
+                task.read_by_dependents = true;
             }
         }
 
-        Ok(Self { tasks, read })
+        Ok(Self { tasks })
     }
 }
 
@@ -222,24 +213,20 @@ pub struct WorkflowExecution<'workflow> {
 }
 
 impl<'workflow> WorkflowExecution<'workflow> {
-    /// Returns all pending tasks whose dependencies succeeded.
-    #[must_use]
-    pub fn ready(&self) -> Vec<TaskIndex> {
-        (0..self.workflow.tasks.len())
-            .map(TaskIndex)
-            .filter(|index| self.ready_task(*index).is_some())
-            .collect()
-    }
-
-    /// Marks a ready task as running and returns it.
-    pub fn start(&mut self, index: TaskIndex) -> Result<&'workflow Task, ExecutionError> {
-        let task = self
-            .ready_task(index)
-            .ok_or(ExecutionError::NotReady(index))?;
-        if let Some(status) = self.statuses.get_mut(index.position()) {
-            *status = TaskStatus::Running;
+    /// Marks every pending task whose dependencies succeeded as running, and
+    /// returns them in declaration order.
+    pub fn start_ready(&mut self) -> Vec<(TaskIndex, &'workflow Task)> {
+        let ready = self
+            .workflow
+            .indexed()
+            .filter_map(|(index, _)| Some((index, self.ready_task(index)?)))
+            .collect::<Vec<_>>();
+        for (index, _) in &ready {
+            if let Some(status) = self.statuses.get_mut(index.position()) {
+                *status = TaskStatus::Running;
+            }
         }
-        Ok(task)
+        ready
     }
 
     /// Records a running task's outcome.
@@ -287,8 +274,8 @@ impl<'workflow> WorkflowExecution<'workflow> {
 }
 
 /// The task positions and predecessors of a workflow under validation.
-struct Graph<'definitions> {
-    indexes: HashMap<&'definitions TaskId, TaskIndex>,
+struct Graph {
+    indexes: HashMap<TaskId, TaskIndex>,
     /// The predecessors of every task, in declaration order.
     dependencies: Vec<Vec<TaskIndex>>,
 }
@@ -300,92 +287,29 @@ enum Visit {
     Complete,
 }
 
-impl<'definitions> Graph<'definitions> {
+impl Graph {
     /// Indexes every task, then resolves every dependency ID.
-    fn resolve(definitions: &'definitions [TaskDefinition]) -> Result<Self, WorkflowError> {
+    fn resolve(definitions: &[TaskDefinition]) -> Result<Self, WorkflowError> {
         let mut indexes = HashMap::with_capacity(definitions.len());
         for (position, definition) in definitions.iter().enumerate() {
             if indexes
-                .insert(&definition.id, TaskIndex(position))
+                .insert(definition.id.clone(), TaskIndex(position))
                 .is_some()
             {
                 return Err(WorkflowError::DuplicateTask(definition.id.clone()));
             }
         }
 
-        let mut graph = Self {
-            indexes,
-            dependencies: Vec::with_capacity(definitions.len()),
-        };
-        for (position, definition) in definitions.iter().enumerate() {
-            let dependencies = graph.resolve_dependencies(definition, TaskIndex(position))?;
-            graph.dependencies.push(dependencies);
-        }
-        Ok(graph)
-    }
-
-    fn resolve_dependencies(
-        &self,
-        definition: &TaskDefinition,
-        task_index: TaskIndex,
-    ) -> Result<Vec<TaskIndex>, WorkflowError> {
-        definition
-            .depends_on
+        let dependencies = definitions
             .iter()
-            .map(|dependency_id| {
-                let Some(&dependency) = self.indexes.get(dependency_id) else {
-                    return Err(WorkflowError::UnknownDependency {
-                        task: definition.id.clone(),
-                        dependency: dependency_id.clone(),
-                    });
-                };
-                if dependency == task_index {
-                    return Err(WorkflowError::SelfDependency(definition.id.clone()));
-                }
-                Ok(dependency)
+            .enumerate()
+            .map(|(position, definition)| {
+                resolve_dependencies(&indexes, definition, TaskIndex(position))
             })
-            .collect()
-    }
-
-    /// Parses the texts of the request and resolves the task every
-    /// placeholder reads.
-    ///
-    /// A transitive dependency has also finished when the task starts, but
-    /// requiring a direct one keeps the data flow visible in `depends_on`.
-    fn resolve_templates(
-        &self,
-        definition: &TaskDefinition,
-        dependencies: &[TaskIndex],
-    ) -> Result<TaskRequest<Template<ResolvedReference>>, WorkflowError> {
-        let task = || definition.id.clone();
-        definition.request.try_map_texts(|text| {
-            Template::parse(text)
-                .map_err(|error| WorkflowError::InvalidTemplate {
-                    task: task(),
-                    error,
-                })?
-                .try_map_references(|reference| {
-                    let source = reference.task();
-                    if *source == definition.id {
-                        return Err(WorkflowError::SelfOutput(task()));
-                    }
-                    let Some(&index) = self.indexes.get(source) else {
-                        return Err(WorkflowError::OutputOfUnknownTask {
-                            task: task(),
-                            source: source.clone(),
-                        });
-                    };
-                    if !dependencies.contains(&index) {
-                        return Err(WorkflowError::OutputWithoutDependency {
-                            task: task(),
-                            source: source.clone(),
-                        });
-                    }
-                    Ok(ResolvedReference {
-                        source: index,
-                        reference,
-                    })
-                })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            indexes,
+            dependencies,
         })
     }
 
@@ -447,11 +371,89 @@ impl<'definitions> Graph<'definitions> {
         }
         Ok(())
     }
+}
 
-    /// The predecessors of every task, once the IDs are no longer needed.
-    fn into_dependencies(self) -> Vec<Vec<TaskIndex>> {
-        self.dependencies
-    }
+fn resolve_dependencies(
+    indexes: &HashMap<TaskId, TaskIndex>,
+    definition: &TaskDefinition,
+    task_index: TaskIndex,
+) -> Result<Vec<TaskIndex>, WorkflowError> {
+    definition
+        .depends_on
+        .iter()
+        .map(|dependency_id| {
+            let Some(&dependency) = indexes.get(dependency_id) else {
+                return Err(WorkflowError::UnknownDependency {
+                    task: definition.id.clone(),
+                    dependency: dependency_id.clone(),
+                });
+            };
+            if dependency == task_index {
+                return Err(WorkflowError::SelfDependency(definition.id.clone()));
+            }
+            Ok(dependency)
+        })
+        .collect()
+}
+
+/// Builds one task of an acyclic graph, once its templates resolve.
+fn build_task(
+    indexes: &HashMap<TaskId, TaskIndex>,
+    definition: TaskDefinition,
+    dependencies: Vec<TaskIndex>,
+) -> Result<Task, WorkflowError> {
+    let template = resolve_templates(indexes, &definition, &dependencies)?;
+    Ok(Task {
+        id: definition.id,
+        dependencies,
+        reads: distinct_sources(&template),
+        read_by_dependents: false,
+        request: definition.request,
+        template,
+        sandbox: definition.sandbox,
+    })
+}
+
+/// Parses the texts of the request and resolves the task every
+/// placeholder reads.
+///
+/// A transitive dependency has also finished when the task starts, but
+/// requiring a direct one keeps the data flow visible in `depends_on`.
+fn resolve_templates(
+    indexes: &HashMap<TaskId, TaskIndex>,
+    definition: &TaskDefinition,
+    dependencies: &[TaskIndex],
+) -> Result<TaskRequest<Template<ResolvedReference>>, WorkflowError> {
+    let task = || definition.id.clone();
+    definition.request.try_map_texts(|text| {
+        Template::parse(text)
+            .map_err(|error| WorkflowError::InvalidTemplate {
+                task: task(),
+                error,
+            })?
+            .try_map_references(|reference| {
+                let source = reference.task();
+                if *source == definition.id {
+                    return Err(WorkflowError::SelfOutput(task()));
+                }
+                let Some(&index) = indexes.get(source) else {
+                    return Err(WorkflowError::OutputOfUnknownTask {
+                        task: task(),
+                        producer: source.clone(),
+                    });
+                };
+                if !dependencies.contains(&index) {
+                    return Err(WorkflowError::OutputWithoutDependency {
+                        task: task(),
+                        producer: source.clone(),
+                    });
+                }
+                Ok(ResolvedReference {
+                    source: index,
+                    reference,
+                })
+            })
+    })
 }
 
 /// The distinct tasks the request reads, in the order it first reads them.
@@ -465,18 +467,9 @@ fn distinct_sources(request: &TaskRequest<Template<ResolvedReference>>) -> Vec<T
     sources
 }
 
-/// The IDs of the tasks at `positions`.
-fn task_ids(definitions: &[TaskDefinition], positions: &[TaskIndex]) -> Vec<TaskId> {
-    positions
-        .iter()
-        .filter_map(|index| definitions.get(index.position()))
-        .map(|definition| definition.id.clone())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use beez_policy::{HarnessOptions, HeadlessHarness};
+    use beez_policy::{HarnessOptions, HeadlessHarness, SandboxPolicy};
 
     use crate::task::{TaskDefinition, TaskIndex, TaskRequest};
 
@@ -513,16 +506,23 @@ mod tests {
         )
     }
 
-    fn succeeded<'workflow>(
-        mut execution: WorkflowExecution<'workflow>,
-        tasks: &[TaskIndex],
-    ) -> WorkflowExecution<'workflow> {
-        for index in tasks {
-            assert!(execution.start(*index).is_ok());
-            assert_eq!(execution.complete(*index, Completion::Succeeded), Ok(()));
-        }
-
+    /// Starts every ready task and returns their indexes.
+    fn start(execution: &mut WorkflowExecution<'_>) -> Vec<TaskIndex> {
         execution
+            .start_ready()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn complete(
+        execution: &mut WorkflowExecution<'_>,
+        tasks: &[TaskIndex],
+        completion: Completion,
+    ) {
+        for index in tasks {
+            assert_eq!(execution.complete(*index, completion), Ok(()));
+        }
     }
 
     #[test]
@@ -539,21 +539,17 @@ mod tests {
             Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
         let mut sut = workflow.execution();
 
-        assert_eq!(
-            sut.start(TaskIndex(1)).err(),
-            Some(ExecutionError::NotReady(TaskIndex(1)))
-        );
-        assert_eq!(sut.ready(), [TaskIndex(0)]);
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
+        assert_eq!(sut.pending(), [TaskIndex(1)]);
     }
 
     #[test]
     fn does_not_start_a_task_twice() {
         let workflow = Workflow::try_from(vec![task("prepare", &[])]).unwrap();
         let mut sut = workflow.execution();
-        assert!(sut.start(TaskIndex(0)).is_ok());
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
 
-        assert!(sut.start(TaskIndex(0)).is_err());
-        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
+        assert_eq!(start(&mut sut), Vec::<TaskIndex>::new());
     }
 
     #[test]
@@ -565,7 +561,7 @@ mod tests {
             sut.complete(TaskIndex(0), Completion::Succeeded),
             Err(ExecutionError::NotRunning(TaskIndex(0)))
         );
-        assert_eq!(sut.ready(), [TaskIndex(0)]);
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
     }
 
     #[test]
@@ -573,14 +569,14 @@ mod tests {
         let workflow =
             Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
         let mut sut = workflow.execution();
-        assert!(sut.start(TaskIndex(0)).is_ok());
-        assert_eq!(sut.complete(TaskIndex(0), Completion::Succeeded), Ok(()));
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
+        complete(&mut sut, &[TaskIndex(0)], Completion::Succeeded);
 
         assert_eq!(
             sut.complete(TaskIndex(0), Completion::Failed),
             Err(ExecutionError::NotRunning(TaskIndex(0)))
         );
-        assert_eq!(sut.ready(), [TaskIndex(1)]);
+        assert_eq!(start(&mut sut), [TaskIndex(1)]);
     }
 
     /// A caller tells a finished workflow from a blocked one by both signals.
@@ -592,20 +588,21 @@ mod tests {
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
-        let sut = succeeded(
-            workflow.execution(),
-            &[TaskIndex(0), TaskIndex(1), TaskIndex(2)],
-        );
+        let mut sut = workflow.execution();
+        let first = start(&mut sut);
+        complete(&mut sut, &first, Completion::Succeeded);
+        let second = start(&mut sut);
+        complete(&mut sut, &second, Completion::Succeeded);
 
         assert!(!sut.has_pending());
-        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
+        assert_eq!(start(&mut sut), Vec::<TaskIndex>::new());
     }
 
     #[test]
     fn reports_no_pending_task_after_the_only_task_fails() {
         let workflow = Workflow::try_from(vec![task("prepare", &[])]).unwrap();
         let mut sut = workflow.execution();
-        assert!(sut.start(TaskIndex(0)).is_ok());
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
 
         assert_eq!(sut.complete(TaskIndex(0), Completion::Failed), Ok(()));
 
@@ -613,17 +610,27 @@ mod tests {
     }
 
     #[test]
-    fn reports_independent_tasks_as_ready_together() {
+    fn starts_every_ready_task_at_once() {
         let workflow = Workflow::try_from(vec![
             task("prepare", &[]),
             task("build", &[]),
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
+        let mut sut = workflow.execution();
 
-        let sut = workflow.execution();
+        let started = sut
+            .start_ready()
+            .into_iter()
+            .map(|(index, task)| (index, task.id().as_str()))
+            .collect::<Vec<_>>();
 
-        assert_eq!(sut.ready(), [TaskIndex(0), TaskIndex(1)]);
+        assert_eq!(
+            started,
+            [(TaskIndex(0), "prepare"), (TaskIndex(1), "build")]
+        );
+        assert!(sut.start_ready().is_empty());
+        assert_eq!(sut.pending(), [TaskIndex(2)]);
     }
 
     #[test]
@@ -634,26 +641,31 @@ mod tests {
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
-        let sut = succeeded(workflow.execution(), &[TaskIndex(0), TaskIndex(1)]);
+        let mut sut = workflow.execution();
+        assert_eq!(start(&mut sut), [TaskIndex(0), TaskIndex(1)]);
+        complete(
+            &mut sut,
+            &[TaskIndex(0), TaskIndex(1)],
+            Completion::Succeeded,
+        );
 
-        let ready = sut.ready();
-
-        assert_eq!(ready, [TaskIndex(2)]);
+        assert_eq!(start(&mut sut), [TaskIndex(2)]);
     }
 
     #[test]
-    fn does_not_release_a_task_while_one_dependency_is_pending() {
+    fn does_not_release_a_task_while_one_dependency_is_running() {
         let workflow = Workflow::try_from(vec![
             task("prepare", &[]),
             task("build", &[]),
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
-        let sut = succeeded(workflow.execution(), &[TaskIndex(0)]);
+        let mut sut = workflow.execution();
+        assert_eq!(start(&mut sut), [TaskIndex(0), TaskIndex(1)]);
+        complete(&mut sut, &[TaskIndex(0)], Completion::Succeeded);
 
-        let ready = sut.ready();
-
-        assert_eq!(ready, [TaskIndex(1)]);
+        assert_eq!(start(&mut sut), Vec::<TaskIndex>::new());
+        assert_eq!(sut.pending(), [TaskIndex(2)]);
     }
 
     #[test]
@@ -664,12 +676,13 @@ mod tests {
             task("test", &["prepare", "build"]),
         ])
         .unwrap();
-        let mut sut = succeeded(workflow.execution(), &[TaskIndex(0)]);
-        assert!(sut.start(TaskIndex(1)).is_ok());
+        let mut sut = workflow.execution();
+        assert_eq!(start(&mut sut), [TaskIndex(0), TaskIndex(1)]);
+        complete(&mut sut, &[TaskIndex(0)], Completion::Succeeded);
 
         assert_eq!(sut.complete(TaskIndex(1), Completion::Failed), Ok(()));
 
-        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
+        assert_eq!(start(&mut sut), Vec::<TaskIndex>::new());
         assert!(sut.has_pending());
     }
 
@@ -681,8 +694,10 @@ mod tests {
             task("test", &["build"]),
         ])
         .unwrap();
-        let mut sut = succeeded(workflow.execution(), &[TaskIndex(0)]);
-        assert!(sut.start(TaskIndex(1)).is_ok());
+        let mut sut = workflow.execution();
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
+        complete(&mut sut, &[TaskIndex(0)], Completion::Succeeded);
+        assert_eq!(start(&mut sut), [TaskIndex(1)]);
 
         assert_eq!(sut.pending(), [TaskIndex(2)]);
     }
@@ -692,11 +707,11 @@ mod tests {
         let workflow =
             Workflow::try_from(vec![task("prepare", &[]), task("test", &["prepare"])]).unwrap();
         let mut sut = workflow.execution();
-        assert!(sut.start(TaskIndex(0)).is_ok());
+        assert_eq!(start(&mut sut), [TaskIndex(0)]);
 
         assert_eq!(sut.complete(TaskIndex(0), Completion::Failed), Ok(()));
 
-        assert_eq!(sut.ready(), Vec::<TaskIndex>::new());
+        assert_eq!(start(&mut sut), Vec::<TaskIndex>::new());
         assert!(sut.has_pending());
     }
 
@@ -816,6 +831,16 @@ mod tests {
     }
 
     #[test]
+    fn reports_whether_every_task_runs_in_a_sandbox() {
+        let sandboxed = || task("build", &[]).sandboxed(Some(SandboxPolicy::default()));
+        let all = Workflow::try_from(vec![sandboxed()]).unwrap();
+        let some = Workflow::try_from(vec![sandboxed(), task("test", &[])]).unwrap();
+
+        assert!(all.all_tasks_sandboxed());
+        assert!(!some.all_tasks_sandboxed());
+    }
+
+    #[test]
     fn rejects_a_placeholder_that_names_no_task_output() {
         let error = Workflow::try_from(vec![
             task("inspect", &[]),
@@ -856,7 +881,7 @@ mod tests {
             error,
             WorkflowError::OutputOfUnknownTask {
                 task: "review".parse().unwrap(),
-                source: "inspect".parse().unwrap(),
+                producer: "inspect".parse().unwrap(),
             }
         );
         assert_eq!(
@@ -878,7 +903,7 @@ mod tests {
             error,
             WorkflowError::OutputWithoutDependency {
                 task: "review".parse().unwrap(),
-                source: "inspect".parse().unwrap(),
+                producer: "inspect".parse().unwrap(),
             }
         );
         assert_eq!(
@@ -903,7 +928,7 @@ mod tests {
                 error,
                 WorkflowError::OutputWithoutDependency {
                     task: "review".parse().unwrap(),
-                    source: "inspect".parse().unwrap(),
+                    producer: "inspect".parse().unwrap(),
                 },
                 "{prompt}"
             );
@@ -921,6 +946,33 @@ mod tests {
                 dependency: "prepare".parse().unwrap(),
             }
         );
+    }
+
+    /// Dependencies resolve before the cycle check, and the cycle check runs
+    /// before any template is parsed.
+    #[test]
+    fn reports_a_dependency_error_before_a_cycle_or_a_template_error() {
+        let unknown = Workflow::try_from(vec![
+            prompt_task("review", &["inspect"], "{{ tasks.review.status }}"),
+            task("build", &["test"]),
+            task("test", &["build"]),
+        ])
+        .unwrap_err();
+        let cycle = Workflow::try_from(vec![
+            prompt_task("review", &[], "{{ tasks.review.status }}"),
+            task("build", &["test"]),
+            task("test", &["build"]),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            unknown,
+            WorkflowError::UnknownDependency {
+                task: "review".parse().unwrap(),
+                dependency: "inspect".parse().unwrap(),
+            }
+        );
+        assert!(matches!(cycle, WorkflowError::Cycle(_)), "{cycle:?}");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 
 use crate::task::TaskId;
 
@@ -20,13 +21,17 @@ impl TaskOutput {
             Self::Stderr => "stderr",
         }
     }
+}
 
-    /// The stream a placeholder names, if any.
-    fn from_name(name: &str) -> Option<Self> {
+impl FromStr for TaskOutput {
+    type Err = ();
+
+    /// The stream a placeholder names.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "stdout" => Some(Self::Stdout),
-            "stderr" => Some(Self::Stderr),
-            _ => None,
+            "stdout" => Ok(Self::Stdout),
+            "stderr" => Ok(Self::Stderr),
+            _ => Err(()),
         }
     }
 }
@@ -64,7 +69,7 @@ impl OutputReference {
         let (task, output) = path.rsplit_once('.')?;
         Some(Self {
             task: task.parse().ok()?,
-            output: TaskOutput::from_name(output)?,
+            output: output.parse().ok()?,
         })
     }
 }
@@ -76,7 +81,10 @@ impl fmt::Display for OutputReference {
 }
 
 /// Reports a placeholder that names no task output.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{placeholder} is not a task output; write {{{{ tasks.<id>.stdout }}}} or {{{{ tasks.<id>.stderr }}}}"
+)]
 pub struct TemplateError {
     placeholder: String,
 }
@@ -88,18 +96,6 @@ impl TemplateError {
         &self.placeholder
     }
 }
-
-impl fmt::Display for TemplateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} is not a task output; write {{{{ tasks.<id>.stdout }}}} or {{{{ tasks.<id>.stderr }}}}",
-            self.placeholder
-        )
-    }
-}
-
-impl std::error::Error for TemplateError {}
 
 /// Text that may read the output of other tasks.
 ///

@@ -10,6 +10,7 @@ description = "Cron expressions and one-time instants for beez"
 [dependencies]
 chrono.workspace = true
 cron = "0.17.0"
+thiserror.workspace = true
 
 [lints]
 workspace = true

@@ -4,8 +4,11 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use beez_daemon::{DaemonPaths, DaemonStatus, JobReport, Request, Response, RunLimits, Status};
-use beez_record::status_text;
+use anyhow::Context;
+use beez_daemon::{
+    Answer, Command, DaemonError, DaemonPaths, DaemonStatus, JobId, JobReport, RunLimits, Status,
+};
+use beez_record::TaskExit;
 use clap::{Args, Subcommand};
 
 /// Columns of the job table, in the order they are printed.
@@ -73,7 +76,7 @@ pub(crate) struct ManifestArgs {
 #[derive(Debug, Args)]
 pub(crate) struct JobArgs {
     /// Job ID, as `beez schedule list` prints it.
-    job: String,
+    job: JobId,
     #[command(flatten)]
     root: RootArgs,
 }
@@ -88,7 +91,7 @@ pub(crate) struct RootArgs {
 }
 
 impl RootArgs {
-    fn paths(&self) -> io::Result<DaemonPaths> {
+    fn paths(&self) -> Result<DaemonPaths, DaemonError> {
         match &self.root {
             Some(root) => Ok(DaemonPaths::new(root)),
             None => DaemonPaths::user(),
@@ -97,7 +100,7 @@ impl RootArgs {
 }
 
 /// Runs one `beez daemon` command.
-pub(crate) fn daemon(command: DaemonCommand) -> io::Result<i32> {
+pub(crate) fn daemon(command: DaemonCommand) -> anyhow::Result<i32> {
     match command {
         DaemonCommand::Run(run) => {
             beez_daemon::run(&run.root.paths()?, run.limits())?;
@@ -107,54 +110,34 @@ pub(crate) fn daemon(command: DaemonCommand) -> io::Result<i32> {
             &run.root.paths()?,
             run.limits(),
         )?)),
-        DaemonCommand::Stop(root) => send(&root, Request::Stop),
+        DaemonCommand::Stop(root) => send(&root, Command::Stop),
         DaemonCommand::Status(root) => report_jobs(&root),
-        DaemonCommand::Reload(root) => send(&root, Request::Reload),
+        DaemonCommand::Reload(root) => send(&root, Command::Reload),
     }
 }
 
 /// Runs one `beez schedule` command.
-pub(crate) fn schedule(command: ScheduleCommand) -> io::Result<i32> {
+pub(crate) fn schedule(command: ScheduleCommand) -> anyhow::Result<i32> {
     match command {
-        ScheduleCommand::Add(args) => Ok(answer(beez_daemon::add(
-            &args.root.paths()?,
-            &args.manifest,
-        )?)),
-        ScheduleCommand::Remove(args) => send(
-            &args.root,
-            Request::Remove {
-                manifest: args.manifest,
-            },
-        ),
+        ScheduleCommand::Add(args) => Ok(answer(
+            beez_daemon::add(&args.root.paths()?, &args.manifest)
+                .with_context(|| format!("cannot watch {}", args.manifest.display()))?,
+        )),
+        ScheduleCommand::Remove(args) => send(&args.root, Command::Remove(args.manifest)),
         ScheduleCommand::List(root) => report_jobs(&root),
-        ScheduleCommand::Trigger(args) => send(
-            &args.root,
-            Request::Trigger {
-                job: args.job.into(),
-            },
-        ),
-        ScheduleCommand::Pause(args) => send(
-            &args.root,
-            Request::Pause {
-                job: args.job.into(),
-            },
-        ),
-        ScheduleCommand::Resume(args) => send(
-            &args.root,
-            Request::Resume {
-                job: args.job.into(),
-            },
-        ),
+        ScheduleCommand::Trigger(args) => send(&args.root, Command::Trigger(args.job)),
+        ScheduleCommand::Pause(args) => send(&args.root, Command::Pause(args.job)),
+        ScheduleCommand::Resume(args) => send(&args.root, Command::Resume(args.job)),
     }
 }
 
 /// Gives one command, whether the daemon runs or not, and prints its answer.
-fn send(root: &RootArgs, request: Request) -> io::Result<i32> {
-    Ok(answer(beez_daemon::command(&root.paths()?, request)?))
+fn send(root: &RootArgs, command: Command) -> anyhow::Result<i32> {
+    Ok(answer(beez_daemon::command(&root.paths()?, command)?))
 }
 
 /// Prints the daemon and every job it holds.
-fn report_jobs(root: &RootArgs) -> io::Result<i32> {
+fn report_jobs(root: &RootArgs) -> anyhow::Result<i32> {
     let status = beez_daemon::status(&root.paths()?)?;
     let mut out = io::stdout().lock();
     unless_closed(write_status(&mut out, &status).and_then(|()| out.flush()))?;
@@ -166,19 +149,15 @@ fn report_jobs(root: &RootArgs) -> io::Result<i32> {
 ///
 /// The status stands even when the answer cannot be printed, since the
 /// command itself already happened.
-fn answer(response: Response) -> i32 {
-    match response {
-        Response::Done { message } => {
+fn answer(answer: Answer) -> i32 {
+    match answer {
+        Answer::Done(message) => {
             let _ = writeln!(io::stdout(), "{message}");
             0
         }
-        Response::Error { message } => {
+        Answer::Refused(message) => {
             let _ = writeln!(io::stderr(), "{message}");
             1
-        }
-        Response::Status(_) => {
-            let _ = writeln!(io::stderr(), "unexpected answer from the daemon");
-            2
         }
     }
 }
@@ -239,7 +218,7 @@ fn write_table(out: &mut impl Write, jobs: &[JobReport]) -> io::Result<()> {
 
 fn row(job: &JobReport) -> [String; 5] {
     [
-        job.id.clone(),
+        job.id.to_string(),
         job.condition.to_string(),
         or_dash(job.schedule.as_deref()),
         or_dash(job.next_fire.as_deref()),
@@ -254,7 +233,7 @@ fn last_run(job: &JobReport) -> String {
     match job.last_status {
         // No status means the run never reached its end, so there is none to name.
         None => format!("{directory} (unfinished)"),
-        status => format!("{directory} ({})", status_text(status)),
+        status => format!("{directory} ({})", TaskExit::from(status)),
     }
 }
 
@@ -264,11 +243,13 @@ fn or_dash(value: Option<&str>) -> String {
 }
 
 /// As wide as the longest value of each column, the heading included.
+///
+/// Widths count characters, as the padding of `write_row` does.
 fn widths(rows: &[[String; 5]]) -> [usize; 5] {
-    let mut widths = HEADINGS.map(str::len);
+    let mut widths = HEADINGS.map(|heading| heading.chars().count());
     for row in rows {
         for (width, value) in widths.iter_mut().zip(row) {
-            *width = (*width).max(value.len());
+            *width = (*width).max(value.chars().count());
         }
     }
 
@@ -287,4 +268,40 @@ fn write_row(out: &mut impl Write, row: &[String; 5], widths: &[usize; 5]) -> io
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use beez_daemon::{Condition, JobId, JobReport};
+
+    use super::write_table;
+
+    fn report(id: &str) -> JobReport {
+        JobReport {
+            id: JobId::from(id.to_owned()),
+            manifest: format!("/work/{id}.yaml"),
+            schedule: Some("0 3 * * *".to_owned()),
+            condition: Condition::Waiting,
+            next_fire: None,
+            last_fire: None,
+            last_run: None,
+            last_status: None,
+            error: None,
+        }
+    }
+
+    /// A column is as wide as the characters of its longest value, so a name
+    /// outside ASCII does not push the next column out of line.
+    #[test]
+    fn lines_up_the_columns_of_a_name_outside_ascii() {
+        let mut out = Vec::new();
+        write_table(&mut out, &[report("café-crème"), report("tea")]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let second_column: Vec<usize> = text
+            .lines()
+            .map(|line| line.chars().take_while(|c| *c != 'w' && *c != 'C').count())
+            .collect();
+
+        assert_eq!(second_column, [12, 12, 12], "{text}");
+    }
 }

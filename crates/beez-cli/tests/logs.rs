@@ -9,7 +9,7 @@ use std::process::Output;
 
 use beez_test_support::TemporaryDirectory;
 
-mod common;
+pub mod common;
 
 /// Runs `manifest` with `root` as the artifact directory.
 fn run_workflow(manifest: &Path, root: &Path, arguments: &[&str]) -> io::Result<Output> {
@@ -228,9 +228,8 @@ fn writes_nothing_when_the_run_asks_for_no_artifacts() {
 #[test]
 fn keeps_the_runs_of_a_repository_together() {
     let directory = TemporaryDirectory::new("logs-repository").unwrap();
-    fs::create_dir(directory.join(".git")).unwrap();
-    let deep = directory.join("crates/beez-cli");
-    fs::create_dir_all(&deep).unwrap();
+    directory.subdirectory(".git").unwrap();
+    let deep = directory.subdirectory("crates/beez-cli").unwrap();
     let manifest = directory
         .write(
             "workflow.yaml",

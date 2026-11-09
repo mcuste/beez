@@ -5,6 +5,7 @@ mod bubblewrap;
 mod diagnostic;
 #[cfg(target_os = "linux")]
 mod init;
+mod init_request;
 #[cfg(any(target_os = "linux", test))]
 mod mask_marker;
 mod proxy;
@@ -18,7 +19,10 @@ mod stream;
 
 pub use diagnostic::set_diagnostic_sink;
 #[cfg(target_os = "linux")]
-pub use init::{init, relay};
-pub use proxy::Proxy;
+pub use init::{InitError, init, relay};
+pub use init_request::{
+    EXEC_FLAG, ExecRestriction, InitRequest, RELAY_FLAG, UNRESTRICTED_EXEC_FLAG,
+};
+pub use proxy::{NetworkRules, Proxy};
 pub use relay::Relay;
-pub use sandbox::SandboxedCommand;
+pub use sandbox::{SandboxError, SandboxedCommand};

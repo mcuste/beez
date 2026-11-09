@@ -41,6 +41,13 @@ impl TemporaryDirectory {
         self.0.join(name)
     }
 
+    /// Creates `name` inside the directory, with any missing parents, and returns its path.
+    pub fn subdirectory(&self, name: &str) -> io::Result<PathBuf> {
+        let path = self.0.join(name);
+        fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+
     /// Writes `contents` to `name` inside the directory and returns its path.
     pub fn write(&self, name: &str, contents: impl AsRef<[u8]>) -> io::Result<PathBuf> {
         let path = self.0.join(name);

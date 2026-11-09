@@ -1,10 +1,47 @@
-use crate::{ExecutableGroup, GroupSelection, SandboxPath, extend};
+use std::fmt;
+use std::str::FromStr;
+
+use crate::{ExecutableGroup, GroupSelection, SandboxPath, SandboxPathError, extend};
 
 /// Which programs sandboxed processes may execute.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExecutablePolicy {
     groups: GroupSelection<ExecutableGroup>,
-    allow: Vec<SandboxPath>,
+    allow: Vec<ExecutableRule>,
+}
+
+/// A program an executable policy allows, by name or by path.
+///
+/// A rule without a directory separator, other than `~`, names a program to
+/// look up on `PATH`. Any other rule is a file or directory.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ExecutableRule {
+    /// A program name, looked up on `PATH` at launch.
+    Program(String),
+    /// A file, or a directory of files, that may execute.
+    Path(SandboxPath),
+}
+
+impl FromStr for ExecutableRule {
+    type Err = SandboxPathError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let path = value.parse::<SandboxPath>()?;
+        Ok(if path.is_bare_name() {
+            Self::Program(value.to_owned())
+        } else {
+            Self::Path(path)
+        })
+    }
+}
+
+impl fmt::Display for ExecutableRule {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Program(name) => formatter.write_str(name),
+            Self::Path(path) => path.fmt(formatter),
+        }
+    }
 }
 
 /// Tools most agent tasks need.
@@ -40,7 +77,7 @@ impl ExecutablePolicy {
 
     /// Sets the program names, files, or directories the policy adds.
     #[must_use]
-    pub fn with_allow(mut self, allow: Vec<SandboxPath>) -> Self {
+    pub fn with_allow(mut self, allow: Vec<ExecutableRule>) -> Self {
         self.allow = allow;
         self
     }
@@ -70,14 +107,23 @@ impl ExecutablePolicy {
 
     /// Program names, files, or directories that may run in addition to the groups.
     #[must_use]
-    pub fn allow(&self) -> &[SandboxPath] {
+    pub fn allow(&self) -> &[ExecutableRule] {
         &self.allow
+    }
+
+    /// Directories the programs of the granted groups need to write.
+    #[must_use]
+    pub fn state_paths(&self) -> Vec<SandboxPath> {
+        self.groups()
+            .into_iter()
+            .flat_map(ExecutableGroup::state_sandbox_paths)
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ExecutablePolicy;
+    use super::{ExecutablePolicy, ExecutableRule};
     use crate::ExecutableGroup;
 
     #[test]
@@ -147,6 +193,44 @@ mod tests {
                 ExecutableGroup::Net,
             ]
         );
-        assert_eq!(sut.allow(), Vec::<crate::SandboxPath>::new());
+        assert_eq!(sut.allow(), Vec::<ExecutableRule>::new());
+    }
+
+    #[test]
+    fn tells_program_names_from_paths() {
+        for (text, expected) in [
+            ("git", ExecutableRule::Program("git".into())),
+            ("~", ExecutableRule::Path("~".parse().unwrap())),
+            ("./git", ExecutableRule::Path("./git".parse().unwrap())),
+            (
+                "/usr/bin",
+                ExecutableRule::Path("/usr/bin".parse().unwrap()),
+            ),
+        ] {
+            let sut = text.parse::<ExecutableRule>().unwrap();
+
+            assert_eq!(sut, expected, "{text}");
+            assert_eq!(sut.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn rejects_an_empty_rule() {
+        assert_eq!(
+            "".parse::<ExecutableRule>(),
+            Err(crate::SandboxPathError::Empty)
+        );
+    }
+
+    #[test]
+    fn grants_the_state_paths_of_the_granted_groups() {
+        let sut = ExecutablePolicy::default()
+            .with_defaults(Some(false))
+            .with_groups(vec![ExecutableGroup::Rust, ExecutableGroup::Git]);
+
+        assert_eq!(
+            sut.state_paths(),
+            ["~/.cargo", "~/.rustup"].map(|text| text.parse::<crate::SandboxPath>().unwrap())
+        );
     }
 }

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 
 [dependencies]
+anyhow.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
 clap.workspace = true
@@ -24,6 +25,8 @@ beez-record.workspace = true
 beez-runner.workspace = true
 beez-sandbox.workspace = true
 beez-process.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 beez-schedule.workspace = true

@@ -15,14 +15,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::control::JobId;
-use crate::message::Watch;
+use crate::error::DaemonError;
+use crate::message::{self, Refusal, Watch};
 use crate::paths::DaemonPaths;
 
 /// Layout version of the files.
 const SCHEMA: u32 = 1;
 
 /// Reads both files of one daemon, treating a missing file as an empty one.
-pub(crate) fn load_all(paths: &DaemonPaths) -> io::Result<(Registry, States)> {
+pub(crate) fn load_all(paths: &DaemonPaths) -> Result<(Registry, States), DaemonError> {
     Ok((
         Registry::load(&paths.manifests())?,
         States::load(&paths.state())?,
@@ -35,6 +36,9 @@ pub(crate) fn load_all(paths: &DaemonPaths) -> io::Result<(Registry, States)> {
 pub(crate) struct Registry {
     schema: u32,
     manifests: Vec<Watched>,
+    /// The file the registry was read from, and is written to.
+    #[serde(skip)]
+    path: PathBuf,
 }
 
 /// One watched manifest and the directory its tasks run in.
@@ -51,14 +55,20 @@ impl Default for Registry {
         Self {
             schema: SCHEMA,
             manifests: Vec::new(),
+            path: PathBuf::new(),
         }
     }
 }
 
 impl Registry {
     /// Reads the registry, treating a missing file as an empty one.
-    pub(crate) fn load(path: &Path) -> io::Result<Self> {
-        load_json(path)
+    ///
+    /// The registry remembers `path`, so [`Registry::save`] writes it back.
+    pub(crate) fn load(path: &Path) -> Result<Self, DaemonError> {
+        let mut registry: Self = load_json(path)?;
+        registry.path = path.to_path_buf();
+
+        Ok(registry)
     }
 
     /// Every watched manifest.
@@ -96,9 +106,34 @@ impl Registry {
         before != self.manifests.len()
     }
 
-    /// Writes the registry.
-    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
-        save_json(path, self)
+    /// Writes the registry to the file it was read from.
+    pub(crate) fn save(&self) -> io::Result<()> {
+        save_json(&self.path, self)
+    }
+
+    /// Adds a manifest to the list and writes the list.
+    ///
+    /// Answers with the manifest, and whether the daemon is new to it. A
+    /// command takes effect with or without a running daemon, and both paths
+    /// change the list through here, so they answer in the same words.
+    pub(crate) fn watch(&mut self, watched: Watched) -> io::Result<String> {
+        let path = watched.path.clone();
+        let watch = self.add(watched);
+        self.save()?;
+
+        Ok(message::watching(&path, watch))
+    }
+
+    /// Removes a manifest from the list and writes the list.
+    ///
+    /// Refuses a manifest that was not watched.
+    pub(crate) fn unwatch(&mut self, manifest: &Path) -> io::Result<Result<String, Refusal>> {
+        if !self.remove(manifest) {
+            return Ok(Err(Refusal::NotWatched(manifest.to_path_buf())));
+        }
+        self.save()?;
+
+        Ok(Ok(message::stopped_watching(manifest)))
     }
 }
 
@@ -108,6 +143,9 @@ impl Registry {
 pub(crate) struct States {
     schema: u32,
     jobs: BTreeMap<JobId, JobState>,
+    /// The file the state was read from, and is written to.
+    #[serde(skip)]
+    path: PathBuf,
 }
 
 /// What already happened to one job.
@@ -132,14 +170,20 @@ impl Default for States {
         Self {
             schema: SCHEMA,
             jobs: BTreeMap::new(),
+            path: PathBuf::new(),
         }
     }
 }
 
 impl States {
     /// Reads the state, treating a missing file as an empty one.
-    pub(crate) fn load(path: &Path) -> io::Result<Self> {
-        load_json(path)
+    ///
+    /// The state remembers `path`, so [`States::save`] writes it back.
+    pub(crate) fn load(path: &Path) -> Result<Self, DaemonError> {
+        let mut states: Self = load_json(path)?;
+        states.path = path.to_path_buf();
+
+        Ok(states)
     }
 
     /// The state of one job, or the default for a job that never ran.
@@ -151,6 +195,23 @@ impl States {
     /// Replaces the state of one job.
     pub(crate) fn set(&mut self, job: &JobId, state: JobState) {
         self.jobs.insert(job.clone(), state);
+    }
+
+    /// Replaces the state of one job and writes the state.
+    pub(crate) fn record(&mut self, job: &JobId, state: JobState) -> io::Result<()> {
+        self.set(job, state);
+        self.save()
+    }
+
+    /// Changes the state of one job and writes the state.
+    pub(crate) fn update(
+        &mut self,
+        job: &JobId,
+        change: impl FnOnce(&mut JobState),
+    ) -> io::Result<()> {
+        let mut state = self.get(job);
+        change(&mut state);
+        self.record(job, state)
     }
 
     /// Drops the state of every job no manifest of `registry` may hold, and
@@ -178,27 +239,30 @@ impl States {
         before != self.jobs.len()
     }
 
-    /// Writes the state.
-    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
-        save_json(path, self)
+    /// Writes the state to the file it was read from.
+    pub(crate) fn save(&self) -> io::Result<()> {
+        save_json(&self.path, self)
     }
 }
 
-fn load_json<T: DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
+fn load_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, DaemonError> {
     let source = match fs::read_to_string(path) {
         Ok(source) => source,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
 
-    serde_json::from_str(&source).map_err(io::Error::other)
+    serde_json::from_str(&source).map_err(|source| DaemonError::Unreadable {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Writes a file in one step, so a stopped daemon never leaves half a file.
 pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let temporary = path.with_extension("writing");
     let mut file = File::create(&temporary)?;
-    serde_json::to_writer_pretty(&mut file, value).map_err(io::Error::other)?;
+    serde_json::to_writer_pretty(&mut file, value)?;
     writeln!(file)?;
     file.sync_all()?;
     drop(file);
@@ -240,7 +304,8 @@ pub(crate) mod testing {
         );
         let single =
             format!("schedule:\n  cron: \"0 3 1 * *\"\n  allow_unsandboxed: true\n{TASKS}");
-        let mut registry = Registry::default();
+        paths.create().unwrap();
+        let mut registry = Registry::load(&paths.manifests()).unwrap();
         let mut weekly = PathBuf::new();
         for (file, text) in [
             ("nightly.yaml", broken),
@@ -256,13 +321,12 @@ pub(crate) mod testing {
                 working_directory: directory.path().to_path_buf(),
             });
         }
-        let mut states = States::default();
+        let mut states = States::load(&paths.state()).unwrap();
         for id in ["nightly:docs", "weekly", "weekly:a", "monthly"] {
             states.set(&id_of(id), paused());
         }
-        paths.create().unwrap();
-        registry.save(&paths.manifests()).unwrap();
-        states.save(&paths.state()).unwrap();
+        registry.save().unwrap();
+        states.save().unwrap();
 
         Watching { weekly }
     }
@@ -297,7 +361,7 @@ mod instant {
 
     use std::time::SystemTime;
 
-    use beez_schedule::{format_instant, parse_instant};
+    use beez_schedule::{Utc, parse_instant};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S: Serializer>(
@@ -305,7 +369,7 @@ mod instant {
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match time.as_ref() {
-            Some(time) => serializer.serialize_str(&format_instant(*time)),
+            Some(time) => serializer.collect_str(&Utc(*time)),
             None => serializer.serialize_none(),
         }
     }
@@ -356,7 +420,7 @@ mod tests {
     fn writes_the_layout_version_of_a_new_file() {
         let directory = TemporaryDirectory::new("daemon-store-schema").unwrap();
         let path = directory.join("state.json");
-        States::default().save(&path).unwrap();
+        States::load(&path).unwrap().save().unwrap();
 
         assert!(
             std::fs::read_to_string(&path)
@@ -385,17 +449,18 @@ mod tests {
     fn writes_and_reads_the_state_of_a_job() {
         let directory = TemporaryDirectory::new("daemon-store-state").unwrap();
         let path = directory.join("state.json");
-        let mut states = States::default();
-        states.set(
-            &id("nightly"),
-            JobState {
-                paused: true,
-                last_fire: Some(parse_instant("2026-09-10T03:00:00Z").unwrap()),
-                last_run: Some("20260910T030000000Z-11".to_owned()),
-                last_status: Some(0),
-            },
-        );
-        states.save(&path).unwrap();
+        let mut states = States::load(&path).unwrap();
+        states
+            .record(
+                &id("nightly"),
+                JobState {
+                    paused: true,
+                    last_fire: Some(parse_instant("2026-09-10T03:00:00Z").unwrap()),
+                    last_run: Some("20260910T030000000Z-11".to_owned()),
+                    last_status: Some(0),
+                },
+            )
+            .unwrap();
 
         let read = States::load(&path).unwrap().get(&id("nightly"));
 
@@ -405,6 +470,20 @@ mod tests {
             read.last_fire,
             Some(parse_instant("2026-09-10T03:00:00Z").unwrap())
         );
+    }
+
+    #[test]
+    fn changes_the_state_of_one_job_and_writes_it_where_it_was_read() {
+        let directory = TemporaryDirectory::new("daemon-store-update").unwrap();
+        let path = directory.join("state.json");
+        let mut states = States::load(&path).unwrap();
+
+        states
+            .update(&id("nightly"), |state| state.paused = true)
+            .unwrap();
+
+        assert!(states.get(&id("nightly")).paused);
+        assert!(States::load(&path).unwrap().get(&id("nightly")).paused);
     }
 
     #[test]

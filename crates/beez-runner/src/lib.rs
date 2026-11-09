@@ -2,4 +2,4 @@
 
 mod runner;
 
-pub use runner::{RunEvent, Runner};
+pub use runner::{RunError, RunEvent, Runner};

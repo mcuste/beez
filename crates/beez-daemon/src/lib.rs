@@ -6,11 +6,12 @@
 //! happened, and it reads a manifest again every time the file changes and
 //! every time a job fires.
 
-mod apply;
 mod client;
 mod control;
 mod daemon;
+mod error;
 mod job;
+mod job_set;
 mod message;
 mod paths;
 mod prune;
@@ -19,8 +20,9 @@ mod run;
 mod start;
 mod store;
 
-pub use client::{Status, add, command, status};
-pub use control::{Condition, DaemonStatus, JobId, JobReport, Request, Response, is_running};
+pub use client::{Answer, Command, Status, add, command, status};
+pub use control::{Condition, DaemonStatus, JobId, JobReport, is_running};
 pub use daemon::{DEFAULT_KEPT_RUNS, DEFAULT_RUN_LIMIT, RunLimits, run};
+pub use error::DaemonError;
 pub use paths::DaemonPaths;
 pub use start::start;

@@ -10,11 +10,8 @@ mod recorder;
 mod tally;
 mod time;
 
-pub use format::{
-    Labels, VERB_WIDTH, seconds, stamped_status_line, status_text, stream_mark, trim_newline,
-};
+pub use format::{Labels, VERB_WIDTH, seconds, stamped_status_line, stream_mark, trim_newline};
 pub use log::{LogSettings, RUNS, RunRecorder, RunTarget, ignore_everything, is_run_name};
-pub use outcome::{TaskOutcome, TaskState};
-pub use recorder::OpenLog;
-pub use tally::RunTally;
+pub use outcome::{TaskExit, TaskOutcome, TaskState};
+pub use recorder::{LogFailure, OpenLog};
 pub use time::utc;

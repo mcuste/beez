@@ -18,10 +18,11 @@ pub fn utc(time: SystemTime) -> String {
 ///
 /// The stamp sorts by name in the order the runs happened.
 pub(crate) fn compact_utc(time: SystemTime) -> String {
-    DateTime::<Utc>::from(time)
-        .format("%Y%m%dT%H%M%S%3fZ")
-        .to_string()
+    DateTime::<Utc>::from(time).format(COMPACT_UTC).to_string()
 }
+
+/// The format of [`compact_utc`].
+pub(crate) const COMPACT_UTC: &str = "%Y%m%dT%H%M%S%3fZ";
 
 #[cfg(test)]
 mod tests {

@@ -11,6 +11,8 @@ description = "Runs the tasks of a beez workflow in dependency order"
 beez-core.workspace = true
 beez-policy.workspace = true
 beez-process.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 beez-test-support.workspace = true

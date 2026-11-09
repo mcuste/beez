@@ -9,54 +9,45 @@ const MULTI_PROVIDER_GROUPS: [DomainGroup; 4] = [
 ];
 
 /// What a harness needs from the sandbox to run at all.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HarnessProfile {
-    required_domain_groups: &'static [DomainGroup],
-    default_domain_groups: &'static [DomainGroup],
-    state_paths: Vec<SandboxPath>,
-    environment: &'static [(&'static str, &'static str)],
-}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HarnessProfile(HeadlessHarness);
 
 impl HarnessProfile {
     /// The profile of a supported harness.
     #[must_use]
-    pub fn for_harness(harness: HeadlessHarness) -> Self {
-        let (required_domain_groups, default_domain_groups) = match harness {
-            HeadlessHarness::Claude => (&[DomainGroup::Anthropic][..], &[][..]),
-            HeadlessHarness::Codex => (&[DomainGroup::OpenAi][..], &[][..]),
-            HeadlessHarness::Pi | HeadlessHarness::Omp => (&[][..], &MULTI_PROVIDER_GROUPS[..]),
-        };
-
-        Self {
-            required_domain_groups,
-            default_domain_groups,
-            state_paths: state_group(harness).sandbox_paths(),
-            environment: environment(harness),
-        }
+    pub const fn for_harness(harness: HeadlessHarness) -> Self {
+        Self(harness)
     }
 
     /// Domain groups the harness cannot run without.
     #[must_use]
-    pub fn required_domain_groups(&self) -> &[DomainGroup] {
-        self.required_domain_groups
+    pub fn required_domain_groups(self) -> &'static [DomainGroup] {
+        match self.0 {
+            HeadlessHarness::Claude => &[DomainGroup::Anthropic],
+            HeadlessHarness::Codex => &[DomainGroup::OpenAi],
+            HeadlessHarness::Pi | HeadlessHarness::Omp => &[],
+        }
     }
 
     /// Domain groups the harness may use, which a task can disable.
     #[must_use]
-    pub fn default_domain_groups(&self) -> &[DomainGroup] {
-        self.default_domain_groups
+    pub fn default_domain_groups(self) -> &'static [DomainGroup] {
+        match self.0 {
+            HeadlessHarness::Claude | HeadlessHarness::Codex => &[],
+            HeadlessHarness::Pi | HeadlessHarness::Omp => &MULTI_PROVIDER_GROUPS,
+        }
     }
 
     /// Paths the harness reads and writes for its own configuration and state.
     #[must_use]
-    pub fn state_paths(&self) -> &[SandboxPath] {
-        &self.state_paths
+    pub fn state_paths(self) -> Vec<SandboxPath> {
+        state_group(self.0).sandbox_paths()
     }
 
     /// Environment variables that keep the harness working inside the sandbox.
     #[must_use]
-    pub fn environment(&self) -> &[(&'static str, &'static str)] {
-        self.environment
+    pub fn environment(self) -> &'static [(&'static str, &'static str)] {
+        environment(self.0)
     }
 }
 

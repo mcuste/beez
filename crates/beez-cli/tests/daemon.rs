@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use beez_test_support::TemporaryDirectory;
 
-mod common;
+pub mod common;
 
 /// Longest a test waits for the daemon to reach a state.
 const LIMIT: Duration = Duration::from_secs(20);
@@ -30,20 +30,13 @@ fn ticking(schedule: &str, marker: &Path) -> String {
 }
 
 fn beez(root: &Path, arguments: &[&str]) -> io::Result<Output> {
-    common::beez()
-        .args(arguments)
-        .arg("--root")
-        .arg(root)
-        .output()
+    common::beez_at_root(root, arguments).output()
 }
 
 /// Watches one manifest, whether or not a daemon runs.
 fn add(root: &Path, path: &Path) -> io::Result<Output> {
-    common::beez()
-        .args(["schedule", "add"])
+    common::beez_at_root(root, &["schedule", "add"])
         .arg(path)
-        .arg("--root")
-        .arg(root)
         .output()
 }
 
@@ -57,7 +50,7 @@ fn nightly_in(
     subdirectory: &str,
     marker: &Path,
 ) -> io::Result<PathBuf> {
-    fs::create_dir(directory.join(subdirectory))?;
+    directory.subdirectory(subdirectory)?;
     directory.write(
         &format!("{subdirectory}/nightly.yaml"),
         ticking("  cron: \"0 3 * * *\"\n", marker),
@@ -289,7 +282,7 @@ fn fires_a_one_time_schedule_once() {
     let daemon = start(&root).unwrap();
     // Watching a manifest takes a process start and a round trip to the
     // daemon, so the fire time is set only once the daemon lists the job.
-    let later = beez_schedule::format_instant(std::time::SystemTime::now() + LIMIT);
+    let later = beez_schedule::Utc(std::time::SystemTime::now() + LIMIT).to_string();
     let path = directory
         .write(
             "once.yaml",
@@ -302,7 +295,7 @@ fn fires_a_one_time_schedule_once() {
     })
     .unwrap();
 
-    let at = beez_schedule::format_instant(std::time::SystemTime::now() + LEAD);
+    let at = beez_schedule::Utc(std::time::SystemTime::now() + LEAD).to_string();
     fs::write(&path, ticking(&format!("  at: \"{at}\"\n"), &marker)).unwrap();
     // The daemon reads a changed manifest when it wakes, and a command wakes it.
     wait_for(&root, "read the new fire time", || {
@@ -330,7 +323,7 @@ fn runs_a_fire_it_missed_only_when_the_schedule_asks_for_it() {
     let root = directory.join("root");
     let marker = directory.join("marker");
     // The fire is already past, so it is missed as soon as the daemon starts.
-    let at = beez_schedule::format_instant(std::time::SystemTime::now() - Duration::from_mins(1));
+    let at = beez_schedule::Utc(std::time::SystemTime::now() - Duration::from_mins(1)).to_string();
     let missed = directory
         .write(
             "missed.yaml",
@@ -502,11 +495,7 @@ fn removes_the_oldest_runs_when_the_root_holds_too_many() {
         fs::create_dir_all(root.join("runs").join(name)).unwrap();
     }
 
-    let daemon = common::beez()
-        .args(["daemon", "start", "--keep-runs", "1", "--root"])
-        .arg(&root)
-        .output()
-        .unwrap();
+    let daemon = beez(&root, &["daemon", "start", "--keep-runs", "1"]).unwrap();
     wait_for(&root, "swept the runs", || runs(&root) == 1).unwrap();
     let _ = stop(&root);
 

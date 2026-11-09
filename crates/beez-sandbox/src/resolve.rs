@@ -5,8 +5,11 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use beez_policy::{
-    DomainRule, ExecutableGroup, HarnessProfile, HeadlessHarness, SandboxPath, SandboxPolicy,
+    ExecutableGroup, ExecutablePolicy, ExecutableRule, HarnessProfile, HeadlessHarness,
+    SandboxPath, SandboxPolicy,
 };
+
+use crate::NetworkRules;
 
 /// Programs every harness needs to run its own tools.
 const HARNESS_PROGRAMS: [&str; 7] = ["sh", "bash", "zsh", "env", "node", "bun", "rg"];
@@ -28,8 +31,7 @@ const MACOS_TOOLCHAIN_DIRECTORIES: [&str; 2] = [
 /// A policy turned into absolute host paths and concrete host rules.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedSandbox {
-    pub(crate) allowed_domains: Vec<DomainRule>,
-    pub(crate) localhost: bool,
+    pub(crate) network: NetworkRules,
     pub(crate) read_deny: PathSet,
     pub(crate) write_allow: PathSet,
     pub(crate) write_deny: PathSet,
@@ -54,6 +56,10 @@ impl ResolvedSandbox {
         home: &Path,
     ) -> io::Result<Self> {
         let working_directory = fs::canonicalize(working_directory)?;
+        let anchors = Anchors {
+            home,
+            working_directory: &working_directory,
+        };
         let profile = harness.map(HarnessProfile::for_harness);
         let program = locate_program(program, &working_directory).ok_or_else(|| {
             io::Error::new(
@@ -63,41 +69,25 @@ impl ResolvedSandbox {
         })?;
 
         let filesystem = policy.filesystem();
-        let read_deny = existing(&filesystem.read_deny(), home, &working_directory);
-        let mut write_allow = existing(
-            &filesystem.write_allow(profile.as_ref()),
-            home,
-            &working_directory,
-        );
-        if filesystem.defaults() {
+        let read_deny = anchors.existing(&filesystem.read_deny());
+        let mut write_allow = anchors.existing(&filesystem.write_allow(profile));
+        if filesystem.writes_temporary_directory() {
             write_allow.extend(fs::canonicalize(std::env::temp_dir()));
         }
         let write_deny = filesystem
             .write_deny()
             .iter()
-            .map(|path| canonicalize_lenient(&path.resolve(home, &working_directory)))
+            .map(|path| anchors.lenient(path))
             .collect();
 
         let execution = policy
             .executables()
             .map_or(Execution::Unrestricted, |executables| {
-                let groups = executables.groups();
-                let state_paths = groups
-                    .iter()
-                    .flat_map(|group| group.state_sandbox_paths())
-                    .collect::<Vec<_>>();
-                write_allow.extend(existing(&state_paths, home, &working_directory));
-                Execution::Only(resolve_executables(
-                    &groups,
-                    executables.allow(),
-                    &program,
-                    home,
-                    &working_directory,
-                ))
+                write_allow.extend(anchors.existing(&executables.state_paths()));
+                Execution::Only(resolve_executables(executables, &program, &anchors))
             });
 
         let environment = profile
-            .as_ref()
             .map(HarnessProfile::environment)
             .unwrap_or_default()
             .iter()
@@ -105,8 +95,10 @@ impl ResolvedSandbox {
             .collect();
 
         Ok(Self {
-            allowed_domains: policy.network().allowed_domains(profile.as_ref()),
-            localhost: policy.network().localhost(),
+            network: NetworkRules {
+                domains: policy.network().allowed_domains(profile),
+                localhost: policy.network().localhost(),
+            },
             read_deny,
             write_allow,
             write_deny,
@@ -115,6 +107,39 @@ impl ResolvedSandbox {
             working_directory,
             program,
         })
+    }
+
+    /// Traces a summary of the resolved policy, and every path at `trace`.
+    pub(crate) fn trace(&self) {
+        let domains = self
+            .network
+            .domains
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let executables = match &self.execution {
+            Execution::Unrestricted => None,
+            Execution::Only(allowlist) => Some(allowlist.iter().count()),
+        };
+        tracing::debug!(
+            program = %self.program.display(),
+            cwd = %self.working_directory.display(),
+            %domains,
+            localhost = self.network.localhost,
+            read_deny = self.read_deny.iter().count(),
+            write_allow = self.write_allow.iter().count(),
+            write_deny = self.write_deny.iter().count(),
+            executables = ?executables,
+            "resolved sandbox policy"
+        );
+        tracing::trace!(
+            read_deny = ?self.read_deny,
+            write_allow = ?self.write_allow,
+            write_deny = ?self.write_deny,
+            execution = ?self.execution,
+            "resolved sandbox paths"
+        );
     }
 
     /// The canonical path of the program to run.
@@ -127,7 +152,7 @@ impl ResolvedSandbox {
     pub(crate) fn inside_write_allow(&self, path: &Path) -> bool {
         self.write_allow
             .iter()
-            .any(|allowed| path.starts_with(allowed) && path != allowed.as_path())
+            .any(|allowed| strictly_inside(path, allowed))
     }
 
     /// Parents of write-denied paths that sit inside a writable directory.
@@ -143,6 +168,11 @@ impl ResolvedSandbox {
             .map(Path::to_path_buf)
             .collect()
     }
+}
+
+/// True when `path` lies below `directory`, and is not `directory` itself.
+pub(crate) fn strictly_inside(path: &Path, directory: &Path) -> bool {
+    path.starts_with(directory) && path != directory
 }
 
 /// Paths in sorted order, each once.
@@ -237,6 +267,12 @@ impl ExecAllowlist {
     }
 }
 
+impl Extend<PathBuf> for ExecAllowlist {
+    fn extend<I: IntoIterator<Item = PathBuf>>(&mut self, paths: I) {
+        self.0.extend(paths);
+    }
+}
+
 impl<'a> IntoIterator for &'a ExecAllowlist {
     type Item = &'a PathBuf;
     type IntoIter = btree_set::Iter<'a, PathBuf>;
@@ -246,17 +282,32 @@ impl<'a> IntoIterator for &'a ExecAllowlist {
     }
 }
 
-/// Canonical paths of the rules that exist on this host.
-fn existing(paths: &[SandboxPath], home: &Path, working_directory: &Path) -> PathSet {
-    paths
-        .iter()
-        .filter_map(|path| canonical(path, home, working_directory))
-        .collect()
+/// The directories a rule path is relative to.
+struct Anchors<'a> {
+    /// What `~` stands for.
+    home: &'a Path,
+    /// What a relative path starts from.
+    working_directory: &'a Path,
 }
 
-/// The canonical path of one rule, when it exists on this host.
-fn canonical(path: &SandboxPath, home: &Path, working_directory: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path.resolve(home, working_directory)).ok()
+impl Anchors<'_> {
+    /// The canonical path of one rule, when it exists on this host.
+    fn canonical(&self, path: &SandboxPath) -> Option<PathBuf> {
+        fs::canonicalize(path.resolve(self.home, self.working_directory)).ok()
+    }
+
+    /// Canonical paths of the rules that exist on this host.
+    fn existing(&self, paths: &[SandboxPath]) -> PathSet {
+        paths
+            .iter()
+            .filter_map(|path| self.canonical(path))
+            .collect()
+    }
+
+    /// The path of one rule, canonical as far as it exists on this host.
+    fn lenient(&self, path: &SandboxPath) -> PathBuf {
+        canonicalize_lenient(&path.resolve(self.home, self.working_directory))
+    }
 }
 
 /// Canonicalizes the longest existing prefix and appends the rest unchanged.
@@ -326,34 +377,27 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// Every file or directory the execute allowlist must cover.
 fn resolve_executables(
-    groups: &[ExecutableGroup],
-    allow: &[SandboxPath],
+    executables: &ExecutablePolicy,
     program: &Path,
-    home: &Path,
-    working_directory: &Path,
+    anchors: &Anchors<'_>,
 ) -> ExecAllowlist {
-    let mut paths = BTreeSet::new();
-    paths.insert(program.to_path_buf());
+    let groups = executables.groups();
+    let mut paths = ExecAllowlist::new(program.to_path_buf(), []);
 
-    let names = HARNESS_PROGRAMS
+    let mut names = HARNESS_PROGRAMS
         .iter()
         .chain(groups.iter().flat_map(|group| group.programs().iter()))
         .map(Path::new)
-        .chain(
-            allow
-                .iter()
-                .filter(|path| path.is_bare_name())
-                .map(|path| Path::new(path.as_str())),
-        );
+        .collect::<Vec<_>>();
+    for rule in executables.allow() {
+        match rule {
+            ExecutableRule::Program(name) => names.push(Path::new(name)),
+            ExecutableRule::Path(path) => paths.extend(anchors.canonical(path)),
+        }
+    }
     for name in names {
         paths.extend(program_locations(name));
     }
-    paths.extend(
-        allow
-            .iter()
-            .filter(|path| !path.is_bare_name())
-            .filter_map(|path| canonical(path, home, working_directory)),
-    );
 
     if groups.contains(&ExecutableGroup::Git) {
         let git_binaries = paths
@@ -377,7 +421,7 @@ fn resolve_executables(
     #[cfg(target_os = "linux")]
     paths.extend(dynamic_loaders());
 
-    ExecAllowlist::new(program.to_path_buf(), paths)
+    paths
 }
 
 /// The dynamic loaders on this host.
@@ -512,25 +556,13 @@ mod tests {
     /// An empty working directory and the home directory beside it.
     fn host(name: &str) -> (TemporaryDirectory, PathBuf, PathBuf) {
         let directory = TemporaryDirectory::new(name).unwrap();
-        let work = directory.join("work");
-        let home = directory.join("home");
-        fs::create_dir(&work).unwrap();
-        fs::create_dir(&home).unwrap();
+        let work = directory.subdirectory("work").unwrap();
+        let home = directory.subdirectory("home").unwrap();
         (directory, work, home)
     }
 
     fn resolve(policy: &SandboxPolicy, work: &Path, home: &Path) -> ResolvedSandbox {
         ResolvedSandbox::resolve(policy, None, Path::new("bash"), work, home).unwrap()
-    }
-
-    /// Writes an executable file with `contents` and returns its path.
-    fn program(directory: &Path, name: &str, contents: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = directory.join(name);
-        fs::write(&path, contents).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
     }
 
     #[test]
@@ -661,7 +693,7 @@ mod tests {
         let sut = resolve(&policy(&[], &[&text(&work)], &[], None), &work, &home);
 
         assert_eq!(sut.environment, Vec::<(OsString, OsString)>::new());
-        assert_eq!(sut.allowed_domains, Vec::<beez_policy::DomainRule>::new());
+        assert_eq!(sut.network, crate::NetworkRules::default());
     }
 
     #[test]
@@ -675,8 +707,10 @@ mod tests {
 
     #[test]
     fn always_allows_the_program_itself() {
-        let (_directory, work, home) = host("resolve-program");
-        let tool = program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
+        let (directory, work, home) = host("resolve-program");
+        let tool = directory
+            .executable("work/tool.sh", "#!/bin/sh\nexit 0\n")
+            .unwrap();
         let executables = ExecutablePolicy::default().with_defaults(Some(false));
         let policy = policy(&[], &[&text(&work)], &[], Some(executables));
 
@@ -696,8 +730,10 @@ mod tests {
 
     #[test]
     fn allows_the_interpreter_a_shebang_names() {
-        let (_directory, work, home) = host("resolve-shebang");
-        program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
+        let (directory, work, home) = host("resolve-shebang");
+        directory
+            .executable("work/tool.sh", "#!/bin/sh\nexit 0\n")
+            .unwrap();
         let executables = ExecutablePolicy::default().with_defaults(Some(false));
         let policy = policy(&[], &[&text(&work)], &[], Some(executables));
 
@@ -748,10 +784,11 @@ mod tests {
 
     #[test]
     fn resolves_a_relative_program_against_the_working_directory() {
-        let (_directory, work, home) = host("resolve-relative");
-        let nested = work.join("bin");
-        fs::create_dir(&nested).unwrap();
-        let tool = program(&nested, "tool.sh", "#!/bin/sh\nexit 0\n");
+        let (directory, work, home) = host("resolve-relative");
+        directory.subdirectory("work/bin").unwrap();
+        let tool = directory
+            .executable("work/bin/tool.sh", "#!/bin/sh\nexit 0\n")
+            .unwrap();
         let policy = policy(&[], &[&text(&work)], &[], None);
 
         let sut = ResolvedSandbox::resolve(&policy, None, Path::new("bin/tool.sh"), &work, &home)
@@ -762,8 +799,10 @@ mod tests {
 
     #[test]
     fn rejects_a_bare_program_name_that_is_not_on_path() {
-        let (_directory, work, home) = host("resolve-missing-program");
-        program(&work, "tool.sh", "#!/bin/sh\nexit 0\n");
+        let (directory, work, home) = host("resolve-missing-program");
+        directory
+            .executable("work/tool.sh", "#!/bin/sh\nexit 0\n")
+            .unwrap();
         let policy = policy(&[], &[&text(&work)], &[], None);
 
         let error = ResolvedSandbox::resolve(&policy, None, Path::new("tool.sh"), &work, &home)
@@ -788,9 +827,9 @@ mod tests {
     fn finds_the_git_helper_directories_next_to_the_binary() {
         let directory = TemporaryDirectory::new("resolve-git").unwrap();
         let prefix = directory.join("usr");
-        fs::create_dir_all(prefix.join("libexec/git-core")).unwrap();
-        fs::create_dir_all(prefix.join("lib/git-core")).unwrap();
-        fs::create_dir_all(prefix.join("bin")).unwrap();
+        for name in ["usr/libexec/git-core", "usr/lib/git-core", "usr/bin"] {
+            directory.subdirectory(name).unwrap();
+        }
 
         let helpers = git_helper_directories(&prefix.join("bin/git"));
 

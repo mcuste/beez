@@ -8,4 +8,6 @@ mod runner;
 pub use execution::ExecutionRequest;
 pub use harness::HarnessCall;
 pub use process_call::ProcessCall;
-pub use runner::{OutputSink, OutputStream, ProcessOutput, ProcessRunner};
+pub use runner::{
+    Cancellation, OutputSink, OutputStream, ProcessError, ProcessOutput, ProcessRunner,
+};

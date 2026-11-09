@@ -1,12 +1,13 @@
 //! Starts the daemon in the background.
 
-use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::control::{self, Response};
+use crate::client::Answer;
+use crate::control;
 use crate::daemon::RunLimits;
+use crate::error::DaemonError;
 use crate::message;
 use crate::paths::DaemonPaths;
 
@@ -20,9 +21,9 @@ const ATTEMPTS: usize = 50;
 ///
 /// The arguments are read back by Beez's own `daemon run` command, so their
 /// names must match its options.
-pub fn start(paths: &DaemonPaths, limits: RunLimits) -> io::Result<Response> {
+pub fn start(paths: &DaemonPaths, limits: RunLimits) -> Result<Answer, DaemonError> {
     if control::is_running(paths.socket()) {
-        return Ok(Response::error(message::already_running(paths.root())));
+        return Ok(Answer::Refused(message::already_running(paths.root())));
     }
     paths.create()?;
     let log = std::fs::File::options()
@@ -44,7 +45,7 @@ pub fn start(paths: &DaemonPaths, limits: RunLimits) -> io::Result<Response> {
 
     for _ in 0..ATTEMPTS {
         if control::is_running(paths.socket()) {
-            return Ok(Response::done(format!(
+            return Ok(Answer::Done(format!(
                 "daemon started, pid {}, writing to {}",
                 child.id(),
                 paths.log().display()
@@ -53,7 +54,7 @@ pub fn start(paths: &DaemonPaths, limits: RunLimits) -> io::Result<Response> {
         std::thread::sleep(WAIT);
     }
 
-    Ok(Response::error(format!(
+    Ok(Answer::Refused(format!(
         "the daemon did not answer on {}, see {}",
         paths.socket().display(),
         paths.log().display()

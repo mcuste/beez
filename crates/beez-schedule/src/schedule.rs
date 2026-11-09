@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::SystemTime;
 
 use crate::cron_schedule::CronSchedule;
-use crate::instant::format_instant;
+use crate::instant::Utc;
 
 /// When a job runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,7 +39,7 @@ impl fmt::Display for Schedule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cron(schedule) => schedule.fmt(formatter),
-            Self::Once(instant) => formatter.write_str(&format_instant(*instant)),
+            Self::Once(instant) => Utc(*instant).fmt(formatter),
         }
     }
 }
@@ -48,7 +48,7 @@ impl fmt::Display for Schedule {
 mod tests {
     use super::Schedule;
     use crate::cron_schedule::CronSchedule;
-    use crate::instant::{format_instant, parse_instant};
+    use crate::instant::{Utc, parse_instant};
     use crate::offset::UtcOffset;
 
     fn instant(value: &str) -> std::time::SystemTime {
@@ -65,7 +65,7 @@ mod tests {
 
         let next = sut.next_after(instant("2026-09-09T00:00:00Z")).unwrap();
 
-        assert_eq!(format_instant(next), "2026-09-10T03:00:00Z");
+        assert_eq!(Utc(next).to_string(), "2026-09-10T03:00:00Z");
         assert_eq!(sut.next_after(next), None, "the schedule already fired");
     }
 
@@ -75,9 +75,9 @@ mod tests {
 
         let next = sut.next_after(instant("2026-09-09T00:00:00Z")).unwrap();
 
-        assert_eq!(format_instant(next), "2026-09-09T03:00:00Z");
+        assert_eq!(Utc(next).to_string(), "2026-09-09T03:00:00Z");
         assert_eq!(
-            format_instant(sut.next_after(next).unwrap()),
+            Utc(sut.next_after(next).unwrap()).to_string(),
             "2026-09-10T03:00:00Z"
         );
     }

@@ -9,7 +9,7 @@ use std::process::{Command, Output, Stdio};
 
 use beez_test_support::TemporaryDirectory;
 
-mod common;
+pub mod common;
 
 /// A writer whose reader is gone before Beez starts, so its first write fails.
 fn closed() -> io::Result<io::PipeWriter> {
@@ -37,13 +37,7 @@ fn without_stderr(mut command: Command) -> io::Result<Output> {
 }
 
 fn schedule(root: &Path, arguments: &[&str]) -> Command {
-    let mut command = common::beez();
-    command
-        .arg("schedule")
-        .args(arguments)
-        .arg("--root")
-        .arg(root);
-    command
+    common::beez_at_root(root, &[&["schedule"], arguments].concat())
 }
 
 /// The process ended on its own terms, not by a panic.

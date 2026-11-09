@@ -4,21 +4,24 @@
 //! directory holds the whole run as one readable log, the exact bytes of each
 //! task's two streams, and a machine-readable record of the outcome.
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::str::FromStr;
 use std::time::SystemTime;
 
 use anstream::adapter::strip_bytes;
 use beez_core::{TaskRequest, Workflow};
 use beez_process::OutputStream;
 use beez_runner::RunEvent;
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
 
 use crate::format::{Labels, stamped_status_line, stream_mark, trim_newline};
 use crate::outcome::{TaskOutcome, TaskState};
-use crate::time::{compact_utc, utc};
+use crate::time::{COMPACT_UTC, compact_utc, utc};
 
 const DIRECTORY: &str = ".beez";
 
@@ -88,7 +91,7 @@ pub struct RunRecorder {
     run: Sink,
     labels: Labels,
     tasks: Vec<TaskLog>,
-    id: String,
+    id: RunId,
     arguments: Vec<String>,
     working_directory: String,
     manifest: Option<String>,
@@ -99,7 +102,56 @@ pub struct RunRecorder {
 struct TaskLog {
     stdout: Sink,
     stderr: Sink,
-    record: TaskRecord,
+    info: TaskInfo,
+    /// What last happened to the task, or `None` before it starts.
+    outcome: Option<TaskOutcome>,
+}
+
+impl TaskLog {
+    /// The file that keeps one stream of the task.
+    fn sink(&mut self, stream: OutputStream) -> &mut Sink {
+        match stream {
+            OutputStream::Stdout => &mut self.stdout,
+            OutputStream::Stderr => &mut self.stderr,
+        }
+    }
+
+    /// The task as `run.json` writes it.
+    fn record(&self) -> TaskRecord<'_> {
+        let info = &self.info;
+        let (exit_status, duration, error) = match self.outcome {
+            Some(TaskOutcome::Finished { exit, elapsed }) => (exit.code(), Some(elapsed), None),
+            Some(TaskOutcome::Failed { error, elapsed }) => {
+                (None, Some(elapsed), Some(error.to_string()))
+            }
+            Some(TaskOutcome::Started | TaskOutcome::Blocked) | None => (None, None, None),
+        };
+        TaskRecord {
+            id: &info.id,
+            depends_on: &info.depends_on,
+            request: info.request.as_ref(),
+            sandbox: info.sandbox,
+            state: self.outcome.map_or(TaskState::Pending, TaskOutcome::state),
+            exit_status,
+            duration_seconds: duration.map(|elapsed| elapsed.as_secs_f64()),
+            error,
+            stdout: &info.stdout,
+            stderr: &info.stderr,
+        }
+    }
+}
+
+/// What a task is, before it runs.
+#[derive(Debug)]
+struct TaskInfo {
+    id: String,
+    depends_on: Vec<String>,
+    request: Option<RequestRecord>,
+    sandbox: bool,
+    /// Path of the stdout file, relative to the run directory.
+    stdout: String,
+    /// Path of the stderr file, relative to the run directory.
+    stderr: String,
 }
 
 /// One file the run writes line by line.
@@ -135,7 +187,7 @@ impl Sink {
 #[derive(Serialize)]
 struct RunRecord<'run> {
     schema: u32,
-    id: &'run str,
+    id: String,
     arguments: &'run [String],
     working_directory: &'run str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,16 +196,17 @@ struct RunRecord<'run> {
     finished: String,
     duration_seconds: f64,
     exit_status: Option<i32>,
-    tasks: Vec<&'run TaskRecord>,
+    tasks: Vec<TaskRecord<'run>>,
 }
 
+/// The layout of one task in `run.json`.
 #[derive(Debug, Serialize)]
-struct TaskRecord {
-    id: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    depends_on: Vec<String>,
+struct TaskRecord<'run> {
+    id: &'run str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    depends_on: &'run [String],
     #[serde(skip_serializing_if = "Option::is_none")]
-    request: Option<RequestRecord>,
+    request: Option<&'run RequestRecord>,
     sandbox: bool,
     state: TaskState,
     exit_status: Option<i32>,
@@ -161,8 +214,8 @@ struct TaskRecord {
     duration_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    stdout: String,
-    stderr: String,
+    stdout: &'run str,
+    stderr: &'run str,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,26 +251,26 @@ impl RunRecorder {
             LogSettings::Resolved => (resolve_root(working_directory), true),
             LogSettings::At(directory) => (directory.to_path_buf(), false),
         };
-        let started = SystemTime::now();
-        let id = run_id(started);
-        let directory = root.join(RUNS).join(&id);
+        let id = RunId::now();
+        let name = id.to_string();
+        let directory = root.join(RUNS).join(&name);
 
         fs::create_dir_all(directory.join(TASKS))?;
         // Beez marks only a directory it resolved itself.
-        if resolved {
-            let _ = ignore_everything(&root);
+        if resolved && let Err(error) = ignore_everything(&root) {
+            tracing::debug!(root = %root.display(), %error, "cannot mark the Beez root ignored");
         }
-        let _ = link_latest(&root, &id);
+        if let Err(error) = link_latest(&root, &name) {
+            tracing::debug!(root = %root.display(), %error, "cannot link the latest run");
+        }
 
         let tasks = open_tasks(&directory, target)?;
-        let labels = Labels::new(tasks.iter().map(|task| task.record.id.clone()).collect());
 
         Ok(Some(Self {
             run: Sink::new(File::create(directory.join(RUN_LOG))?),
             directory,
-            labels,
+            labels: target.labels(),
             tasks,
-            id,
             arguments: std::env::args_os()
                 .map(|argument| argument.to_string_lossy().into_owned())
                 .collect(),
@@ -225,7 +278,8 @@ impl RunRecorder {
             manifest: target
                 .manifest()
                 .map(|path| working_directory.join(path).display().to_string()),
-            started,
+            started: id.started,
+            id,
         }))
     }
 
@@ -236,7 +290,7 @@ impl RunRecorder {
     }
 
     /// Records one lifecycle or output event.
-    pub fn event(&mut self, event: &RunEvent) -> io::Result<()> {
+    pub fn event(&mut self, event: &RunEvent<'_>) -> io::Result<()> {
         let index = event.position();
         if let RunEvent::Output { stream, line, .. } = event {
             return self.output(index, *stream, line);
@@ -279,15 +333,10 @@ impl RunRecorder {
         let Some(task) = self.tasks.get_mut(index) else {
             return Ok(());
         };
-        let file = match stream {
-            OutputStream::Stdout => &mut task.stdout,
-            OutputStream::Stderr => &mut task.stderr,
-        };
-
-        let raw = file.write(|file| file.write_all(line));
+        let raw = task.sink(stream).write(|file| file.write_all(line));
         let text = strip_bytes(trim_newline(line)).into_vec();
         let text = String::from_utf8_lossy(&text);
-        let id = &task.record.id;
+        let id = &task.info.id;
         let mark = stream_mark(stream);
         let logged = self
             .run
@@ -305,23 +354,8 @@ impl RunRecorder {
 
     /// Records what happened to one task.
     fn outcome(&mut self, index: usize, outcome: TaskOutcome) {
-        let Some(task) = self.tasks.get_mut(index) else {
-            return;
-        };
-        task.record.state = outcome.state();
-        match outcome {
-            TaskOutcome::Finished {
-                exit_status,
-                elapsed,
-            } => {
-                task.record.exit_status = exit_status;
-                task.record.duration_seconds = Some(elapsed.as_secs_f64());
-            }
-            TaskOutcome::Failed { error, elapsed } => {
-                task.record.error = Some(error.to_string());
-                task.record.duration_seconds = Some(elapsed.as_secs_f64());
-            }
-            TaskOutcome::Started | TaskOutcome::Blocked => {}
+        if let Some(task) = self.tasks.get_mut(index) {
+            task.outcome = Some(outcome);
         }
     }
 
@@ -330,7 +364,7 @@ impl RunRecorder {
         let finished = SystemTime::now();
         let record = RunRecord {
             schema: SCHEMA,
-            id: &self.id,
+            id: self.id.to_string(),
             arguments: &self.arguments,
             working_directory: &self.working_directory,
             manifest: self.manifest.as_deref(),
@@ -341,11 +375,11 @@ impl RunRecorder {
                 .unwrap_or_default()
                 .as_secs_f64(),
             exit_status,
-            tasks: self.tasks.iter().map(|task| &task.record).collect(),
+            tasks: self.tasks.iter().map(TaskLog::record).collect(),
         };
 
         let mut file = File::create(self.directory.join(RUN_RECORD))?;
-        serde_json::to_writer_pretty(&mut file, &record).map_err(io::Error::other)?;
+        serde_json::to_writer_pretty(&mut file, &record)?;
         writeln!(file)
     }
 }
@@ -366,12 +400,44 @@ fn resolve_root(working_directory: &Path) -> PathBuf {
     working_directory.join(DIRECTORY)
 }
 
-/// The name of one run.
+/// The name of one run: the time it started, then the PID of its process.
 ///
 /// A PID cannot repeat inside one millisecond, so this names one run only, and
 /// the stamp sorts the runs in the order they happened.
-fn run_id(started: SystemTime) -> String {
-    format!("{}-{}", compact_utc(started), process::id())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunId {
+    started: SystemTime,
+    pid: u32,
+}
+
+impl RunId {
+    /// Names a run of this process that starts now.
+    fn now() -> Self {
+        Self {
+            started: SystemTime::now(),
+            pid: process::id(),
+        }
+    }
+}
+
+impl fmt::Display for RunId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}-{}", compact_utc(self.started), self.pid)
+    }
+}
+
+impl FromStr for RunId {
+    type Err = ();
+
+    /// Reads a name Beez gave a run, to the millisecond it holds.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let (stamp, pid) = name.split_once('-').ok_or(())?;
+        let started = NaiveDateTime::parse_from_str(stamp, COMPACT_UTC).map_err(|_| ())?;
+        Ok(Self {
+            started: Utc.from_utc_datetime(&started).into(),
+            pid: pid.parse().map_err(|_| ())?,
+        })
+    }
 }
 
 /// True for a name Beez gives a run, such as `20260910T030000004Z-4123`.
@@ -420,65 +486,59 @@ fn link_latest(_root: &Path, _id: &str) -> io::Result<()> {
 }
 
 fn open_tasks(directory: &Path, target: &RunTarget<'_>) -> io::Result<Vec<TaskLog>> {
-    task_records(target)
+    task_infos(target)
         .into_iter()
-        .map(|record| {
+        .map(|info| {
             Ok(TaskLog {
-                stdout: Sink::new(File::create(directory.join(&record.stdout))?),
-                stderr: Sink::new(File::create(directory.join(&record.stderr))?),
-                record,
+                stdout: Sink::new(File::create(directory.join(&info.stdout))?),
+                stderr: Sink::new(File::create(directory.join(&info.stderr))?),
+                info,
+                outcome: None,
             })
         })
         .collect()
 }
 
-/// The record of every task before it runs, in declaration order.
+/// What every task is before it runs, in declaration order.
 ///
 /// A direct request needs no description, because the recorded arguments
 /// already hold it.
-fn task_records(target: &RunTarget<'_>) -> Vec<TaskRecord> {
+fn task_infos(target: &RunTarget<'_>) -> Vec<TaskInfo> {
     match target {
         RunTarget::Workflow { workflow, .. } => workflow
             .tasks()
             .iter()
             .map(|task| {
-                let depends_on = task
-                    .dependencies()
-                    .iter()
-                    .filter_map(|index| workflow.task(*index))
-                    .map(|dependency| dependency.id().as_str().to_owned())
-                    .collect();
-                task_record(
+                task_info(
                     task.id().as_str().to_owned(),
-                    depends_on,
+                    workflow
+                        .dependency_ids(task)
+                        .map(|id| id.as_str().to_owned())
+                        .collect(),
                     Some(request_record(task.request())),
                     task.sandbox().is_some(),
                 )
             })
             .collect(),
         RunTarget::Request { name } => {
-            vec![task_record((*name).to_owned(), Vec::new(), None, false)]
+            vec![task_info((*name).to_owned(), Vec::new(), None, false)]
         }
     }
 }
 
-fn task_record(
+fn task_info(
     id: String,
     depends_on: Vec<String>,
     request: Option<RequestRecord>,
     sandbox: bool,
-) -> TaskRecord {
-    TaskRecord {
+) -> TaskInfo {
+    TaskInfo {
         stdout: format!("{TASKS}/{id}.stdout"),
         stderr: format!("{TASKS}/{id}.stderr"),
         id,
         depends_on,
         request,
         sandbox,
-        state: TaskState::Pending,
-        exit_status: None,
-        duration_seconds: None,
-        error: None,
     }
 }
 
@@ -504,19 +564,19 @@ fn request_record(request: &TaskRequest) -> RequestRecord {
 #[cfg(test)]
 mod tests {
     use super::{
-        LogSettings, RunRecorder, RunTarget, is_run_name, link_latest, resolve_root, run_id,
+        LogSettings, RunId, RunRecorder, RunTarget, is_run_name, link_latest, resolve_root,
     };
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, UNIX_EPOCH};
 
     use beez_core::{TaskDefinition, TaskRequest, Workflow};
     use beez_test_support::TemporaryDirectory;
 
-    use crate::outcome::TaskOutcome;
+    use crate::outcome::{TaskExit, TaskOutcome};
 
     /// Records one run under `root` and returns the text of its `run.json`.
     fn run_record(
@@ -578,14 +638,14 @@ mod tests {
             (Some(TaskOutcome::Started), "running"),
             (
                 Some(TaskOutcome::Finished {
-                    exit_status: Some(0),
+                    exit: TaskExit::Code(0),
                     elapsed,
                 }),
                 "finished",
             ),
             (
                 Some(TaskOutcome::Finished {
-                    exit_status: Some(3),
+                    exit: TaskExit::Code(3),
                     elapsed,
                 }),
                 "failed",
@@ -646,7 +706,7 @@ mod tests {
                 (
                     0,
                     TaskOutcome::Finished {
-                        exit_status: Some(0),
+                        exit: TaskExit::Code(0),
                         elapsed: Duration::from_millis(1_500),
                     },
                 ),
@@ -714,9 +774,24 @@ mod tests {
 
     #[test]
     fn reads_back_the_name_it_gives_a_run() {
-        let id = run_id(SystemTime::now());
+        let id = RunId::now().to_string();
 
         assert!(is_run_name(&id), "{id}");
+    }
+
+    #[test]
+    fn parses_the_name_it_gives_a_run() {
+        let sut = RunId {
+            started: UNIX_EPOCH + Duration::from_millis(1_789_009_200_004),
+            pid: 4123,
+        };
+
+        let name = sut.to_string();
+
+        assert_eq!(name, "20260910T030000004Z-4123");
+        assert_eq!(name.parse(), Ok(sut));
+        assert_eq!("latest".parse::<RunId>(), Err(()));
+        assert_eq!("20260910T030000004Z-abc".parse::<RunId>(), Err(()));
     }
 
     #[test]
@@ -731,10 +806,8 @@ mod tests {
     #[test]
     fn resolves_an_existing_directory_above_the_working_directory() {
         let directory = TemporaryDirectory::new("log-existing-root").unwrap();
-        let root = directory.join(".beez");
-        fs::create_dir(&root).unwrap();
-        let deep = directory.join("crates/beez-cli");
-        fs::create_dir_all(&deep).unwrap();
+        let root = directory.subdirectory(".beez").unwrap();
+        let deep = directory.subdirectory("crates/beez-cli").unwrap();
 
         assert_eq!(resolve_root(&deep), root);
     }
@@ -742,9 +815,8 @@ mod tests {
     #[test]
     fn resolves_the_repository_root_when_no_directory_exists_yet() {
         let directory = TemporaryDirectory::new("log-repository-root").unwrap();
-        fs::create_dir(directory.join(".git")).unwrap();
-        let deep = directory.join("crates/beez-cli");
-        fs::create_dir_all(&deep).unwrap();
+        directory.subdirectory(".git").unwrap();
+        let deep = directory.subdirectory("crates/beez-cli").unwrap();
 
         assert_eq!(resolve_root(&deep), directory.join(".beez"));
     }

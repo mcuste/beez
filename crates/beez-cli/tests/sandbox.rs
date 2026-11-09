@@ -17,24 +17,22 @@ use beez_test_support::{
     TemporaryDirectory, assert_never_reached, extended_path, loopback_listener, unused_origin,
 };
 
-mod common;
+pub mod common;
 
 /// A temporary directory with an empty working directory inside it.
 fn working_directory(name: &str) -> io::Result<(TemporaryDirectory, PathBuf)> {
     let directory = TemporaryDirectory::new(name)?;
-    let work = directory.join("work");
-    fs::create_dir(&work)?;
+    let work = directory.subdirectory("work")?;
     Ok((directory, work))
 }
 
 /// Runs `manifest` with `work` as the working directory of its tasks.
 fn run_workflow(directory: &TemporaryDirectory, work: &Path, manifest: &str) -> io::Result<Output> {
     let path = directory.write("workflow.yaml", manifest)?;
-    let output = common::beez()
+    let output = common::beez_in(directory)
         .args(["run", "workflow"])
         .arg(&path)
         .current_dir(work)
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.starts_with("bwrap:") || stderr.contains("sandbox-exec:") {
@@ -73,11 +71,10 @@ fn run_command(
     work: &Path,
     arguments: &[&str],
 ) -> io::Result<Output> {
-    common::beez()
+    common::beez_in(directory)
         .args(["run", "command"])
         .args(arguments)
         .current_dir(work)
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
 }
 
@@ -100,7 +97,7 @@ fn sandboxes_a_command_unless_it_asks_for_no_sandbox() {
 fn hides_variables_that_point_at_host_sockets() {
     let (directory, work) = working_directory("cli-sandbox-socket-variables").unwrap();
 
-    let output = common::beez()
+    let output = common::beez_in(&directory)
         .args([
             "run",
             "command",
@@ -109,7 +106,6 @@ fn hides_variables_that_point_at_host_sockets() {
             "printf %s \"${SSH_AUTH_SOCK-unset} ${DBUS_SESSION_BUS_ADDRESS-unset}\"",
         ])
         .current_dir(&work)
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .env("SSH_AUTH_SOCK", "/tmp/agent.sock")
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
         .output()
@@ -462,8 +458,7 @@ fn refuses_local_connections_directly_and_through_the_proxy() {
 #[test]
 fn applies_the_harness_environment_inside_the_sandbox() {
     let directory = TemporaryDirectory::new("cli-sandbox-harness-environment").unwrap();
-    let work = directory.join("work");
-    fs::create_dir(&work).unwrap();
+    let work = directory.subdirectory("work").unwrap();
     // A `claude` stub that prints the harness environment it received.
     directory
         .executable(
@@ -478,12 +473,11 @@ fn applies_the_harness_environment_inside_the_sandbox() {
         )
         .unwrap();
 
-    let output = common::beez()
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
         .arg(&manifest)
         .current_dir(&work)
         .env("PATH", extended_path(directory.path()))
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()
         .unwrap();
 

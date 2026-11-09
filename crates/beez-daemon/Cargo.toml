@@ -15,6 +15,8 @@ beez-sandbox.workspace = true
 beez-schedule.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+thiserror.workspace = true
+tracing.workspace = true
 signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
 
 [dev-dependencies]

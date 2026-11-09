@@ -90,3 +90,43 @@ fn stream_lines(lines: &[(OutputStream, Vec<u8>)], stream: OutputStream) -> Vec<
         .map(|(_, line)| line.clone())
         .collect()
 }
+
+/// A sink that panics must not leave its child running.
+#[test]
+fn stops_the_child_when_the_sink_panics() {
+    let request = ExecutionRequest::Command(
+        ProcessCall::new("bash")
+            .argument("-c")
+            .argument("echo started; exec sleep 30"),
+    );
+    let runner = ProcessRunner::here().unwrap();
+    let started = std::time::Instant::now();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner.run_streaming(request, None, &|_, _| panic!("sink failed"))
+    }));
+
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn kills_a_request_once_it_is_cancelled() {
+    let request = ExecutionRequest::Command(ProcessCall::new("sleep").argument("30"));
+    let cancel = beez_process::Cancellation::new();
+    cancel.cancel();
+    let started = std::time::Instant::now();
+
+    let output = ProcessRunner::here()
+        .unwrap()
+        .run_cancellable(request, None, &|_, _| {}, &cancel)
+        .unwrap();
+
+    assert!(cancel.is_cancelled());
+    assert_eq!(output.status_code(), None);
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}

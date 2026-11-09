@@ -1,8 +1,8 @@
 use std::fmt;
 
 use beez_policy::{
-    DomainGroup, DomainRule, ExecutableGroup, ExecutablePolicy, FilesystemPolicy, NetworkPolicy,
-    SandboxPath, SandboxPolicy, parse_all,
+    DomainGroup, DomainRule, ExecutableGroup, ExecutablePolicy, ExecutableRule, FilesystemPolicy,
+    NetworkPolicy, SandboxPath, SandboxPolicy, parse_all,
 };
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{self, MapAccess, Visitor};
@@ -102,14 +102,9 @@ pub(crate) fn resolve(
     match task {
         None | Some(SandboxSetting::Enabled(true)) => Ok(Some(base())),
         Some(SandboxSetting::Enabled(false)) => Ok(None),
-        Some(SandboxSetting::Policy(sandbox)) => (*sandbox).apply_to(base()).map(Some),
-    }
-}
-
-impl ManifestSandbox {
-    /// Adds each section this table defines to `base`.
-    pub(crate) fn apply_to(self, base: SandboxPolicy) -> Result<SandboxPolicy, String> {
-        Ok(base.merge(SandboxPolicy::try_from(self)?))
+        Some(SandboxSetting::Policy(sandbox)) => {
+            Ok(Some(base().merge(SandboxPolicy::try_from(*sandbox)?)))
+        }
     }
 }
 
@@ -168,6 +163,6 @@ impl TryFrom<ManifestExecutables> for ExecutablePolicy {
             .with_defaults(executables.defaults)
             .with_groups(parse_all::<ExecutableGroup>(&executables.groups)?)
             .with_disable(parse_all::<ExecutableGroup>(&executables.disable)?)
-            .with_allow(parse_all::<SandboxPath>(&executables.allow)?))
+            .with_allow(parse_all::<ExecutableRule>(&executables.allow)?))
     }
 }

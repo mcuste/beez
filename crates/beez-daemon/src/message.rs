@@ -4,12 +4,13 @@
 //! answer in the same words.
 
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::control::JobId;
 
-/// Why a command that names a manifest or a job did not take effect.
-#[derive(Debug, Eq, PartialEq)]
+/// Why a command did not take effect.
+#[derive(Debug)]
 pub(crate) enum Refusal {
     /// The manifest does not load, or names no schedule.
     Broken(String),
@@ -19,6 +20,18 @@ pub(crate) enum Refusal {
     NotWatched(PathBuf),
     /// No job has this ID.
     UnknownJob(JobId),
+    /// The job cannot run, for the reason given.
+    CannotRun { job: JobId, reason: String },
+    /// A run of the job is going, and a triggered run waits for none.
+    AlreadyRunning(JobId),
+    /// The daemon already runs as many workflows as it may.
+    AtLimit(usize),
+    /// The command needs a running daemon, and none answers.
+    NeedsDaemon,
+    /// The list of watched manifests could not be written.
+    Unwritable(io::Error),
+    /// The daemon is on its way out, and starts no run.
+    Stopping,
 }
 
 impl fmt::Display for Refusal {
@@ -30,6 +43,12 @@ impl fmt::Display for Refusal {
                 write!(formatter, "{} is not watched", manifest.display())
             }
             Self::UnknownJob(job) => write!(formatter, "no job named {job}"),
+            Self::CannotRun { job, reason } => write!(formatter, "{job} cannot run: {reason}"),
+            Self::AlreadyRunning(job) => write!(formatter, "{job} is already running"),
+            Self::AtLimit(limit) => write!(formatter, "the daemon already runs {limit} workflows"),
+            Self::NeedsDaemon => formatter.write_str("the daemon is not running"),
+            Self::Unwritable(error) => write!(formatter, "cannot write the manifest list: {error}"),
+            Self::Stopping => formatter.write_str("the daemon is stopping"),
         }
     }
 }
@@ -88,6 +107,34 @@ pub(crate) fn already_running(root: &Path) -> String {
     format!("a daemon already runs for {}", root.display())
 }
 
-pub(crate) fn unwritable_registry(error: &std::io::Error) -> String {
-    format!("cannot write the manifest list: {error}")
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::Refusal;
+    use crate::control::JobId;
+
+    #[test]
+    fn says_why_a_command_did_not_take_effect() {
+        let job = || JobId::new("nightly", None);
+        for (refusal, words) in [
+            (
+                Refusal::CannotRun {
+                    job: job(),
+                    reason: "no sandbox".to_owned(),
+                },
+                "nightly cannot run: no sandbox",
+            ),
+            (Refusal::AlreadyRunning(job()), "nightly is already running"),
+            (Refusal::AtLimit(2), "the daemon already runs 2 workflows"),
+            (Refusal::NeedsDaemon, "the daemon is not running"),
+            (
+                Refusal::Unwritable(io::Error::other("disk full")),
+                "cannot write the manifest list: disk full",
+            ),
+            (Refusal::Stopping, "the daemon is stopping"),
+        ] {
+            assert_eq!(refusal.to_string(), words);
+        }
+    }
 }

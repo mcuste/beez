@@ -3,6 +3,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::error::DaemonError;
+
 /// Directory of the daemon's own files, inside the Beez root.
 const DIRECTORY: &str = "daemon";
 const SOCKET: &str = "daemon.sock";
@@ -31,9 +33,8 @@ impl DaemonPaths {
     /// The daemon does not look at the working directory, so a command finds
     /// the same daemon from anywhere, and a service manager starting it in a
     /// directory of its own finds the same jobs.
-    pub fn user() -> io::Result<Self> {
-        let home = std::env::home_dir()
-            .ok_or_else(|| io::Error::other("the daemon needs the home directory"))?;
+    pub fn user() -> Result<Self, DaemonError> {
+        let home = std::env::home_dir().ok_or(DaemonError::NoHome)?;
 
         Ok(Self::new(home.join(".beez")))
     }

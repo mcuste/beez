@@ -36,6 +36,17 @@ pub(crate) struct Wrapped {
     pub(crate) guard: backend::Guard,
 }
 
+/// Reports why a program could not be wrapped in the platform sandbox.
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    /// The sandbox resolves `~` paths, but the home directory is unknown.
+    #[error("sandbox needs the home directory")]
+    NoHome,
+    /// Resolving the policy, starting the proxy, or wrapping the program failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
 /// A program wrapped in the platform sandbox, with its proxy kept alive.
 #[derive(Debug)]
 pub struct SandboxedCommand {
@@ -62,12 +73,12 @@ impl SandboxedCommand {
         program: &Path,
         arguments: &[OsString],
         working_directory: &Path,
-    ) -> io::Result<Self> {
-        let home = std::env::home_dir()
-            .ok_or_else(|| io::Error::other("sandbox needs the home directory"))?;
+    ) -> Result<Self, SandboxError> {
+        let home = std::env::home_dir().ok_or(SandboxError::NoHome)?;
         let resolved =
             ResolvedSandbox::resolve(policy, harness, program, working_directory, &home)?;
-        let proxy = Proxy::start(resolved.allowed_domains.clone(), resolved.localhost)?;
+        resolved.trace();
+        let proxy = Proxy::start(resolved.network.clone())?;
 
         let Wrapped {
             mut command,

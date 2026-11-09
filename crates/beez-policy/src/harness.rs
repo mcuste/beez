@@ -1,5 +1,3 @@
-use std::fmt;
-
 use crate::named::{self, name_table, parse_by_name};
 
 /// A headless coding harness Beez can prompt.
@@ -25,24 +23,12 @@ name_table!(pub HeadlessHarness {
 parse_by_name!(HeadlessHarness, HeadlessHarnessError::Unknown);
 
 /// Reports an unsupported harness selector.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum HeadlessHarnessError {
     /// The selector does not name a supported harness.
+    #[error("{}", named::unknown::<HeadlessHarness>("headless harness", .0))]
     Unknown(String),
 }
-
-impl fmt::Display for HeadlessHarnessError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unknown(value) => formatter.write_str(&named::unknown::<HeadlessHarness>(
-                "headless harness",
-                value,
-            )),
-        }
-    }
-}
-
-impl std::error::Error for HeadlessHarnessError {}
 
 /// Model and effort settings for a harness prompt.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

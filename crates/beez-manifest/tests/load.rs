@@ -228,8 +228,8 @@ fn rejects_a_prompt_without_a_harness() {
 #[test]
 fn loads_a_prompt_file_relative_to_the_manifest() {
     let directory = TemporaryDirectory::new("manifest-prompt-file").unwrap();
-    fs::create_dir_all(directory.join("prompts")).unwrap();
-    fs::create_dir_all(directory.join("nested")).unwrap();
+    directory.subdirectory("prompts").unwrap();
+    directory.subdirectory("nested").unwrap();
     directory
         .write(
             "prompts/review.md",
@@ -288,13 +288,45 @@ fn reports_an_unreadable_prompt_file() {
     assert!(
         matches!(&error, ManifestError::PromptFile { path, .. } if path == &directory.join("missing.md"))
     );
-    assert!(
-        error.to_string().starts_with(&format!(
-            "cannot read prompt file {}: ",
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "cannot read prompt file {}",
             directory.join("missing.md").display()
-        )),
-        "{error}"
+        )
     );
+    assert!(std::error::Error::source(&error).is_some(), "{error:?}");
+}
+
+/// A task's id and shape are checked before its prompt file is read.
+#[test]
+fn reports_a_task_mistake_before_reading_its_prompt_file() {
+    let command = invalid_manifest_error(
+        "manifest-command-with-prompt-file",
+        "workflow.yaml",
+        "tasks:\n  - id: review\n    command: [echo]\n    prompt_file: missing.md\n",
+    );
+    let bad_id = invalid_manifest_error(
+        "manifest-bad-id-with-prompt-file",
+        "workflow.yaml",
+        "tasks:\n  - id: bad-id\n    harness: claude\n    prompt_file: missing.md\n",
+    );
+    let bad_harness = invalid_manifest_error(
+        "manifest-bad-harness-with-prompt-file",
+        "workflow.yaml",
+        "tasks:\n  - id: review\n    harness: nobody\n    prompt_file: missing.md\n",
+    );
+
+    assert_eq!(
+        command.as_deref(),
+        Some("task must define either harness with prompt or prompt_file, or command")
+    );
+    assert_eq!(
+        bad_id.as_deref(),
+        Some("task ID contains invalid character '-'")
+    );
+    let bad_harness = bad_harness.unwrap();
+    assert!(bad_harness.contains("nobody"), "{bad_harness}");
 }
 
 #[test]
@@ -750,6 +782,42 @@ fn loads_a_manifest_without_a_schedule() {
 }
 
 #[test]
+fn loads_a_null_or_empty_schedule_as_no_schedule() {
+    for (label, file, source) in [
+        (
+            "manifest-null-schedule-yaml",
+            "workflow.yaml",
+            "schedule: null\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        ),
+        (
+            "manifest-blank-schedule-yaml",
+            "workflow.yaml",
+            "schedule:\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        ),
+        (
+            "manifest-empty-schedule-yaml",
+            "workflow.yaml",
+            "schedule: []\ntasks:\n  - id: test\n    command: [cargo, test]\n",
+        ),
+        (
+            "manifest-null-schedule-json",
+            "workflow.json",
+            r#"{"schedule":null,"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        ),
+        (
+            "manifest-empty-schedule-json",
+            "workflow.json",
+            r#"{"schedule":[],"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+        ),
+    ] {
+        let directory = TemporaryDirectory::new(label).unwrap();
+        let manifest = directory.write(file, source).unwrap();
+
+        assert_eq!(load(&manifest).unwrap().schedules(), [], "{label}");
+    }
+}
+
+#[test]
 fn rejects_a_schedule_that_names_neither_or_both_of_cron_and_at() {
     let neither_directory = TemporaryDirectory::new("manifest-schedule-neither").unwrap();
     let both_directory = TemporaryDirectory::new("manifest-schedule-both").unwrap();
@@ -774,6 +842,48 @@ fn rejects_a_schedule_that_names_neither_or_both_of_cron_and_at() {
         load(&both),
         Err(ManifestError::Invalid(error)) if error == "schedule must define either cron or at, not both"
     ));
+}
+
+/// The schedule's shape is checked before its offset is read.
+#[test]
+fn reports_the_schedule_shape_before_a_bad_offset() {
+    let both = invalid_manifest_error(
+        "manifest-schedule-both-bad-offset",
+        "workflow.json",
+        r#"{"schedule":{"cron":"0 3 * * *","at":"2026-09-10T03:00:00Z","offset":"later"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    );
+    let neither = invalid_manifest_error(
+        "manifest-schedule-neither-bad-offset",
+        "workflow.json",
+        r#"{"schedule":{"offset":"later"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    );
+    let once = invalid_manifest_error(
+        "manifest-schedule-once-bad-offset",
+        "workflow.json",
+        r#"{"schedule":{"at":"2026-09-10T03:00:00Z","offset":"later"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    );
+    let cron = invalid_manifest_error(
+        "manifest-schedule-cron-bad-offset",
+        "workflow.json",
+        r#"{"schedule":{"cron":"0 3 * * *","offset":"later"},"tasks":[{"id":"test","command":["cargo","test"]}]}"#,
+    );
+
+    assert_eq!(
+        both.as_deref(),
+        Some("schedule must define either cron or at, not both")
+    );
+    assert_eq!(
+        neither.as_deref(),
+        Some("schedule must define either cron or at")
+    );
+    assert_eq!(
+        once.as_deref(),
+        Some("at already names its own offset, so offset must be absent")
+    );
+    assert_eq!(
+        cron.as_deref(),
+        Some("later is not a fixed offset from UTC, such as Z, +02:00, or -05:30")
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::error::DaemonError;
 use crate::message::Refusal;
 
 /// The name of one job: the manifest name, and the schedule name after a
@@ -55,7 +56,7 @@ impl fmt::Display for JobId {
 /// What a command asks the daemon to do.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
-pub enum Request {
+pub(crate) enum Request {
     /// Reports the daemon and every job it holds.
     Status,
     /// Watches one more manifest.
@@ -94,7 +95,7 @@ pub enum Request {
 /// What the daemon answers.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
-pub enum Response {
+pub(crate) enum Response {
     /// The daemon and its jobs.
     Status(DaemonStatus),
     /// The command took effect.
@@ -112,7 +113,7 @@ pub enum Response {
 impl Response {
     /// The command took effect.
     #[must_use]
-    pub fn done(message: impl Into<String>) -> Self {
+    pub(crate) fn done(message: impl Into<String>) -> Self {
         Self::Done {
             message: message.into(),
         }
@@ -120,7 +121,7 @@ impl Response {
 
     /// The command did not take effect.
     #[must_use]
-    pub fn error(message: impl Into<String>) -> Self {
+    pub(crate) fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
         }
@@ -130,12 +131,6 @@ impl Response {
 impl From<Refusal> for Response {
     fn from(refusal: Refusal) -> Self {
         Self::error(refusal.to_string())
-    }
-}
-
-impl From<Result<String, Refusal>> for Response {
-    fn from(answer: Result<String, Refusal>) -> Self {
-        answer.map_or_else(Self::from, Self::done)
     }
 }
 
@@ -156,7 +151,7 @@ pub struct DaemonStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JobReport {
     /// Job ID: the manifest name, and the schedule name after a colon.
-    pub id: String,
+    pub id: JobId,
     /// Path of the manifest that holds the schedule.
     pub manifest: String,
     /// The schedule as the manifest writes it.
@@ -210,7 +205,7 @@ impl fmt::Display for Condition {
 }
 
 /// Sends one command to the daemon and reads its answer.
-pub(crate) fn send(socket: &Path, request: &Request) -> io::Result<Response> {
+pub(crate) fn send(socket: &Path, request: &Request) -> Result<Response, DaemonError> {
     let stream = UnixStream::connect(socket)?;
     write_line(&stream, request)?;
 
@@ -225,7 +220,7 @@ pub fn is_running(socket: &Path) -> bool {
 
 /// Writes one message as one line.
 pub(crate) fn write_line<T: Serialize>(mut stream: &UnixStream, message: &T) -> io::Result<()> {
-    let line = serde_json::to_string(message).map_err(io::Error::other)?;
+    let line = serde_json::to_string(message)?;
     stream.write_all(line.as_bytes())?;
     stream.write_all(b"\n")?;
 
@@ -233,19 +228,22 @@ pub(crate) fn write_line<T: Serialize>(mut stream: &UnixStream, message: &T) -> 
 }
 
 /// Reads one message from one line.
-pub(crate) fn read_request(stream: &UnixStream) -> io::Result<Request> {
+pub(crate) fn read_request(stream: &UnixStream) -> Result<Request, DaemonError> {
     read_line(stream, "no command arrived")
 }
 
 /// Reads one message from one line, and reports `empty` when none arrives.
-fn read_line<T: DeserializeOwned>(stream: &UnixStream, empty: &'static str) -> io::Result<T> {
+fn read_line<T: DeserializeOwned>(
+    stream: &UnixStream,
+    empty: &'static str,
+) -> Result<T, DaemonError> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
-        return Err(io::Error::other(empty));
+        return Err(DaemonError::Closed(empty));
     }
 
-    serde_json::from_str(&line).map_err(io::Error::other)
+    serde_json::from_str(&line).map_err(DaemonError::Message)
 }
 
 #[cfg(test)]
@@ -290,7 +288,7 @@ mod tests {
             started: "2026-09-10T03:00:00Z".to_owned(),
             running: 1,
             jobs: vec![JobReport {
-                id: "nightly:docs".to_owned(),
+                id: JobId::new("nightly", Some("docs")),
                 manifest: "/work/nightly.yaml".to_owned(),
                 schedule: Some("0 3 * * *".to_owned()),
                 condition: Condition::Running,

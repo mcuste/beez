@@ -6,18 +6,20 @@
 
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use beez_record::{RUNS, is_run_name};
 
 /// Removes every run but the newest `keep`, and reports how many went.
 ///
-/// `keep` of zero keeps every run. A run directory that cannot be removed is
-/// left alone, because a sweep must never stop the daemon.
-pub(crate) fn prune(root: &Path, keep: usize) -> io::Result<usize> {
-    if keep == 0 {
+/// No `keep` keeps every run. A run directory that cannot be removed is left
+/// alone, because a sweep must never stop the daemon.
+pub(crate) fn prune(root: &Path, keep: Option<NonZeroUsize>) -> io::Result<usize> {
+    let Some(keep) = keep else {
         return Ok(0);
-    }
+    };
+    let keep = keep.get();
     let runs = match fs::read_dir(root.join(RUNS)) {
         Ok(runs) => runs,
         // A root that never held a run has nothing to sweep.
@@ -50,9 +52,14 @@ pub(crate) fn prune(root: &Path, keep: usize) -> io::Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::prune;
     use beez_test_support::TemporaryDirectory;
     use std::fs;
+    use std::num::NonZeroUsize;
+    use std::path::Path;
+
+    fn prune(root: &Path, keep: usize) -> std::io::Result<usize> {
+        super::prune(root, NonZeroUsize::new(keep))
+    }
 
     fn runs(root: &TemporaryDirectory, names: &[&str]) {
         for name in names {

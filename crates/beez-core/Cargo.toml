@@ -9,6 +9,7 @@ description = "Task and workflow types, dependency graph, and output placeholder
 
 [dependencies]
 beez-policy.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

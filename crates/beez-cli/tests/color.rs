@@ -6,7 +6,7 @@ use std::error::Error;
 
 use beez_test_support::TemporaryDirectory;
 
-mod common;
+pub mod common;
 
 const RESET: &str = "\u{1b}[0m";
 const BOLD: &str = "\u{1b}[1m";
@@ -39,11 +39,9 @@ fn run_coloured(name: &str, output: &str) -> Result<(Option<i32>, String), Box<d
     let directory = TemporaryDirectory::new(name)?;
     let workflow = directory.write("workflow.yaml", WORKFLOW)?;
 
-    let result = common::beez()
+    let result = common::beez_in(&directory)
         .args(["run", "workflow", "--output", output, "--color", "always"])
         .arg(workflow)
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"))
         .output()?;
 
     Ok((result.status.code(), String::from_utf8(result.stderr)?))

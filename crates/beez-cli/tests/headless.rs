@@ -8,7 +8,7 @@ use std::process::{Command, Output};
 
 use beez_test_support::{TemporaryDirectory, extended_path, fake_harness};
 
-mod common;
+pub mod common;
 
 /// `beez-process` unit tests cover each harness's arguments; this pins the result relay.
 #[test]
@@ -102,7 +102,7 @@ fn rejects_a_prompt_that_starts_with_a_hyphen_without_a_separator() {
     let directory = TemporaryDirectory::new("cli-unquoted-hyphen").unwrap();
     fake_harness(&directory, "pi", 0).unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "pi", "--print me"])
         .env("PATH", directory.path())
         .output()
@@ -130,7 +130,7 @@ fn runs_a_workflow_codex_task_with_a_model_and_effort() {
 
     let output = beez_with_harnesses(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
@@ -158,7 +158,7 @@ fn runs_a_workflow_harness_task_with_a_model_and_effort() {
 
     let output = beez_with_harnesses(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
@@ -233,17 +233,20 @@ fn rejects_an_unsupported_workflow_harness() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(output.stdout, b"");
     assert_eq!(
-        output.stderr,
-        b"unknown headless harness \"cursor\"; expected one of pi, omp, claude, codex\n"
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "error: cannot load workflow {}\n  caused by: unknown headless harness \"cursor\"; expected one of pi, omp, claude, codex\n",
+            workflow.display()
+        )
     );
 }
 
@@ -251,7 +254,7 @@ fn rejects_an_unsupported_workflow_harness() {
 fn reports_when_a_harness_cannot_start() {
     let directory = TemporaryDirectory::new("cli-missing-harness").unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "pi", "inspect the repository"])
         .env("PATH", directory.path())
         .output()
@@ -304,7 +307,7 @@ fn runs_a_yaml_workflow_in_dependency_order() {
         ))
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .output()
@@ -332,7 +335,7 @@ fn prefixes_every_line_of_every_task_that_runs_together() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .output()
@@ -369,7 +372,7 @@ fn returns_a_failed_workflow_status_and_blocks_dependents() {
         ))
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--color", "never"])
         .arg(workflow)
         .output()
@@ -400,9 +403,9 @@ fn runs_a_json_workflow() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
@@ -425,17 +428,20 @@ fn reports_invalid_workflow_manifests() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(output.stdout, b"");
     assert_eq!(
-        output.stderr,
-        b"task test depends on unknown task prepare\n"
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "error: cannot load workflow {}\n  caused by: task test depends on unknown task prepare\n",
+            workflow.display()
+        )
     );
 }
 
@@ -444,15 +450,21 @@ fn rejects_a_workflow_without_tasks() {
     let directory = TemporaryDirectory::new("cli-empty-workflow").unwrap();
     let workflow = directory.write("workflow.yaml", "tasks: []\n").unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(output.stdout, b"");
-    assert_eq!(output.stderr, b"workflow must define at least one task\n");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "error: cannot load workflow {}\n  caused by: workflow must define at least one task\n",
+            workflow.display()
+        )
+    );
 }
 
 #[test]
@@ -465,7 +477,7 @@ fn groups_each_task_behind_a_status_line() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
         .output()
@@ -500,7 +512,7 @@ fn prefixes_every_line_with_its_task_in_stream_mode() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--output", "stream", "--color", "never"])
         .arg(workflow)
         .output()
@@ -538,9 +550,9 @@ fn reports_a_blocked_task_and_counts_it_in_the_summary() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
@@ -565,9 +577,9 @@ fn relays_a_single_task_workflow_without_decoration() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow"])
-        .arg(workflow)
+        .arg(&workflow)
         .output()
         .unwrap();
 
@@ -595,7 +607,7 @@ fn closes_each_grouped_task_with_its_status_line() {
 
     // Both streams share one file description, so the file keeps the order
     // Beez wrote them, the way a terminal shows it.
-    let status = beez_in(&directory)
+    let status = common::beez_in(&directory)
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
         .stdout(stdout)
@@ -646,7 +658,7 @@ fn keeps_a_grouped_block_off_the_status_line() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--output", "grouped"])
         .arg(workflow)
         .output()
@@ -674,7 +686,7 @@ fn stamps_a_grouped_line_when_it_arrives() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args([
             "run",
             "workflow",
@@ -724,7 +736,7 @@ fn stamps_every_line_with_a_utc_date_and_time() {
         )
         .unwrap();
 
-    let output = beez_in(&directory)
+    let output = common::beez_in(&directory)
         .args(["run", "workflow", "--timestamps", "--color", "never"])
         .arg(workflow)
         .output()
@@ -753,18 +765,9 @@ fn stamps_every_line_with_a_utc_date_and_time() {
     }
 }
 
-/// `beez` run from `directory`, logging into its `logs` subdirectory.
-fn beez_in(directory: &TemporaryDirectory) -> Command {
-    let mut command = common::beez();
-    command
-        .current_dir(directory.path())
-        .env("BEEZ_LOG_DIR", directory.join("logs"));
-    command
-}
-
-/// [`beez_in`] with `directory` first on `PATH`, so its harness stubs run.
+/// [`common::beez_in`] with `directory` first on `PATH`, so its harness stubs run.
 fn beez_with_harnesses(directory: &TemporaryDirectory) -> Command {
-    let mut command = beez_in(directory);
+    let mut command = common::beez_in(directory);
     command.env("PATH", extended_path(directory.path()));
     command
 }
@@ -788,7 +791,21 @@ fn rejects_an_invalid_sandbox_domain_rule() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(std::str::from_utf8(&output.stderr).unwrap().contains("`*`"));
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(stderr.contains("`*`"), "{stderr}");
+    assert!(stderr.contains("--allow-domain"), "{stderr}");
+}
+
+#[test]
+fn rejects_an_empty_sandbox_write_path() {
+    let output = common::beez()
+        .args(["run", "command", "--allow-write", "", "true"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(stderr.contains("--allow-write"), "{stderr}");
 }
 
 #[test]

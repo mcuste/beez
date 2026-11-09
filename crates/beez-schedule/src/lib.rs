@@ -12,9 +12,10 @@ mod error;
 mod instant;
 mod offset;
 mod schedule;
+mod text;
 
 pub use cron_schedule::CronSchedule;
 pub use error::ScheduleError;
-pub use instant::{format_instant, parse_instant};
+pub use instant::{Utc, parse_instant};
 pub use offset::UtcOffset;
 pub use schedule::Schedule;

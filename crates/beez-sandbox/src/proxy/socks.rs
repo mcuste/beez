@@ -64,6 +64,7 @@ fn negotiate_auth(client: &mut TcpStream) -> io::Result<bool> {
 fn read_target(client: &mut TcpStream) -> io::Result<Option<Target>> {
     let [_, command, _, address_type] = read_exact::<4>(client)?;
     if command != SOCKS_CONNECT {
+        tracing::debug!(command, "unsupported SOCKS command");
         socks_reply(client, SOCKS_COMMAND_UNSUPPORTED)?;
         return Ok(None);
     }
@@ -77,12 +78,14 @@ fn read_target(client: &mut TcpStream) -> io::Result<Option<Target>> {
         // The allowlist names hosts, so a literal address can never match it.
         SOCKS_ADDRESS_IPV4 => {
             let _ = read_exact::<6>(client)?;
+            tracing::debug!("denied: SOCKS target is a literal IPv4 address");
             crate::diagnostic::report("denied SOCKS connection to a literal IPv4 address");
             socks_reply(client, SOCKS_NOT_ALLOWED)?;
             return Ok(None);
         }
         SOCKS_ADDRESS_IPV6 => {
             let _ = read_exact::<18>(client)?;
+            tracing::debug!("denied: SOCKS target is a literal IPv6 address");
             crate::diagnostic::report("denied SOCKS connection to a literal IPv6 address");
             socks_reply(client, SOCKS_NOT_ALLOWED)?;
             return Ok(None);
@@ -111,8 +114,8 @@ pub(super) fn serve_socks(mut client: TcpStream, rules: &Rules) -> io::Result<()
     let upstream = match connect(rules, &target) {
         Ok(upstream) => upstream,
         Err(error) => {
-            let _ = socks_reply(&mut client, connect_failure_status(&error));
-            return Err(error.into_io(&target));
+            tracing::debug!(%target, ?error, "SOCKS proxy cannot connect");
+            return socks_reply(&mut client, connect_failure_status(&error));
         }
     };
     socks_reply(&mut client, SOCKS_SUCCEEDED)?;
@@ -127,14 +130,12 @@ fn connect_failure_status(error: &ConnectError) -> u8 {
     match error {
         ConnectError::Denied => SOCKS_NOT_ALLOWED,
         ConnectError::Unresolved => SOCKS_HOST_UNREACHABLE,
-        ConnectError::Io(_) => SOCKS_GENERAL_FAILURE,
+        ConnectError::Io => SOCKS_GENERAL_FAILURE,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-
     use super::{
         SOCKS_GENERAL_FAILURE, SOCKS_HOST_UNREACHABLE, SOCKS_NOT_ALLOWED, connect_failure_status,
     };
@@ -142,8 +143,6 @@ mod tests {
 
     #[test]
     fn answers_only_a_policy_refusal_with_not_allowed() {
-        let refused_by_the_system = io::Error::from(io::ErrorKind::PermissionDenied);
-
         assert_eq!(
             connect_failure_status(&ConnectError::Denied),
             SOCKS_NOT_ALLOWED
@@ -153,7 +152,7 @@ mod tests {
             SOCKS_HOST_UNREACHABLE
         );
         assert_eq!(
-            connect_failure_status(&ConnectError::Io(refused_by_the_system)),
+            connect_failure_status(&ConnectError::Io),
             SOCKS_GENERAL_FAILURE
         );
     }

@@ -81,9 +81,17 @@ impl FilesystemPolicy {
         self
     }
 
-    /// True when Beez's default paths apply.
+    /// True when processes may write the host's temporary directory.
+    ///
+    /// Beez's default paths grant it along with `/tmp`, wherever the host
+    /// keeps it.
     #[must_use]
-    pub fn defaults(&self) -> bool {
+    pub fn writes_temporary_directory(&self) -> bool {
+        self.defaults()
+    }
+
+    /// True when Beez's default paths apply.
+    fn defaults(&self) -> bool {
         self.defaults.get_or(true)
     }
 
@@ -95,10 +103,10 @@ impl FilesystemPolicy {
 
     /// Paths processes may write, including the harness's own state.
     #[must_use]
-    pub fn write_allow(&self, profile: Option<&HarnessProfile>) -> Vec<SandboxPath> {
+    pub fn write_allow(&self, profile: Option<HarnessProfile>) -> Vec<SandboxPath> {
         let mut paths = self.default_paths_and(&DEFAULT_WRITE_ALLOW_GROUPS, &self.write_allow);
         if let Some(profile) = profile {
-            paths.extend(profile.state_paths().iter().cloned());
+            paths.extend(profile.state_paths());
         }
         paths
     }
@@ -208,7 +216,7 @@ mod tests {
 
         assert!(sut.read_deny().contains(&path("~/.ssh")));
         assert!(sut.read_deny().contains(&path("~/.config/secrets")));
-        let write_allow = sut.write_allow(Some(&profile));
+        let write_allow = sut.write_allow(Some(profile));
         assert!(write_allow.contains(&path(".")));
         assert!(write_allow.contains(&path("/tmp")));
         assert!(write_allow.contains(&path("/data")));

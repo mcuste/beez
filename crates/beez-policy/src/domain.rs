@@ -1,41 +1,26 @@
 use std::fmt;
+use std::num::NonZeroU16;
 use std::str::FromStr;
 
 /// Reports an invalid domain rule.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DomainRuleError {
     /// The rule has no host.
+    #[error("domain rule must name a host")]
     Empty,
     /// The host contains a character outside letters, digits, `-`, and `.`.
+    #[error("domain rule contains invalid character {0:?}")]
     InvalidCharacter(char),
     /// A `*` appears anywhere but as the first label.
+    #[error("domain rule may use `*` only as the first label")]
     MisplacedWildcard,
     /// The host has an empty label, such as `.com` or `a..b`.
+    #[error("domain rule has an empty label")]
     EmptyLabel,
     /// The port is not a number from 1 to 65535.
+    #[error("domain rule has invalid port {0:?}")]
     InvalidPort(String),
 }
-
-impl fmt::Display for DomainRuleError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("domain rule must name a host"),
-            Self::InvalidCharacter(character) => {
-                write!(
-                    formatter,
-                    "domain rule contains invalid character {character:?}"
-                )
-            }
-            Self::MisplacedWildcard => {
-                formatter.write_str("domain rule may use `*` only as the first label")
-            }
-            Self::EmptyLabel => formatter.write_str("domain rule has an empty label"),
-            Self::InvalidPort(port) => write!(formatter, "domain rule has invalid port {port:?}"),
-        }
-    }
-}
-
-impl std::error::Error for DomainRuleError {}
 
 /// A host the sandbox may reach, such as `github.com`, `*.npmjs.org`, or `pypi.org:443`.
 ///
@@ -45,9 +30,41 @@ impl std::error::Error for DomainRuleError {}
 /// for plain HTTP.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DomainRule {
-    host: String,
-    wildcard: bool,
-    port: Option<u16>,
+    host: HostPattern,
+    port: Option<NonZeroU16>,
+}
+
+/// The hosts a rule names, held in lowercase without a trailing dot.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum HostPattern {
+    /// This host only.
+    Exact(String),
+    /// Every subdomain of this host, but not the host itself.
+    Subdomains(String),
+}
+
+impl HostPattern {
+    /// True when the pattern names `host`.
+    ///
+    /// A subdomain needs at least one label before the suffix, and no label of
+    /// the host may be empty.
+    fn matches(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.');
+        let suffix = match self {
+            Self::Exact(exact) => return host.eq_ignore_ascii_case(exact),
+            Self::Subdomains(suffix) => suffix,
+        };
+        let Some(split) = host.len().checked_sub(suffix.len()) else {
+            return false;
+        };
+        let (Some(prefix), Some(tail)) = (host.get(..split), host.get(split..)) else {
+            return false;
+        };
+        tail.eq_ignore_ascii_case(suffix)
+            && prefix
+                .strip_suffix('.')
+                .is_some_and(|labels| labels.split('.').all(|label| !label.is_empty()))
+    }
 }
 
 impl DomainRule {
@@ -56,28 +73,7 @@ impl DomainRule {
     /// A rule without a port grants `default_port` and no other.
     #[must_use]
     pub fn matches(&self, host: &str, port: u16, default_port: u16) -> bool {
-        self.port.unwrap_or(default_port) == port && self.matches_host(host)
-    }
-
-    /// True when the rule names `host`, whatever the port.
-    ///
-    /// A wildcard needs at least one label before its suffix, and no label of
-    /// the host may be empty.
-    fn matches_host(&self, host: &str) -> bool {
-        let host = host.trim_end_matches('.');
-        if !self.wildcard {
-            return host.eq_ignore_ascii_case(&self.host);
-        }
-        let Some(split) = host.len().checked_sub(self.host.len()) else {
-            return false;
-        };
-        let (Some(prefix), Some(suffix)) = (host.get(..split), host.get(split..)) else {
-            return false;
-        };
-        suffix.eq_ignore_ascii_case(&self.host)
-            && prefix
-                .strip_suffix('.')
-                .is_some_and(|labels| labels.split('.').all(|label| !label.is_empty()))
+        self.port.map_or(default_port, NonZeroU16::get) == port && self.host.matches(host)
     }
 }
 
@@ -88,10 +84,8 @@ impl FromStr for DomainRule {
         let (host, port) = match value.rsplit_once(':') {
             Some((host, port)) => {
                 let port = port
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|port| *port != 0)
-                    .ok_or_else(|| DomainRuleError::InvalidPort(port.to_owned()))?;
+                    .parse::<NonZeroU16>()
+                    .map_err(|_| DomainRuleError::InvalidPort(port.to_owned()))?;
                 (host, Some(port))
             }
             None => (value, None),
@@ -118,9 +112,13 @@ impl FromStr for DomainRule {
             return Err(DomainRuleError::InvalidCharacter(character));
         }
 
+        let host = host.to_ascii_lowercase();
         Ok(Self {
-            host: host.to_ascii_lowercase(),
-            wildcard,
+            host: if wildcard {
+                HostPattern::Subdomains(host)
+            } else {
+                HostPattern::Exact(host)
+            },
             port,
         })
     }
@@ -128,10 +126,10 @@ impl FromStr for DomainRule {
 
 impl fmt::Display for DomainRule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.wildcard {
-            formatter.write_str("*.")?;
+        match &self.host {
+            HostPattern::Exact(host) => formatter.write_str(host)?,
+            HostPattern::Subdomains(host) => write!(formatter, "*.{host}")?,
         }
-        formatter.write_str(&self.host)?;
         if let Some(port) = self.port {
             write!(formatter, ":{port}")?;
         }

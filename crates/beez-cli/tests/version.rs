@@ -1,6 +1,6 @@
 //! Tests the compiled Beez CLI.
 
-mod common;
+pub mod common;
 
 #[test]
 fn reports_release_version() {

@@ -153,7 +153,7 @@ fn host_header(target: &Target) -> String {
 fn connect_failure_status(error: &ConnectError) -> &'static str {
     match error {
         ConnectError::Denied => "403 Forbidden",
-        ConnectError::Unresolved | ConnectError::Io(_) => "502 Bad Gateway",
+        ConnectError::Unresolved | ConnectError::Io => "502 Bad Gateway",
     }
 }
 
@@ -167,20 +167,19 @@ pub(super) fn serve_http(mut client: TcpStream, rules: &Rules) -> io::Result<()>
         }
     };
     let Some(request) = parse_request(&head) else {
+        tracing::debug!(bytes = head.len(), "malformed HTTP proxy request");
         return respond(&mut client, "400 Bad Request");
     };
+    tracing::trace!(target = %request.target(), access = ?request.access(), "HTTP proxy request");
 
     if !rules.permits(request.target(), request.access()) {
         return respond(&mut client, "403 Forbidden");
     }
     let mut upstream = match connect(rules, request.target()) {
         Ok(upstream) => upstream,
-        Err(ConnectError::Denied) => {
-            return respond(&mut client, connect_failure_status(&ConnectError::Denied));
-        }
         Err(error) => {
-            let _ = respond(&mut client, connect_failure_status(&error));
-            return Err(error.into_io(request.target()));
+            tracing::debug!(target = %request.target(), ?error, "HTTP proxy cannot connect");
+            return respond(&mut client, connect_failure_status(&error));
         }
     };
     match request {
@@ -373,8 +372,6 @@ mod tests {
 
     #[test]
     fn answers_only_a_policy_refusal_with_forbidden() {
-        let refused_by_the_system = io::Error::from(io::ErrorKind::PermissionDenied);
-
         assert_eq!(
             connect_failure_status(&ConnectError::Denied),
             "403 Forbidden"
@@ -383,9 +380,6 @@ mod tests {
             connect_failure_status(&ConnectError::Unresolved),
             "502 Bad Gateway"
         );
-        assert_eq!(
-            connect_failure_status(&ConnectError::Io(refused_by_the_system)),
-            "502 Bad Gateway"
-        );
+        assert_eq!(connect_failure_status(&ConnectError::Io), "502 Bad Gateway");
     }
 }

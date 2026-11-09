@@ -2,15 +2,15 @@
 
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use anstream::AutoStream;
 use anstyle::{AnsiColor, Color, Effects, Style};
-use beez_process::{OutputStream, ProcessOutput};
+use beez_process::ProcessOutput;
 use beez_record::{
-    Labels, LogSettings, OpenLog, RunRecorder, RunTally, RunTarget, TaskOutcome, TaskState,
-    VERB_WIDTH, seconds, stream_mark, trim_newline, utc,
+    Labels, LogFailure, LogSettings, OpenLog, RunTarget, TaskOutcome, TaskState, VERB_WIDTH,
+    seconds, stream_mark, trim_newline, utc,
 };
 use beez_runner::RunEvent;
 use clap::{Args, ValueEnum};
@@ -105,12 +105,7 @@ const DIM: Style = Style::new().effects(Effects::DIMMED);
 /// What the reporter does with each line, and what it keeps to do it.
 enum Layout {
     /// Prefix every line, with a spinner for each running task.
-    Stream {
-        /// The spinner row of each task, while the task runs.
-        spinners: Vec<Option<ProgressBar>>,
-        /// How every spinner row is drawn.
-        style: ProgressStyle,
-    },
+    Stream(Spinners),
     /// Collect a task and print it behind status lines when it ends.
     Grouped {
         /// The rendered output of each task, until the task ends.
@@ -123,9 +118,49 @@ enum Layout {
 impl Layout {
     fn name(&self) -> &'static str {
         match self {
-            Self::Stream { .. } => "Stream",
+            Self::Stream(_) => "Stream",
             Self::Grouped { .. } => "Grouped",
             Self::Plain => "Plain",
+        }
+    }
+}
+
+/// One spinner row for each running task.
+struct Spinners {
+    bars: MultiProgress,
+    /// The spinner row of each task, while the task runs.
+    slots: Vec<Option<ProgressBar>>,
+    /// How every spinner row is drawn.
+    style: ProgressStyle,
+}
+
+impl Spinners {
+    fn new(tasks: usize) -> Self {
+        Self {
+            bars: MultiProgress::with_draw_target(ProgressDrawTarget::stderr()),
+            slots: vec![None; tasks],
+            style: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
+        }
+    }
+
+    /// Shows one running task as a spinner row of its own.
+    fn start(&mut self, index: usize, prefix: String) {
+        if let Some(slot) = self.slots.get_mut(index) {
+            let bar = self
+                .bars
+                .add(ProgressBar::new_spinner().with_style(self.style.clone()));
+            bar.set_prefix(prefix);
+            bar.set_message("running");
+            // Without a steady tick the spinner moves only when a line arrives.
+            bar.enable_steady_tick(Duration::from_millis(80));
+            *slot = Some(bar);
+        }
+    }
+
+    fn stop(&mut self, index: usize) {
+        if let Some(bar) = self.slots.get_mut(index).and_then(Option::take) {
+            bar.finish_and_clear();
+            self.bars.remove(&bar);
         }
     }
 }
@@ -150,6 +185,7 @@ struct Streams {
 /// goes through here, including diagnostics from sandbox threads. The run log
 /// sits here for the same reason.
 struct Terminal {
+    /// The spinner rows of a stream layout, held still around every write.
     bars: Option<MultiProgress>,
     streams: Mutex<Streams>,
     log: Mutex<OpenLog>,
@@ -162,7 +198,6 @@ pub(crate) struct Reporter {
     layout: Layout,
     labels: Labels,
     terminal: Arc<Terminal>,
-    tally: RunTally,
 }
 
 impl std::fmt::Debug for Reporter {
@@ -186,9 +221,14 @@ impl Reporter {
     ) -> Self {
         let labels = target.labels();
         let layout = resolve_layout(render.output, labels.len());
-        let bars = matches!(layout, Layout::Stream { .. })
-            .then(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr()));
-        let choice = color_choice(render.color);
+        let bars = match &layout {
+            Layout::Stream(spinners) => {
+                crate::trace::hold_still(&spinners.bars);
+                Some(spinners.bars.clone())
+            }
+            Layout::Grouped { .. } | Layout::Plain => None,
+        };
+        let choice = render.color.into();
         let (log, failure) = OpenLog::open(settings, target, working_directory);
         let directory = log.directory().map(Path::to_path_buf);
         let terminal = Arc::new(Terminal {
@@ -210,7 +250,6 @@ impl Reporter {
             layout,
             labels,
             terminal,
-            tally: RunTally::default(),
         }
     }
 
@@ -229,51 +268,19 @@ impl Reporter {
         })
     }
 
-    pub(crate) fn event(&mut self, event: &RunEvent) -> io::Result<()> {
+    pub(crate) fn event(&mut self, event: &RunEvent<'_>) -> io::Result<()> {
         self.terminal.log(|log| log.event(event));
         let index = event.position();
-        self.tally.record(event);
 
-        if let RunEvent::Output { stream, line, .. } = event {
-            return self.output(index, *stream, line);
-        }
         match &mut self.layout {
-            Layout::Plain => {
-                // A plain run relays the captured streams of its one task,
-                // and keeps its status lines to the log.
-                return match event {
-                    RunEvent::Finished { output, .. } => self.terminal.captured(output),
-                    _ => Ok(()),
-                };
+            Layout::Plain => plain_event(&self.terminal, event),
+            Layout::Stream(spinners) => {
+                stream_event(&self.terminal, &self.labels, spinners, index, event)
             }
-            // A stream layout shows a running task as a spinner row, not a line.
-            Layout::Stream { spinners, style } => {
-                if matches!(event, RunEvent::Started { .. }) {
-                    let prefix = prefix(&self.labels, index);
-                    start_spinner(&self.terminal, spinners, style, index, prefix);
-                    return Ok(());
-                }
-                // Every other event ends the task, so its spinner goes.
-                stop_spinner(&self.terminal, spinners, index);
-            }
-            // The status line closes the task, so its collected output comes
-            // first. A task finishes once, so its buffer goes with it.
             Layout::Grouped { buffers } => {
-                if matches!(event, RunEvent::Finished { .. }) {
-                    let buffer = buffers.get_mut(index).map(std::mem::take);
-                    self.terminal
-                        .bytes(Target::Out, &buffer.unwrap_or_default())?;
-                }
+                grouped_event(&self.terminal, &self.labels, buffers, index, event)
             }
         }
-
-        let Some((state, message)) =
-            TaskOutcome::of(event).map(|outcome| outcome.status(&self.labels.get(index)))
-        else {
-            return Ok(());
-        };
-        // The event wrote this line to the run log already.
-        self.show(style_of(state), state.verb(), &message)
     }
 
     /// Prints the closing summary of a decorated run, then writes its record.
@@ -285,78 +292,103 @@ impl Reporter {
             let _ = bars.clear();
         }
 
-        let style = if self.tally.failed() > 0 { RED } else { GREEN };
-        let message = self.tally.summary(self.terminal.started.elapsed());
-        self.terminal.log(|log| log.finish(&message, exit_status));
+        let (failed, message) = self.terminal.finish_log(exit_status);
+        let style = if failed > 0 { RED } else { GREEN };
 
-        self.show(style, "Summary", &message)
-    }
-
-    fn output(&mut self, index: usize, stream: OutputStream, line: &[u8]) -> io::Result<()> {
-        match &mut self.layout {
-            // Plain relays the captured streams once the task ends.
-            Layout::Plain => Ok(()),
-            Layout::Grouped { buffers } => {
-                let rendered = grouped_line(&self.terminal, line);
-                if let Some(buffer) = buffers.get_mut(index) {
-                    buffer.extend_from_slice(rendered.as_bytes());
-                }
-                Ok(())
-            }
-            Layout::Stream { .. } => {
-                // Unstyled, so a task keeps the colours it chose.
-                let text = String::from_utf8_lossy(trim_newline(line));
-                let line = format!(
-                    "{} {} {text}",
-                    prefix(&self.labels, index),
-                    paint(DIM, stream_mark(stream))
-                );
-                self.terminal.line(Target::Out, &line)
-            }
-        }
-    }
-
-    /// Shows one status line on the terminal, for a line the log already holds.
-    ///
-    /// A plain run keeps its terminal free of Beez's lines, so there the line
-    /// reaches the log alone.
-    fn show(&self, style: Style, verb: &str, message: &str) -> io::Result<()> {
+        // A plain run keeps its terminal free of Beez's lines, so there the
+        // line reaches the log alone.
         if matches!(self.layout, Layout::Plain) {
             return Ok(());
         }
-
         self.terminal
-            .line(Target::Err, &styled_status(style, verb, message))
+            .line(Target::Err, &styled_status(style, "Summary", &message))
     }
 }
 
-/// Shows one running task as a spinner row of its own.
-fn start_spinner(
+/// A plain run relays the captured streams of its one task once it ends,
+/// and keeps its status lines to the log.
+fn plain_event(terminal: &Terminal, event: &RunEvent<'_>) -> io::Result<()> {
+    match event {
+        RunEvent::Finished { output, .. } => terminal.captured(output),
+        _ => Ok(()),
+    }
+}
+
+/// Prefixes every line, and shows a running task as a spinner row, not a line.
+fn stream_event(
     terminal: &Terminal,
-    spinners: &mut [Option<ProgressBar>],
-    style: &ProgressStyle,
+    labels: &Labels,
+    spinners: &mut Spinners,
     index: usize,
-    prefix: String,
-) {
-    if let (Some(bars), Some(slot)) = (&terminal.bars, spinners.get_mut(index)) {
-        let bar = bars.add(ProgressBar::new_spinner().with_style(style.clone()));
-        bar.set_prefix(prefix);
-        bar.set_message("running");
-        // Without a steady tick the spinner moves only when a line arrives.
-        bar.enable_steady_tick(Duration::from_millis(80));
-        *slot = Some(bar);
-    }
-}
-
-fn stop_spinner(terminal: &Terminal, spinners: &mut [Option<ProgressBar>], index: usize) {
-    if let Some(slot) = spinners.get_mut(index)
-        && let Some(bar) = slot.take()
-    {
-        bar.finish_and_clear();
-        if let Some(bars) = &terminal.bars {
-            bars.remove(&bar);
+    event: &RunEvent<'_>,
+) -> io::Result<()> {
+    match event {
+        RunEvent::Output { stream, line, .. } => {
+            // Unstyled, so a task keeps the colours it chose.
+            let text = String::from_utf8_lossy(trim_newline(line));
+            let line = format!(
+                "{} {} {text}",
+                prefix(labels, index),
+                paint(DIM, stream_mark(*stream))
+            );
+            terminal.line(Target::Out, &line)
+        }
+        RunEvent::Started { .. } => {
+            spinners.start(index, prefix(labels, index));
+            Ok(())
+        }
+        // Every other event ends the task, so its spinner goes.
+        _ => {
+            spinners.stop(index);
+            status_line(terminal, labels, index, event)
         }
     }
+}
+
+/// Collects a task's lines, and prints them before the status line that
+/// closes the task. A task finishes once, so its buffer goes with it.
+fn grouped_event(
+    terminal: &Terminal,
+    labels: &Labels,
+    buffers: &mut [Vec<u8>],
+    index: usize,
+    event: &RunEvent<'_>,
+) -> io::Result<()> {
+    match event {
+        RunEvent::Output { line, .. } => {
+            let rendered = grouped_line(terminal, line);
+            if let Some(buffer) = buffers.get_mut(index) {
+                buffer.extend_from_slice(rendered.as_bytes());
+            }
+            Ok(())
+        }
+        RunEvent::Finished { .. } => {
+            let buffer = buffers.get_mut(index).map(std::mem::take);
+            terminal.bytes(Target::Out, &buffer.unwrap_or_default())?;
+            status_line(terminal, labels, index, event)
+        }
+        _ => status_line(terminal, labels, index, event),
+    }
+}
+
+/// Shows the status line of an event that changes its task's state.
+///
+/// The event wrote this line to the run log already.
+fn status_line(
+    terminal: &Terminal,
+    labels: &Labels,
+    index: usize,
+    event: &RunEvent<'_>,
+) -> io::Result<()> {
+    let Some((state, message)) =
+        TaskOutcome::of(event).map(|outcome| outcome.status(&labels.get(index)))
+    else {
+        return Ok(());
+    };
+    terminal.line(
+        Target::Err,
+        &styled_status(style_of(state), state.verb(), &message),
+    )
 }
 
 /// Renders one line for its task's block, with its own newline. A blank
@@ -427,15 +459,15 @@ impl Terminal {
 
     /// Records one of Beez's own status lines in the run log.
     fn record(&self, verb: &str, message: &str) {
-        self.log(|log| log.status(verb, message));
+        self.log(|log| log.write(|recorder| recorder.status(verb, message)));
     }
 
     /// Writes to the run log, and warns once on its first failed write.
-    fn log(&self, action: impl FnOnce(&mut RunRecorder) -> io::Result<()>) {
+    fn log(&self, action: impl FnOnce(&mut OpenLog) -> Option<LogFailure>) {
         let Ok(mut log) = self.log.lock() else {
             return;
         };
-        let failure = log.write(action);
+        let failure = action(&mut log);
         // The warning writes a line of its own, so the log lock goes first.
         drop(log);
         if let Some(failure) = failure {
@@ -443,9 +475,26 @@ impl Terminal {
         }
     }
 
+    /// Closes the run log, and returns how many tasks failed and the
+    /// summary line.
+    fn finish_log(&self, exit_status: Option<i32>) -> (usize, String) {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let failed = log.failed();
+        let (summary, failure) = log.finish(self.started.elapsed(), exit_status);
+        // The warning writes a line of its own, so the log lock goes first.
+        drop(log);
+        if let Some(failure) = failure {
+            self.warn(&failure);
+        }
+        (failed, summary)
+    }
+
     /// Says why the run log could not be written.
-    fn warn(&self, failure: &str) {
-        let _ = self.line(Target::Err, &styled_status(YELLOW, "Warning", failure));
+    fn warn(&self, failure: &LogFailure) {
+        let _ = self.line(
+            Target::Err,
+            &styled_status(YELLOW, "Warning", &failure.to_string()),
+        );
     }
 
     /// Holds the spinners still, then takes the stream lock, always in this
@@ -459,10 +508,9 @@ impl Terminal {
     }
 
     fn locked(&self, action: impl FnOnce(&mut Streams) -> io::Result<()>) -> io::Result<()> {
-        let mut streams = self
-            .streams
-            .lock()
-            .map_err(|_| io::Error::other("output lock is poisoned"))?;
+        // A writer that panicked leaves at most part of a line behind, so the
+        // streams stay usable.
+        let mut streams = self.streams.lock().unwrap_or_else(PoisonError::into_inner);
         action(&mut streams)
     }
 }
@@ -480,7 +528,7 @@ impl Streams {
 fn announce(
     terminal: &Terminal,
     directory: Option<&Path>,
-    failure: Option<String>,
+    failure: Option<LogFailure>,
     working_directory: &Path,
 ) {
     if let Some(directory) = directory {
@@ -541,21 +589,20 @@ fn resolve_layout(mode: OutputMode, tasks: usize) -> Layout {
         return Layout::Plain;
     }
     match mode {
-        OutputMode::Stream => Layout::Stream {
-            spinners: vec![None; tasks],
-            style: spinner_style("{spinner:.dim} {prefix} {msg} {elapsed:.dim}"),
-        },
+        OutputMode::Stream => Layout::Stream(Spinners::new(tasks)),
         OutputMode::Grouped => Layout::Grouped {
             buffers: vec![Vec::new(); tasks],
         },
     }
 }
 
-fn color_choice(color: ColorMode) -> anstream::ColorChoice {
-    match color {
-        ColorMode::Auto => anstream::ColorChoice::global(),
-        ColorMode::Always => anstream::ColorChoice::Always,
-        ColorMode::Never => anstream::ColorChoice::Never,
+impl From<ColorMode> for anstream::ColorChoice {
+    fn from(color: ColorMode) -> Self {
+        match color {
+            ColorMode::Auto => Self::global(),
+            ColorMode::Always => Self::Always,
+            ColorMode::Never => Self::Never,
+        }
     }
 }
 

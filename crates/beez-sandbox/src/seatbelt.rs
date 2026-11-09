@@ -56,10 +56,12 @@ pub(crate) fn wrap(
     ports: ProxyPorts,
     arguments: &[OsString],
 ) -> io::Result<Wrapped> {
+    let profile = profile(resolved, ports)?;
+    tracing::trace!(%profile, "seatbelt profile");
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .arg("-p")
-        .arg(profile(resolved, ports)?)
+        .arg(profile)
         .arg(resolved.program())
         .args(arguments);
     Ok(Wrapped {
@@ -134,7 +136,7 @@ pub(crate) fn profile(resolved: &ResolvedSandbox, ports: ProxyPorts) -> io::Resu
         "(allow network-outbound (remote ip \"localhost:{}\") (remote ip \"localhost:{}\"))",
         ports.http, ports.socks
     );
-    if resolved.localhost {
+    if resolved.network.localhost {
         profile.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
     }
 
@@ -231,7 +233,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{profile, quote};
-    use crate::proxy::ProxyPorts;
+    use crate::proxy::{NetworkRules, ProxyPorts};
     use crate::resolve::{ExecAllowlist, Execution, PathSet, ResolvedSandbox};
 
     const PORTS: ProxyPorts = ProxyPorts {
@@ -241,8 +243,7 @@ mod tests {
 
     fn resolved() -> ResolvedSandbox {
         ResolvedSandbox {
-            allowed_domains: Vec::new(),
-            localhost: false,
+            network: NetworkRules::default(),
             read_deny: PathSet::from([PathBuf::from("/Users/me/.ssh")]),
             write_allow: PathSet::from([
                 PathBuf::from("/Users/me/work"),
@@ -290,7 +291,7 @@ mod tests {
     #[test]
     fn opens_localhost_and_restricts_executables_on_request() {
         let mut resolved = resolved();
-        resolved.localhost = true;
+        resolved.network.localhost = true;
         resolved.execution = Execution::Only(ExecAllowlist::new(
             PathBuf::from("/bin/bash"),
             [PathBuf::from("/usr")],

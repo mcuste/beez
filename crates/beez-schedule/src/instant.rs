@@ -1,8 +1,9 @@
 //! One instant, as a UTC date and time.
 
+use std::fmt;
 use std::time::SystemTime;
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 
 use crate::error::ScheduleError;
 
@@ -21,30 +22,42 @@ pub fn parse_instant(value: &str) -> Result<SystemTime, ScheduleError> {
     Ok(SystemTime::from(parsed))
 }
 
-/// Writes one instant as a UTC date and time, to the second.
-#[must_use]
-pub fn format_instant(time: SystemTime) -> String {
-    DateTime::<Utc>::from(time)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+/// Writes one instant as a UTC date and time, to the second, such as
+/// `2026-09-10T03:00:00Z`, without building a string first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Utc(pub SystemTime);
+
+impl fmt::Display for Utc {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        DateTime::<chrono::Utc>::from(self.0)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .fmt(formatter)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_instant, parse_instant};
+    use super::{Utc, parse_instant};
+
+    #[test]
+    fn writes_an_instant_in_place() {
+        let time = parse_instant("2026-09-10T05:00:00+02:00").unwrap();
+
+        assert_eq!(format!("at {}", Utc(time)), "at 2026-09-10T03:00:00Z");
+    }
 
     #[test]
     fn reads_and_writes_a_utc_instant() {
         let time = parse_instant("2026-09-10T03:00:00Z").unwrap();
 
-        assert_eq!(format_instant(time), "2026-09-10T03:00:00Z");
+        assert_eq!(Utc(time).to_string(), "2026-09-10T03:00:00Z");
     }
 
     #[test]
     fn keeps_the_instant_an_offset_names() {
         let time = parse_instant("2026-09-10T05:00:00+02:00").unwrap();
 
-        assert_eq!(format_instant(time), "2026-09-10T03:00:00Z");
+        assert_eq!(Utc(time).to_string(), "2026-09-10T03:00:00Z");
     }
 
     #[test]

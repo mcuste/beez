@@ -7,5 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "Sandbox policy for beez: paths, hosts, programs, groups, and harness defaults"
 
+[dependencies]
+thiserror.workspace = true
+
 [lints]
 workspace = true

@@ -22,10 +22,11 @@ impl ExecutionRequest {
         }
     }
 
-    pub(crate) fn into_process_call(self) -> ProcessCall {
+    /// The harness this request prompts, if any, and the process to start.
+    pub(crate) fn into_parts(self) -> (Option<HeadlessHarness>, ProcessCall) {
         match self {
-            Self::Harness(call) => call.into(),
-            Self::Command(call) => call,
+            Self::Harness(call) => (Some(call.harness()), call.into()),
+            Self::Command(call) => (None, call),
         }
     }
 }

@@ -10,39 +10,82 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::init_request::{ExecRestriction, InitRequest};
 use crate::proxy::loopback;
 use crate::relay::Relay;
 use crate::server::{Server, forward};
 
 const RELAY_START_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Reports why a sandbox helper could not set the sandbox up or keep serving.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    /// Starting a relay, or executing the program, failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// The sandboxed program could not be executed.
+    #[error("sandbox cannot run {}", .program.display())]
+    Exec {
+        /// The program the sandbox runs.
+        program: PathBuf,
+        /// Why `execve` failed.
+        #[source]
+        source: io::Error,
+    },
+    /// An allowed executable could not be opened for the Landlock ruleset.
+    #[error("sandbox cannot open executable {}", .path.display())]
+    OpenExecutable {
+        /// The executable the policy allows.
+        path: PathBuf,
+        /// Why it could not be opened.
+        #[source]
+        source: landlock::PathFdError,
+    },
+    /// A step of building or applying the Landlock ruleset failed.
+    #[error("sandbox {step}")]
+    Landlock {
+        /// The step that failed.
+        step: &'static str,
+        /// What Landlock reported.
+        #[source]
+        source: landlock::RulesetError,
+    },
+    /// The kernel cannot enforce the executable allowlist.
+    #[error("sandbox cannot restrict executables: the kernel has no Landlock support")]
+    NoLandlock,
+    /// The relay stopped accepting connections.
+    #[error("sandbox relay stopped accepting connections")]
+    RelayStopped,
+}
+
 /// Starts the proxy relays, restricts execution, then replaces itself with the program.
 ///
 /// Returns only on failure.
-pub fn init(
-    relays: &[Relay],
-    executables: Option<&[PathBuf]>,
-    program: &Path,
-    arguments: &[OsString],
-) -> io::Result<()> {
+pub fn init(request: &InitRequest) -> Result<(), InitError> {
     let beez = std::env::current_exe()?;
-    for relay in relays {
-        let address = loopback(relay.port().get());
+    for relay in &request.relays {
         let mut child = Command::new(&beez)
             .arg("sandbox-relay")
-            .arg("--listen")
-            .arg(address.to_string())
-            .arg("--socket")
-            .arg(relay.socket())
+            .arg(OsString::from(relay))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .spawn()?;
-        await_relay(&mut child, address, RELAY_START_TIMEOUT)?;
+        await_relay(
+            &mut child,
+            loopback(relay.port().get()),
+            RELAY_START_TIMEOUT,
+        )?;
     }
-    if let Some(executables) = executables {
+    if let ExecRestriction::Only(executables) = &request.execution {
         restrict_execution(executables)?;
     }
-    Err(Command::new(program).args(arguments).exec())
+    let source = Command::new(&request.program)
+        .args(&request.arguments)
+        .exec();
+    Err(InitError::Exec {
+        program: request.program.clone(),
+        source,
+    })
 }
 
 /// Waits for the relay `child` to listen on `address`.
@@ -56,9 +99,9 @@ fn await_relay(child: &mut Child, address: SocketAddr, timeout: Duration) -> io:
     })
 }
 
-/// Names the step that failed, because the cause alone reads as a bare errno.
-fn context(step: &str, error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(format!("sandbox {step}: {error}"))
+/// Names the Landlock step that failed, because the cause alone reads as a bare errno.
+fn landlock_step(step: &'static str) -> impl FnOnce(landlock::RulesetError) -> InitError {
+    move |source| InitError::Landlock { step, source }
 }
 
 fn wait_for_listener(address: SocketAddr, timeout: Duration) -> io::Result<()> {
@@ -76,7 +119,7 @@ fn wait_for_listener(address: SocketAddr, timeout: Duration) -> io::Result<()> {
 }
 
 /// Denies `execve` on every path outside the allowlist, for this process and its children.
-fn restrict_execution(executables: &[PathBuf]) -> io::Result<()> {
+fn restrict_execution(executables: &[PathBuf]) -> Result<(), InitError> {
     use landlock::{
         AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
         RulesetCreatedAttr, RulesetError, RulesetStatus,
@@ -87,38 +130,40 @@ fn restrict_execution(executables: &[PathBuf]) -> io::Result<()> {
         .map(|path| {
             PathFd::new(path)
                 .map(|fd| PathBeneath::new(fd, AccessFs::Execute))
-                .map_err(|error| {
-                    context(&format!("cannot open executable {}", path.display()), error)
+                .map_err(|source| InitError::OpenExecutable {
+                    path: path.clone(),
+                    source,
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let status = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::Execute)
-        .map_err(|error| context("cannot handle execute access", error))?
+        .map_err(landlock_step("cannot handle execute access"))?
         .create()
-        .map_err(|error| context("cannot create the execute ruleset", error))?
+        .map_err(landlock_step("cannot create the execute ruleset"))?
         .add_rules(rules.into_iter().map(Ok::<_, RulesetError>))
-        .map_err(|error| context("cannot add the executable rules", error))?
+        .map_err(landlock_step("cannot add the executable rules"))?
         .restrict_self()
-        .map_err(|error| context("cannot apply the execute ruleset", error))?;
+        .map_err(landlock_step("cannot apply the execute ruleset"))?;
     if status.ruleset == RulesetStatus::NotEnforced {
-        return Err(io::Error::other(
-            "sandbox cannot restrict executables: the kernel has no Landlock support",
-        ));
+        return Err(InitError::NoLandlock);
     }
     Ok(())
 }
 
-/// Accepts loopback TCP connections and forwards each to a Unix socket.
+/// Accepts TCP connections on the loopback port of `relay` and forwards each
+/// to its Unix socket.
 ///
 /// Returns only when the relay stops accepting, which ends the sandbox helper.
-pub fn relay(listen: SocketAddr, socket: &Path) -> io::Result<()> {
-    serve_relay(TcpListener::bind(listen)?, socket).wait();
+pub fn relay(relay: &Relay) -> Result<(), InitError> {
+    serve_relay(
+        TcpListener::bind(loopback(relay.port().get()))?,
+        relay.socket(),
+    )
+    .wait();
 
-    Err(io::Error::other(
-        "sandbox relay stopped accepting connections",
-    ))
+    Err(InitError::RelayStopped)
 }
 
 /// Forwards every connection `listener` accepts to `socket`.

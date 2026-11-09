@@ -9,6 +9,8 @@ description = "Sandbox for beez: Seatbelt on macOS, bubblewrap and Landlock on L
 
 [dependencies]
 beez-policy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"

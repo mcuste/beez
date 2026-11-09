@@ -4,24 +4,28 @@
 //! handler only send events, and each run reports its result the same way, so
 //! the job set needs no lock.
 
+use std::fmt;
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use beez_manifest::{JobSchedule, Overlap};
-use beez_schedule::format_instant;
+use beez_manifest::Overlap;
+use beez_schedule::Utc;
 use serde::Serialize;
 
 use crate::control::{self, DaemonStatus, JobId, Request, Response};
-use crate::job::{self, CatchUp, Job, Plan, WatchedManifest};
+use crate::error::{DaemonError, one_line};
+use crate::job::{self, CatchUp, Job};
+use crate::job_set::{JobSet, plan};
 use crate::message::{self, Hold, Refusal};
 use crate::paths::DaemonPaths;
+use crate::report;
 use crate::run::{self, JobRun, RunOutcome};
 use crate::store::{self, Registry, States, Watched};
-use crate::{apply, report};
 
 /// How many runs the daemon starts at the same time.
 ///
@@ -77,9 +81,27 @@ enum Event {
 #[derive(Debug, Eq, PartialEq)]
 enum Action {
     Start,
-    /// Waits for a running run to end. The reason goes in the log.
-    Queue(&'static str),
+    /// Waits for room to run. The reason goes in the log.
+    Queue(QueueReason),
     Skip,
+}
+
+/// Why a fire waits instead of starting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueueReason {
+    /// The daemon runs as many workflows as it may.
+    AtLimit,
+    /// The job's last run has not ended, and the job waits for it.
+    Overlap,
+}
+
+impl fmt::Display for QueueReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::AtLimit => "the daemon is at its run limit",
+            Self::Overlap => "its last run has not ended",
+        })
+    }
 }
 
 /// How far the daemon is on its way out.
@@ -97,16 +119,19 @@ enum Phase {
 ///
 /// One Beez root holds one daemon, and the socket itself keeps a second one
 /// out.
-pub fn run(paths: &DaemonPaths, limits: RunLimits) -> io::Result<()> {
+pub fn run(paths: &DaemonPaths, limits: RunLimits) -> Result<(), DaemonError> {
     // A service manager gives the daemon a working directory of its own, so
     // the root it resolved from it goes in the message.
-    paths.create().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot create {}: {error}", paths.directory().display()),
-        )
-    })?;
+    paths
+        .create()
+        .map_err(|source| DaemonError::CreateDirectory {
+            path: paths.directory().clone(),
+            source,
+        })?;
+    let _daemon = tracing::info_span!("daemon", pid = std::process::id()).entered();
+    tracing::info!(root = %paths.root().display(), limit = limits.limit, keep_runs = limits.keep_runs, "daemon starting");
     let listener = bind(paths)?;
+    tracing::debug!(socket = %paths.socket().display(), "bound the socket");
     let started = SystemTime::now();
     let mut daemon = Daemon::open(paths, limits, started)?;
     write_record(paths, started)?;
@@ -127,8 +152,12 @@ pub fn run(paths: &DaemonPaths, limits: RunLimits) -> io::Result<()> {
     daemon.serve();
     report::line("Daemon", "stopped");
 
-    let _ = std::fs::remove_file(paths.socket());
-    let _ = std::fs::remove_file(paths.record());
+    for file in [paths.socket().to_path_buf(), paths.record()] {
+        if let Err(error) = std::fs::remove_file(&file) {
+            tracing::debug!(file = %file.display(), %error, "cannot remove on shutdown");
+        }
+    }
+    tracing::info!("daemon stopped");
     Ok(())
 }
 
@@ -136,11 +165,10 @@ struct Daemon {
     paths: DaemonPaths,
     registry: Registry,
     states: States,
-    manifests: Vec<WatchedManifest>,
-    jobs: Vec<Job>,
+    jobs: JobSet,
     runtime: Runtime,
-    /// How many runs stay in the Beez root.
-    keep: usize,
+    /// How many runs stay in the Beez root. None keeps every run.
+    keep: Option<NonZeroUsize>,
     started: SystemTime,
     receiver: Receiver<Event>,
     phase: Phase,
@@ -150,7 +178,7 @@ struct Daemon {
 struct Runtime {
     /// How many runs are going.
     running: usize,
-    limit: usize,
+    limit: NonZeroUsize,
     /// Where a run reports that it ended.
     sender: Sender<Event>,
     /// Beez root that holds the artifacts of every run the daemon starts.
@@ -160,7 +188,7 @@ struct Runtime {
 impl Runtime {
     /// True while the daemon may start one more run.
     fn has_room(&self) -> bool {
-        self.running < self.limit
+        self.running < self.limit.get()
     }
 
     /// Starts one run of `job` on its own thread.
@@ -174,41 +202,50 @@ impl Runtime {
             fire,
         };
         self.running += 1;
-        report::line(
-            "Firing",
-            &format!("{} scheduled for {}", run.id, format_instant(fire)),
-        );
+        report::line("Firing", &format!("{} scheduled for {}", run.id, Utc(fire)));
+        tracing::info!(job = %run.id, fire = %Utc(fire), running = self.running, "run starting");
 
         let sender = self.sender.clone();
         let id = run.id.clone();
+        let span = tracing::info_span!("run", job = %run.id);
         thread::spawn(move || {
+            let _span = span.entered();
             let outcome = run::execute(&run);
-            let _ = sender.send(Event::Finished {
-                job: id,
-                outcome: Box::new(outcome),
-            });
+            tracing::info!(result = ?outcome.result, "run ended");
+            if sender
+                .send(Event::Finished {
+                    job: id,
+                    outcome: Box::new(outcome),
+                })
+                .is_err()
+            {
+                tracing::warn!("the daemon loop is gone, the run's end goes unrecorded");
+            }
         });
     }
 }
 
 impl Daemon {
-    fn open(paths: &DaemonPaths, limits: RunLimits, started: SystemTime) -> io::Result<Self> {
+    fn open(
+        paths: &DaemonPaths,
+        limits: RunLimits,
+        started: SystemTime,
+    ) -> Result<Self, DaemonError> {
         let (registry, states) = store::load_all(paths)?;
-        let (manifests, jobs) = job::build(&registry, &states);
+        let jobs = JobSet::build(&registry, &states);
         let (sender, receiver) = mpsc::channel();
         let mut daemon = Self {
             paths: paths.clone(),
             registry,
             states,
-            manifests,
             jobs,
             runtime: Runtime {
                 running: 0,
-                limit: limits.limit.max(1),
+                limit: NonZeroUsize::new(limits.limit).unwrap_or(NonZeroUsize::MIN),
                 sender,
                 root: paths.root().to_path_buf(),
             },
-            keep: limits.keep_runs,
+            keep: NonZeroUsize::new(limits.keep_runs),
             started,
             receiver,
             phase: Phase::Serving,
@@ -216,7 +253,7 @@ impl Daemon {
         // A daemon that was down may have passed a fire, so this is the one
         // place a job may still run it.
         let now = SystemTime::now();
-        for job in &mut daemon.jobs {
+        for job in daemon.jobs.iter_mut() {
             plan(job, now, CatchUp::Allow);
         }
 
@@ -226,20 +263,29 @@ impl Daemon {
     /// Takes commands off the socket on their own thread.
     fn listen(&self, listener: UnixListener) {
         let sender = self.runtime.sender.clone();
+        let span = tracing::Span::current();
         thread::spawn(move || {
+            let _span = span.entered();
             for stream in listener.incoming() {
-                let Ok(stream) = stream else {
-                    continue;
+                let stream = match stream {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::debug!(%error, "accept on the socket failed");
+                        continue;
+                    }
                 };
                 match control::read_request(&stream) {
                     Ok(request) => {
+                        tracing::debug!(?request, "socket request");
                         if sender.send(Event::Command(request, stream)).is_err() {
                             return;
                         }
                     }
                     Err(error) => {
-                        let response = Response::error(error.to_string());
-                        let _ = control::write_line(&stream, &response);
+                        // A liveness probe connects and sends nothing, so this is common.
+                        tracing::trace!(%error, "unreadable socket request");
+                        let response = Response::error(one_line(&error));
+                        answer(&stream, &response);
                     }
                 }
             }
@@ -270,7 +316,9 @@ impl Daemon {
             self.rescan(now);
             self.fire_due(now);
 
-            match self.receiver.recv_timeout(self.sleep(now)) {
+            let sleep = self.sleep(now);
+            tracing::trace!(?sleep, running = self.runtime.running, "waiting");
+            match self.receiver.recv_timeout(sleep) {
                 Ok(event) => self.handle(event),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -304,7 +352,8 @@ impl Daemon {
         match event {
             Event::Command(request, stream) => {
                 let response = self.command(request);
-                let _ = control::write_line(&stream, &response);
+                tracing::trace!(?response, "socket reply");
+                answer(&stream, &response);
             }
             Event::Finished { job, outcome } => self.finished(&job, &outcome),
             Event::Signal => self.signal(),
@@ -312,6 +361,7 @@ impl Daemon {
     }
 
     fn signal(&mut self) {
+        tracing::info!(phase = ?self.phase, "signal received");
         match self.phase {
             Phase::Serving => {
                 self.begin_stopping();
@@ -336,9 +386,9 @@ impl Daemon {
         match request {
             Request::Status => Response::Status(DaemonStatus {
                 pid: std::process::id(),
-                started: format_instant(self.started),
+                started: Utc(self.started).to_string(),
                 running: self.runtime.running,
-                jobs: self.jobs.iter().map(Job::report).collect(),
+                jobs: self.jobs.reports(),
             }),
             Request::Add {
                 manifest,
@@ -361,25 +411,20 @@ impl Daemon {
             path: manifest,
             working_directory,
         };
-        let jobs = job::jobs_of(&watched, &self.states);
-        let others = self
-            .jobs
-            .iter()
-            .filter(|other| other.manifest != watched.path)
-            .map(|other| other.id.clone());
-        let names = match job::admit(&jobs, others) {
-            Ok(ids) => ids
-                .iter()
-                .map(JobId::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
+        let jobs = match self.jobs.admit(&watched, &self.states) {
+            Ok(jobs) => jobs,
             Err(refusal) => return refusal.into(),
         };
-        let watching = match apply::watch(&mut self.registry, &self.paths, watched.clone()) {
+        let names = jobs
+            .iter()
+            .map(|job| job.id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let watching = match self.registry.watch(watched.clone()) {
             Ok(watching) => watching,
-            Err(error) => return Response::error(message::unwritable_registry(&error)),
+            Err(error) => return Refusal::Unwritable(error).into(),
         };
-        self.install(&watched, jobs, now);
+        self.jobs.install(&watched, jobs, now);
         report::line(
             "Watching",
             &format!("{} as {names}", watched.path.display()),
@@ -389,13 +434,13 @@ impl Daemon {
     }
 
     fn remove(&mut self, manifest: &Path) -> Response {
-        let stopped = match apply::unwatch(&mut self.registry, &self.paths, manifest) {
+        let stopped = match self.registry.unwatch(manifest) {
             Ok(Ok(stopped)) => stopped,
             Ok(Err(refusal)) => return refusal.into(),
-            Err(error) => return Response::error(message::unwritable_registry(&error)),
+            Err(error) => return Refusal::Unwritable(error).into(),
         };
         // A run of this manifest keeps going, and reports itself as it ends.
-        self.retain_manifests(|path| path != manifest);
+        self.jobs.retain(|path| path != manifest);
         self.prune_states();
         report::line("Watching", &format!("dropped {}", manifest.display()));
 
@@ -403,11 +448,11 @@ impl Daemon {
     }
 
     fn hold(&mut self, id: &JobId, hold: Hold, now: SystemTime) -> Response {
-        let Some(job) = find(&mut self.jobs, id) else {
+        let Some(job) = self.jobs.find_mut(id) else {
             return Refusal::UnknownJob(id.clone()).into();
         };
         job.state.paused = hold.paused();
-        save_state(&mut self.states, &self.paths, job);
+        save_state(&mut self.states, job);
         plan(job, now, CatchUp::Refuse);
         let answer = message::held(id, hold);
         report::line("Job", &answer);
@@ -416,20 +461,25 @@ impl Daemon {
     }
 
     fn trigger(&mut self, id: &JobId, now: SystemTime) -> Response {
-        let Some(job) = find(&mut self.jobs, id) else {
+        let Some(job) = self.jobs.find_mut(id) else {
             return Refusal::UnknownJob(id.clone()).into();
         };
+        // A run started now would hold the daemon back from stopping.
+        if self.phase != Phase::Serving {
+            return Refusal::Stopping.into();
+        }
         if let Some(error) = job.error() {
-            return Response::error(format!("{id} cannot run: {error}"));
+            return Refusal::CannotRun {
+                job: id.clone(),
+                reason: error.to_owned(),
+            }
+            .into();
         }
         if job.is_running() {
-            return Response::error(format!("{id} is already running"));
+            return Refusal::AlreadyRunning(id.clone()).into();
         }
         if !self.runtime.has_room() {
-            return Response::error(format!(
-                "the daemon already runs {} workflows",
-                self.runtime.limit
-            ));
+            return Refusal::AtLimit(self.runtime.limit.get()).into();
         }
         // A triggered run stands beside the schedule, so it moves no fire.
         self.runtime.start(job, now);
@@ -439,13 +489,8 @@ impl Daemon {
 
     /// Reads a manifest again when the file changed.
     fn rescan(&mut self, now: SystemTime) {
-        let changed: Vec<Watched> = self
-            .manifests
-            .iter()
-            .filter(|entry| job::modified_at(&entry.watched.path) != entry.modified)
-            .map(|entry| entry.watched.clone())
-            .collect();
-        for watched in &changed {
+        for watched in &self.jobs.changed() {
+            tracing::debug!(manifest = %watched.path.display(), "manifest changed, reloading");
             report::line("Reload", &format!("{} changed", watched.path.display()));
             self.reload(watched, now);
         }
@@ -465,7 +510,8 @@ impl Daemon {
         }
         let watched: Vec<Watched> = self.registry.manifests().to_vec();
         // A manifest that left the list keeps its running run, and nothing else.
-        self.retain_manifests(|path| watched.iter().any(|entry| entry.path == path));
+        self.jobs
+            .retain(|path| watched.iter().any(|entry| entry.path == path));
         for entry in &watched {
             self.reload(entry, now);
         }
@@ -476,68 +522,24 @@ impl Daemon {
     /// Reads one manifest again and replaces its jobs.
     fn reload(&mut self, watched: &Watched, now: SystemTime) {
         let fresh = job::jobs_of(watched, &self.states);
-        self.install(watched, fresh, now);
-    }
-
-    /// Replaces the jobs of one manifest with `fresh`, keeping what is going on.
-    fn install(&mut self, watched: &Watched, mut fresh: Vec<Job>, now: SystemTime) {
-        for job in &mut fresh {
-            if let Some(old) = self.jobs.iter().find(|old| old.id == job.id) {
-                job.carry_from(old);
-            }
-            if job.next_fire.is_none() {
-                plan(job, now, CatchUp::Refuse);
-            }
-        }
-        self.jobs.retain(|job| job.manifest != watched.path);
-        self.jobs.extend(fresh);
-        self.remember_modified(watched);
-        // The state stays, because a manifest that stopped loading holds no
-        // jobs for a moment, and its history must survive the mistake.
-        for job in self.jobs.iter().filter(|job| job.manifest == watched.path) {
-            if let Some(error) = job.error() {
-                report::line("Broken", &format!("{}: {error}", job.id));
-            }
-        }
-    }
-
-    /// Drops the jobs and the watch of every manifest `keep` refuses.
-    fn retain_manifests(&mut self, keep: impl Fn(&Path) -> bool) {
-        self.jobs.retain(|job| keep(&job.manifest));
-        self.manifests.retain(|entry| keep(&entry.watched.path));
-    }
-
-    fn remember_modified(&mut self, watched: &Watched) {
-        let modified = job::modified_at(&watched.path);
-        match self
-            .manifests
-            .iter_mut()
-            .find(|entry| entry.watched.path == watched.path)
-        {
-            Some(entry) => {
-                entry.watched = watched.clone();
-                entry.modified = modified;
-            }
-            None => self.manifests.push(WatchedManifest {
-                watched: watched.clone(),
-                modified,
-            }),
-        }
+        tracing::debug!(manifest = %watched.path.display(), jobs = fresh.len(), "reloaded manifest");
+        self.jobs.install(watched, fresh, now);
     }
 
     fn fire_due(&mut self, now: SystemTime) {
         if self.phase != Phase::Serving {
             return;
         }
-        for job in &mut self.jobs {
+        for job in self.jobs.iter_mut() {
             if job.is_ready() && job.next_fire.is_some_and(|fire| fire <= now) {
-                fire(job, &mut self.runtime, &mut self.states, &self.paths, now);
+                fire(job, &mut self.runtime, &mut self.states, now);
             }
         }
     }
 
     fn finished(&mut self, id: &JobId, outcome: &RunOutcome) {
         self.runtime.running = self.runtime.running.saturating_sub(1);
+        tracing::debug!(job = %id, running = self.runtime.running, "run finished");
         match &outcome.result {
             Err(error) => report::line("Failed", &format!("{id}: {error}")),
             Ok(0) => report::line("Finished", &format!("{id}: {}", outcome.summary)),
@@ -546,14 +548,14 @@ impl Daemon {
                 &format!(
                     "{id}: {} ({})",
                     outcome.summary,
-                    beez_record::status_text(Some(*status))
+                    beez_record::TaskExit::Code(*status)
                 ),
             ),
         }
         // A manifest that stopped being watched while it ran has no job left.
-        if let Some(job) = find(&mut self.jobs, id) {
+        if let Some(job) = self.jobs.find_mut(id) {
             job.run_ended(outcome);
-            save_state(&mut self.states, &self.paths, job);
+            save_state(&mut self.states, job);
         }
         self.sweep();
         self.start_queued();
@@ -574,132 +576,107 @@ impl Daemon {
             return;
         }
         while self.runtime.has_room() {
-            let Some(job) = self
-                .jobs
-                .iter_mut()
-                .find(|job| job.queued && job.is_ready() && !job.is_running())
-            else {
+            let Some((job, fire)) = self.jobs.iter_mut().find_map(|job| {
+                let fire = job.queued?;
+                (job.is_ready() && job.may_start()).then_some((job, fire))
+            }) else {
                 return;
             };
-            let fire = job.state.last_fire.unwrap_or_else(SystemTime::now);
+            tracing::debug!(job = %job.id, fire = %Utc(fire), "starting a queued fire");
             self.runtime.start(job, fire);
         }
     }
 
     fn prune_states(&mut self) {
         self.states.keep_watched(&self.registry);
-        write_states(&self.states, &self.paths);
+        warn_unsaved(self.states.save());
     }
 }
 
-/// The job with `id`, when the daemon holds it.
-fn find<'jobs>(jobs: &'jobs mut [Job], id: &JobId) -> Option<&'jobs mut Job> {
-    jobs.iter_mut().find(|job| job.id == *id)
-}
-
 /// Starts, queues or drops one due fire, then plans the fire after it.
-fn fire(
-    job: &mut Job,
-    runtime: &mut Runtime,
-    states: &mut States,
-    paths: &DaemonPaths,
-    now: SystemTime,
-) {
+fn fire(job: &mut Job, runtime: &mut Runtime, states: &mut States, now: SystemTime) {
     let fire = job.next_fire.unwrap_or(now);
     let action = action(job, runtime.running, runtime.limit);
+    tracing::debug!(job = %job.id, fire = %Utc(fire), ?action, "job due");
     // The fire happened, whatever comes of it, so the schedule moves on.
     job.state.last_fire = Some(fire);
     match action {
         Action::Start => runtime.start(job, fire),
-        Action::Queue(reason) => queue(job, reason),
+        Action::Queue(reason) => queue(job, reason, fire),
         Action::Skip => report::line(
             "Skipped",
             &format!(
                 "{} scheduled for {}, its last run has not ended",
                 job.id,
-                format_instant(fire)
+                Utc(fire)
             ),
         ),
     }
-    save_state(states, paths, job);
+    save_state(states, job);
     plan(job, now, CatchUp::Refuse);
 }
 
 /// What a fire of `job` leads to while `running` runs of at most `limit` go.
-fn action(job: &Job, running: usize, limit: usize) -> Action {
-    if running >= limit {
+fn action(job: &Job, running: usize, limit: NonZeroUsize) -> Action {
+    if running >= limit.get() {
         // The limit never drops work, so a fire waits instead.
-        return Action::Queue("the daemon is at its run limit");
+        return Action::Queue(QueueReason::AtLimit);
     }
     if !job.is_running() {
         return Action::Start;
     }
-    match job
-        .schedule()
-        .map_or(Overlap::Skip, JobSchedule::on_overlap)
-    {
+    match job.on_overlap() {
         Overlap::Skip => Action::Skip,
-        Overlap::Queue => Action::Queue("its last run has not ended"),
+        Overlap::Queue => Action::Queue(QueueReason::Overlap),
         Overlap::Parallel => Action::Start,
     }
 }
 
-fn queue(job: &mut Job, reason: &str) {
+fn queue(job: &mut Job, reason: QueueReason, fire: SystemTime) {
     // One waiting fire per job, so a stuck job cannot pile them up.
-    if job.queued {
+    if job.queued.is_some() {
+        tracing::debug!(job = %job.id, %reason, "dropped a fire, one already waits");
         report::line("Dropped", &format!("{}, a fire is already waiting", job.id));
         return;
     }
-    job.queued = true;
+    job.queued = Some(fire);
+    tracing::debug!(job = %job.id, %reason, "queued a fire");
     report::line("Queued", &format!("{}, {reason}", job.id));
 }
 
-/// Plans the next fire of one job, and logs a fire it passed.
-fn plan(job: &mut Job, now: SystemTime, catch_up: CatchUp) {
-    match job.plan(now, catch_up) {
-        Some(Plan::CatchUp(missed)) => report::line(
-            "Catch-up",
-            &format!(
-                "{} missed {}, running it now",
-                job.id,
-                format_instant(missed)
-            ),
-        ),
-        Some(Plan::Missed(missed)) => report::line(
-            "Missed",
-            &format!("{} missed {}", job.id, format_instant(missed)),
-        ),
-        None => {}
-    }
+/// Records the state of one job, and logs a state that could not be written.
+fn save_state(states: &mut States, job: &Job) {
+    warn_unsaved(states.record(&job.id, job.state.clone()));
 }
 
-fn save_state(states: &mut States, paths: &DaemonPaths, job: &Job) {
-    states.set(&job.id, job.state.clone());
-    write_states(states, paths);
-}
-
-fn write_states(states: &States, paths: &DaemonPaths) {
-    if let Err(error) = states.save(&paths.state()) {
+/// Logs a state that could not be written. The daemon goes on regardless.
+fn warn_unsaved(saved: io::Result<()>) {
+    if let Err(error) = saved {
         report::line("Warning", &format!("cannot write the state: {error}"));
     }
 }
 
+/// Writes the reply to one socket request. A client that hung up misses it.
+fn answer(stream: &UnixStream, response: &Response) {
+    if let Err(error) = control::write_line(stream, response) {
+        tracing::trace!(%error, "cannot write the socket reply");
+    }
+}
+
 /// Binds the socket, which also keeps a second daemon out.
-fn bind(paths: &DaemonPaths) -> io::Result<UnixListener> {
+fn bind(paths: &DaemonPaths) -> Result<UnixListener, DaemonError> {
     match UnixListener::bind(paths.socket()) {
         Ok(listener) => Ok(listener),
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
             if control::is_running(paths.socket()) {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    message::already_running(paths.root()),
-                ));
+                return Err(DaemonError::AlreadyRunning(paths.root().to_path_buf()));
             }
             // Nothing answers, so the socket belongs to a daemon that died.
+            tracing::info!(socket = %paths.socket().display(), "removing a stale socket");
             std::fs::remove_file(paths.socket())?;
-            UnixListener::bind(paths.socket())
+            Ok(UnixListener::bind(paths.socket())?)
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -708,7 +685,7 @@ fn write_record(paths: &DaemonPaths, started: SystemTime) -> io::Result<()> {
         schema: SCHEMA,
         pid: std::process::id(),
         socket: paths.socket().to_path_buf(),
-        started: format_instant(started),
+        started: Utc(started).to_string(),
     };
 
     store::save_json(&paths.record(), &record)
@@ -724,16 +701,19 @@ fn waiting_message(running: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     use beez_test_support::TemporaryDirectory;
 
-    use super::{Action, Daemon, RunLimits, action};
-    use crate::job::testing::job;
-    use crate::paths::DaemonPaths;
-    use crate::store::{States, testing};
+    use std::num::NonZeroUsize;
 
-    const LIMIT: usize = 2;
+    use super::{Action, Daemon, QueueReason, RunLimits, action};
+    use crate::control::{Condition, JobId, Response};
+    use crate::job::testing::{at, job};
+    use crate::paths::DaemonPaths;
+    use crate::store::{Registry, States, Watched, testing};
+
+    const LIMIT: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
     /// What a fire leads to for a job with `on_overlap`, while `running` of
     /// the daemon's runs go and the job itself runs or not.
@@ -752,17 +732,18 @@ mod tests {
     fn starts_a_fire_of_a_job_that_does_not_run() {
         for overlap in ["skip", "queue", "parallel"] {
             assert_eq!(act(overlap, false, 0), Action::Start, "{overlap}");
-            assert_eq!(act(overlap, false, LIMIT - 1), Action::Start, "{overlap}");
+            assert_eq!(
+                act(overlap, false, LIMIT.get() - 1),
+                Action::Start,
+                "{overlap}"
+            );
         }
     }
 
     #[test]
     fn follows_the_overlap_policy_of_a_job_that_runs() {
         assert_eq!(act("skip", true, 1), Action::Skip);
-        assert_eq!(
-            act("queue", true, 1),
-            Action::Queue("its last run has not ended")
-        );
+        assert_eq!(act("queue", true, 1), Action::Queue(QueueReason::Overlap));
         assert_eq!(act("parallel", true, 1), Action::Start);
     }
 
@@ -771,12 +752,24 @@ mod tests {
         for overlap in ["skip", "queue", "parallel"] {
             for job_running in [false, true] {
                 assert_eq!(
-                    act(overlap, job_running, LIMIT),
-                    Action::Queue("the daemon is at its run limit"),
+                    act(overlap, job_running, LIMIT.get()),
+                    Action::Queue(QueueReason::AtLimit),
                     "{overlap} {job_running}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn says_why_a_fire_waits() {
+        assert_eq!(
+            QueueReason::AtLimit.to_string(),
+            "the daemon is at its run limit"
+        );
+        assert_eq!(
+            QueueReason::Overlap.to_string(),
+            "its last run has not ended"
+        );
     }
 
     #[test]
@@ -785,6 +778,163 @@ mod tests {
         job.run_started();
 
         assert_eq!(action(&job, 1, LIMIT), Action::Skip);
+    }
+
+    const TASKS: &str = "tasks:\n  - id: mark\n    sandbox: false\n    command: [\"true\"]\n";
+
+    /// A daemon that watches one manifest whose `schedule` section holds
+    /// `schedule`, with the directory that holds both.
+    fn daemon_with(name: &str, schedule: &str) -> (TemporaryDirectory, DaemonPaths, Daemon) {
+        let directory = TemporaryDirectory::new(name).unwrap();
+        let paths = DaemonPaths::new(directory.join("root"));
+        paths.create().unwrap();
+        let manifest = directory
+            .write("nightly.yaml", format!("schedule:\n{schedule}{TASKS}"))
+            .unwrap();
+        let mut registry = Registry::load(&paths.manifests()).unwrap();
+        registry.add(Watched {
+            path: manifest,
+            working_directory: directory.path().to_path_buf(),
+        });
+        registry.save().unwrap();
+        let limits = RunLimits {
+            limit: LIMIT.get(),
+            keep_runs: 0,
+        };
+        let daemon = Daemon::open(&paths, limits, SystemTime::now()).unwrap();
+
+        (directory, paths, daemon)
+    }
+
+    const NIGHTLY: &str = "  cron: \"0 3 * * *\"\n  allow_unsandboxed: true\n";
+
+    fn nightly() -> JobId {
+        JobId::from("nightly".to_owned())
+    }
+
+    fn error_of(response: Response) -> String {
+        match response {
+            Response::Error { message } => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reload_keeps_what_is_going_on() {
+        let (_directory, _paths, mut daemon) = daemon_with("daemon-reload-keeps", NIGHTLY);
+        let fire = at("2030-01-01T03:00:00Z");
+        let job = daemon.jobs.find_mut(&nightly()).unwrap();
+        job.run_started();
+        job.queued = Some(fire);
+        job.next_fire = Some(fire);
+
+        assert_eq!(daemon.reload_all(SystemTime::now()), 1);
+
+        let job = daemon.jobs.find_mut(&nightly()).unwrap();
+        assert!(job.is_running());
+        assert_eq!(job.queued, Some(fire));
+        assert_eq!(job.next_fire, Some(fire));
+    }
+
+    #[test]
+    fn refuses_to_trigger_a_job_in_the_same_words() {
+        let (_directory, _paths, mut daemon) = daemon_with("daemon-trigger-words", NIGHTLY);
+        let now = SystemTime::now();
+
+        assert_eq!(
+            error_of(daemon.trigger(&JobId::from("weekly".to_owned()), now)),
+            "no job named weekly"
+        );
+        daemon.runtime.running = LIMIT.get();
+        assert_eq!(
+            error_of(daemon.trigger(&nightly(), now)),
+            "the daemon already runs 2 workflows"
+        );
+        daemon.jobs.find_mut(&nightly()).unwrap().run_started();
+        assert_eq!(
+            error_of(daemon.trigger(&nightly(), now)),
+            "nightly is already running"
+        );
+    }
+
+    #[test]
+    fn refuses_to_trigger_a_broken_job_in_the_same_words() {
+        let (_directory, _paths, mut daemon) =
+            daemon_with("daemon-trigger-broken", "  cron: \"0 3 * * *\"\n");
+
+        assert_eq!(
+            error_of(daemon.trigger(&nightly(), SystemTime::now())),
+            "nightly cannot run: every task must set a sandbox, or the schedule must set allow_unsandboxed: true"
+        );
+    }
+
+    #[test]
+    fn refuses_to_trigger_a_job_while_it_stops() {
+        let (_directory, _paths, mut daemon) = daemon_with("daemon-trigger-stopping", NIGHTLY);
+        daemon.begin_stopping();
+
+        assert_eq!(
+            error_of(daemon.trigger(&nightly(), SystemTime::now())),
+            "the daemon is stopping"
+        );
+        assert_eq!(daemon.runtime.running, 0);
+    }
+
+    #[test]
+    fn starts_a_waiting_fire_of_a_parallel_job_beside_its_run() {
+        let (_directory, _paths, mut daemon) = daemon_with(
+            "daemon-queued-parallel",
+            "  cron: \"0 3 * * *\"\n  on_overlap: parallel\n  allow_unsandboxed: true\n",
+        );
+        let now = SystemTime::now();
+        // The job runs, and a fire of it waits because the daemon was full.
+        daemon.runtime.running = LIMIT.get();
+        let job = daemon.jobs.find_mut(&nightly()).unwrap();
+        job.run_started();
+        job.next_fire = Some(now);
+        super::fire(job, &mut daemon.runtime, &mut daemon.states, now);
+        // Another run ends, which makes room.
+        daemon.runtime.running = LIMIT.get() - 1;
+
+        daemon.start_queued();
+
+        assert_eq!(daemon.runtime.running, LIMIT.get());
+        assert_eq!(
+            daemon.jobs.find_mut(&nightly()).unwrap().report().condition,
+            Condition::Running
+        );
+        assert!(daemon.jobs.find_mut(&nightly()).unwrap().queued.is_none());
+    }
+
+    #[test]
+    fn a_waiting_fire_runs_as_the_fire_it_was() {
+        let (_directory, paths, mut daemon) = daemon_with("daemon-queued-fire", NIGHTLY);
+        let first = at("2026-09-10T03:00:00Z");
+        let second = at("2026-09-11T03:00:00Z");
+        daemon.runtime.running = LIMIT.get();
+        // The first fire waits for room, and the second finds it waiting.
+        for scheduled in [first, second] {
+            let job = daemon.jobs.find_mut(&nightly()).unwrap();
+            job.next_fire = Some(scheduled);
+            super::fire(job, &mut daemon.runtime, &mut daemon.states, scheduled);
+        }
+        daemon.runtime.running = 0;
+
+        daemon.start_queued();
+
+        let Ok(super::Event::Finished { outcome, .. }) =
+            daemon.receiver.recv_timeout(Duration::from_secs(30))
+        else {
+            panic!("the waiting fire did not run");
+        };
+        let directory = outcome.directory.unwrap();
+        let log =
+            std::fs::read_to_string(paths.root().join("runs").join(directory).join("run.log"))
+                .unwrap();
+        assert!(
+            log.contains("nightly scheduled for 2026-09-10T03:00:00Z"),
+            "{log}"
+        );
     }
 
     #[test]
